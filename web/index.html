@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="TokenShare — a pay-per-call marketplace for idle LLM API quota. On-chain escrow, verify-then-forward relays, USDC settlement.">
+<title>TokenShare — Pay-per-call market for idle LLM quota</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- ══ STATUS BAR ══ -->
+<header class="topbar">
+  <div class="wrap topbar-in">
+    <span class="brand">TOKENSHARE<span class="brand-dim"> / market prototype</span></span>
+    <button class="nav-toggle" aria-expanded="false" aria-controls="topnav" aria-label="Toggle navigation">[ MENU ]</button>
+    <nav class="topnav" id="topnav" aria-label="Sections">
+      <a href="#market">MARKET</a>
+      <a href="#mechanism">MECHANISM</a>
+      <a href="#state">STATE&nbsp;MACHINE</a>
+      <a href="#features">FEATURES</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<!-- ══ HERO ══ -->
+<section class="hero">
+  <div class="wrap hero-grid">
+    <div class="hero-copy">
+      <p class="kicker rv">x402 / agentic payment rails &middot; trust-minimized API supply</p>
+      <h1 class="rv" style="--d:.05s">TOKEN<br>SHARE<span class="cursor" aria-hidden="true"></span></h1>
+      <p class="tagline rv" style="--d:.1s">Idle LLM quota, sold by the call.</p>
+      <p class="lede rv" style="--d:.15s">
+        Sellers run a relay on their own API keys. Buyers lock a few cents of USDC
+        on-chain and pay per request. An escrow contract holds the funds, the relay
+        only forwards paid calls, and settlement is priced on real usage —
+        cached input, input, output. No custody, no upgrade keys, no trusted third party.
+      </p>
+      <div class="hero-cta rv" style="--d:.2s">
+        <a class="btn" href="#market">[ BROWSE MARKET ]</a>
+        <a class="btn btn-ghost" href="#mechanism">[ HOW IT WORKS ]</a>
+      </div>
+      <dl class="hero-stats rv" style="--d:.25s">
+        <div><dt>CALLS SETTLED</dt><dd>12,847</dd></div>
+        <div><dt>USDC ROUTED</dt><dd>6,412.55</dd></div>
+        <div><dt>ACTIVE LISTINGS</dt><dd>4</dd></div>
+        <div><dt>AVG SETTLE</dt><dd>1.8s</dd></div>
+      </dl>
+      <p class="mock-note">mock metrics — prototype render</p>
+    </div>
+
+    <div class="hero-term rv" style="--d:.2s">
+      <div class="term">
+        <div class="term-bar"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span><span class="term-title">buyer — one call, end to end</span></div>
+<pre class="term-body"><code><span class="t-p">$</span> tokenshare deposit --amount 0.50
+  <span class="t-d">tx 0x9f2e…a1c4 confirmed · balance</span> <span class="t-n">500000</span>
+<span class="t-p">$</span> tokenshare lock --seller 0x7A3f…9c2E --max 0.05
+  <span class="t-d">paymentId 0x4c1d…e7 · locked</span> <span class="t-n">50000</span> <span class="t-d">· ttl 600s</span>
+<span class="t-p">$</span> tokenshare call "summarize block 0x1f3a…"
+  <span class="t-d">relay:</span> isValid(0x4c1d…e7) <span class="t-g">→ true</span> <span class="t-d">· forwarding</span>
+  <span class="t-d">POST /v1/chat/completions</span> <span class="t-g">→ 200 OK</span> <span class="t-d">· 1.24s</span>
+  <span class="t-d">usage  cached_in</span> <span class="t-n">12000</span> <span class="t-d">· in</span> <span class="t-n">26400</span> <span class="t-d">· out</span> <span class="t-n">2140</span>
+  <span class="t-d">settle actual</span> <span class="t-n">45552</span> <span class="t-d">· diff</span> <span class="t-n">4448</span> <span class="t-d">→ buyer balance</span>
+  <span class="t-d">receipt EIP-712</span> <span class="t-g">✓ verified</span> <span class="t-d">against Registry</span></code></pre>
+      </div>
+      <p class="term-cap">amounts are USDC native units (6 decimals)</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══ 01 MARKET ══ -->
+<section id="market" class="section">
+  <div class="wrap">
+    <header class="sec-head rv">
+      <h2><span class="sec-num">01</span><span class="sec-rule"></span>MARKET</h2>
+      <p class="sec-sub">Registry.getListing() — every seller listing lives on-chain: endpoint, models, three-tier pricing, active flag.</p>
+      <p class="ticker" id="ticker" aria-live="off"><span class="ticker-label">LAST SETTLE</span><span id="ticker-text"></span></p>
+    </header>
+    <div class="listings" id="listings"><!-- rendered by app.js --><noscript><p class="mock-note">listings render via JavaScript — enable JS to view mock Registry state</p></noscript></div>
+    <p class="mock-note rv">mock data — prototype render of on-chain Registry state</p>
+  </div>
+</section>
+
+<!-- ══ 02 MECHANISM ══ -->
+<section id="mechanism" class="section">
+  <div class="wrap">
+    <header class="sec-head rv">
+      <h2><span class="sec-num">02</span><span class="sec-rule"></span>MECHANISM</h2>
+      <p class="sec-sub">One call, five transitions. Funds move only through the escrow; the relay never touches money and the contract never touches keys.</p>
+    </header>
+
+    <div class="flow rv">
+      <div class="fstep">
+        <span class="fnum">1</span>
+        <h3>DEPOSIT</h3>
+        <code>deposit()</code>
+        <p>Buyer funds an escrow balance in USDC. One deposit backs many calls.</p>
+      </div>
+      <div class="farrow" aria-hidden="true"></div>
+      <div class="fstep">
+        <span class="fnum">2</span>
+        <h3>LOCK</h3>
+        <code>lock(seller, maxAmount, ttl)</code>
+        <p>Reserves up to <code class="inl">maxAmount</code> for one seller and returns a fresh <code class="inl">paymentId</code> — default ttl 600s.</p>
+      </div>
+      <div class="farrow" aria-hidden="true"></div>
+      <div class="fstep">
+        <span class="fnum">3</span>
+        <h3>CALL</h3>
+        <code>isValid(paymentId)</code>
+        <p>Relay checks the lock on-chain before forwarding. An invalid proof gets a <code class="inl">402</code> — zero cost, never upstreamed.</p>
+      </div>
+      <div class="farrow" aria-hidden="true"></div>
+      <div class="ffork">
+        <div class="fstep fout fout-ok">
+          <span class="fnum">4</span>
+          <h3>SETTLE</h3>
+          <code>settle(paymentId, actual)</code>
+          <p>Usage priced in three tiers; the seller settles <code class="inl">actual ≤ max</code> and the difference returns to the buyer.</p>
+        </div>
+        <div class="ffork-split" aria-hidden="true">or</div>
+        <div class="fstep fout fout-bad">
+          <span class="fnum">5</span>
+          <h3>REFUND</h3>
+          <code>refund(paymentId)</code>
+          <p>No settle before the deadline → anyone releases the lock. Buyer made whole, always.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="term term-wide rv">
+      <div class="term-bar"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span><span class="term-title">same flow, raw — cast + relay log</span></div>
+<pre class="term-body"><code><span class="t-p">$</span> cast send $USDC <span class="t-s">"approve(address,uint256)"</span> $ESCROW 500000
+<span class="t-p">$</span> cast send $ESCROW <span class="t-s">"deposit(uint256)"</span> 500000 --rpc $MONAD_RPC
+<span class="t-p">$</span> cast send $ESCROW <span class="t-s">"lock(address,uint256,uint256)"</span> $SELLER 50000 600
+<span class="t-d"># relay: Escrow.isValid(paymentId, seller=self, minAmount=est) — false → 402, no forward</span>
+<span class="t-d"># relay: forward with seller's own OPENAI_API_KEY · stream usage from final chunk</span>
+<span class="t-d"># pricing: 12000×cached + 26400×in + 2140×out =</span> <span class="t-n">45552</span> <span class="t-d">units = 0.045552 USDC</span>
+<span class="t-p">$</span> cast send $ESCROW <span class="t-s">"settle(uint256,uint256)"</span> $PID 45552 <span class="t-d"># seller only</span>
+<span class="t-d"># buyer diff</span> <span class="t-n">4448</span> <span class="t-d">→ balances[buyer] · X-Receipt: EIP-712 {paymentId, usage, actual, seller}</span></code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- ══ 03 STATE MACHINE ══ -->
+<section id="state" class="section">
+  <div class="wrap">
+    <header class="sec-head rv">
+      <h2><span class="sec-num">03</span><span class="sec-rule"></span>ESCROW STATE MACHINE</h2>
+      <p class="sec-sub">Four states, five transitions, no admin path. Hover a state to trace its edges.</p>
+    </header>
+
+    <div class="sm-scroll rv">
+      <!-- a11y: role=img makes descendants presentational, which would silence the
+           per-state labels — so the outer svg is a labeled group, nodes are img -->
+      <svg id="smachine" viewBox="0 0 1100 480" role="group" aria-label="Escrow state machine: idle to Deposited via deposit, to Locked via lock, then either Settled via settle or Refunded via refund after the deadline." xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#5b6b7d"></path>
+          </marker>
+        </defs>
+
+        <!-- edges -->
+        <g class="edge" data-touch="idle deposited">
+          <path d="M56 170 H140" fill="none" stroke="#5b6b7d" stroke-width="1.5" marker-end="url(#arr)"></path>
+          <text x="98" y="194" text-anchor="middle" class="sm-lbl">deposit()</text>
+        </g>
+        <g class="edge" data-touch="deposited locked">
+          <path d="M350 171 H556" fill="none" stroke="#5b6b7d" stroke-width="1.5" marker-end="url(#arr)"></path>
+          <text x="453" y="100" text-anchor="middle" class="sm-lbl">lock(seller, maxAmount, ttl)</text>
+          <text x="453" y="116" text-anchor="middle" class="sm-lbl sm-dim">→ paymentId · ttl = 600s</text>
+        </g>
+        <g class="edge" data-touch="locked settled">
+          <path d="M770 150 H830 V92 H894" fill="none" stroke="#3ddc97" stroke-width="1.5" marker-end="url(#arr)"></path>
+          <text x="822" y="112" text-anchor="end" class="sm-lbl">settle(paymentId, actual)</text>
+          <text x="822" y="128" text-anchor="end" class="sm-lbl sm-dim">seller only · actual ≤ maxAmount</text>
+        </g>
+        <g class="edge" data-touch="locked refunded">
+          <path d="M770 192 H830 V312 H894" fill="none" stroke="#e06c60" stroke-width="1.5" marker-end="url(#arr)"></path>
+          <text x="822" y="262" text-anchor="end" class="sm-lbl">refund(paymentId)</text>
+          <text x="822" y="278" text-anchor="end" class="sm-lbl sm-dim">now ≥ deadline · anyone</text>
+        </g>
+        <g class="edge" data-touch="deposited idle">
+          <path d="M250 207 V292 H50 V180" fill="none" stroke="#5b6b7d" stroke-width="1.5" stroke-dasharray="5 5" marker-end="url(#arr)"></path>
+          <text x="150" y="312" text-anchor="middle" class="sm-lbl sm-dim">withdraw() · balance out anytime</text>
+        </g>
+
+        <!-- nodes -->
+        <g class="sm-node" data-node="idle" tabindex="0" role="img" aria-label="idle state">
+          <circle cx="50" cy="170" r="6" class="node-fill node-idle"></circle>
+          <text x="50" y="150" text-anchor="middle" class="sm-lbl sm-dim">idle</text>
+        </g>
+        <g class="sm-node" data-node="deposited" tabindex="0" role="img" aria-label="Deposited state">
+          <rect x="150" y="135" width="200" height="72" class="node-fill"></rect>
+          <text x="250" y="166" text-anchor="middle" class="sm-title">DEPOSITED</text>
+          <text x="250" y="188" text-anchor="middle" class="sm-sub">balances[buyer] += amount</text>
+        </g>
+        <g class="sm-node" data-node="locked" tabindex="0" role="img" aria-label="Locked state">
+          <rect x="570" y="135" width="200" height="72" class="node-fill node-locked"></rect>
+          <text x="670" y="166" text-anchor="middle" class="sm-title">LOCKED</text>
+          <text x="670" y="188" text-anchor="middle" class="sm-sub">paymentId live · 600s</text>
+        </g>
+        <g class="sm-node" data-node="settled" tabindex="0" role="img" aria-label="Settled state">
+          <rect x="900" y="60" width="170" height="64" class="node-fill node-settled"></rect>
+          <text x="985" y="88" text-anchor="middle" class="sm-title">SETTLED</text>
+          <text x="985" y="108" text-anchor="middle" class="sm-sub">actual → seller</text>
+        </g>
+        <g class="sm-node" data-node="refunded" tabindex="0" role="img" aria-label="Refunded state">
+          <rect x="900" y="280" width="170" height="64" class="node-fill node-refunded"></rect>
+          <text x="985" y="308" text-anchor="middle" class="sm-title">REFUNDED</text>
+          <text x="985" y="328" text-anchor="middle" class="sm-sub">max → buyer</text>
+        </g>
+
+        <text x="20" y="452" class="sm-lbl sm-dim">solid = value flow · dashed = exit · all amounts USDC 6-decimals · no admin / no upgrade path</text>
+      </svg>
+    </div>
+
+    <ol class="sm-list rv">
+      <li><code>deposit()</code><span>→ Deposited</span></li>
+      <li><code>lock(seller, maxAmount, ttl=600)</code><span>→ Locked · emits paymentId</span></li>
+      <li><code>settle(paymentId, actual)</code><span>→ Settled · seller only · diff → buyer balance</span></li>
+      <li><code>refund(paymentId)</code><span>→ Refunded · after deadline, anyone can trigger</span></li>
+      <li><code>withdraw()</code><span>→ idle · unencumbered balance out</span></li>
+    </ol>
+  </div>
+</section>
+
+<!-- ══ 04 FEATURES ══ -->
+<section id="features" class="section">
+  <div class="wrap">
+    <header class="sec-head rv">
+      <h2><span class="sec-num">04</span><span class="sec-rule"></span>DESIGN CONSTRAINTS</h2>
+      <p class="sec-sub">The things the protocol refuses to do are the features.</p>
+    </header>
+    <div class="features">
+      <article class="card feat rv">
+        <svg class="fico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="4" y="10" width="16" height="10"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/><circle cx="12" cy="15" r="1.5"/></svg>
+        <h3>NO CUSTODY</h3>
+        <p>API keys live in the seller relay's environment only. Contracts never see a key, a prompt, or a completion. The escrow holds USDC — nothing else.</p>
+      </article>
+      <article class="card feat rv" style="--d:.05s">
+        <svg class="fico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg>
+        <h3>VERIFY, THEN FORWARD</h3>
+        <p>Every request is gated by an on-chain <code class="inl">isValid(paymentId)</code> check. Unpaid calls get a 402 and cost the seller nothing. Payment proof comes first, inference second.</p>
+      </article>
+      <article class="card feat rv" style="--d:.1s">
+        <svg class="fico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 3v18M5 8l7-5 7 5M5 16l7 5 7-5"/></svg>
+        <h3>IMMUTABLE BY DEFAULT</h3>
+        <p>No proxies, no admin keys, no upgrade path. Checks-effects-interactions on every balance move, reentrancy-guarded, bytecode identical on both chains.</p>
+      </article>
+      <article class="card feat rv" style="--d:.15s">
+        <svg class="fico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="7" cy="7" r="3.2"/><circle cx="17" cy="17" r="3.2"/><path d="M9.5 9.5l5 5"/></svg>
+        <h3>TWO CHAINS, ONE BYTECODE</h3>
+        <p>Chain-agnostic by config. Developed on <span class="chip chip-base">BASE SEPOLIA · 84532</span> delivered on <span class="chip chip-monad">MONAD TESTNET · 10143</span> — zero contract changes between them.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<!-- ══ FOOTER ══ -->
+<footer class="footer">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div>
+        <p class="foot-brand">TOKENSHARE</p>
+        <p class="foot-line">Wholesale API supply for x402 / agentic payment rails.</p>
+      </div>
+      <div>
+        <p class="foot-head">STACK</p>
+        <p class="foot-line">Solidity ^0.8.24 · Foundry<br>FastAPI · web3.py · Typer</p>
+      </div>
+      <div>
+        <p class="foot-head">CONTEXT</p>
+        <p class="foot-line">Built for the Monad Metropolis hackathon.<br>Dev on Base Sepolia, delivery on Monad testnet — same bytecode.</p>
+      </div>
+    </div>
+    <p class="foot-fine">No custody. No upgrade keys. No trusted third party. — This page is a static prototype; all listings and metrics are mock data.</p>
+  </div>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
