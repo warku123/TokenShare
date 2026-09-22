@@ -1,0 +1,5 @@
+.slim/deepwork/
+.env
+contracts/out/
+contracts/cache/
+contracts/broadcast/
