@@ -21,6 +21,7 @@ from typing import Optional
 
 import typer
 
+from . import attestation as attestation_mod
 from . import chain as chain_mod
 from . import disputes as dispute_mod
 from . import signing
@@ -43,9 +44,11 @@ Env vars required by every chain-touching command (no values are ever hardcoded)
 
 Optional env: SELLER_ADDR (default seller for call), PROMPT_TOKEN_CAP / COMPLETION_TOKEN_CAP (default lock sizing, mirrors relay defaults 200000 / 32000), TX_TIMEOUT_S (tx wait timeout).
 
-Commands: deposit (approve + deposit USDC into Escrow); lock (lock(seller, maxAmount, ttl=600) -> prints paymentId); call (pick seller -> lock NEW paymentId, or reuse via --payment-id -> read Registry listing.endpoint -> POST /v1/chat/completions with EIP-191 X-Payment-Id + X-Signature -> prints reply, X-Settle-Status, and verifies the EIP-712 X-Receipt against the Registry listing operator); balance (wallet USDC + withdrawable Escrow); refund (withdraw an expired lock after its TTL); disputes (list locally recorded receipt-verification disputes).
+Commands: deposit (approve + deposit USDC into Escrow); lock (lock(seller, maxAmount, ttl=600) -> prints paymentId); call (pick seller -> lock NEW paymentId, or reuse via --payment-id -> read Registry listing.endpoint -> POST /v1/chat/completions with EIP-191 X-Payment-Id + X-Signature -> prints reply, X-Settle-Status, and verifies the EIP-712 X-Receipt against the Registry listing operator); balance (wallet USDC + withdrawable Escrow); refund (withdraw an expired lock after its TTL); disputes (list locally recorded receipt-verification disputes); verify-attestation (best-effort off-chain parse of a TEE attestation quote + optional on-chain digest comparison).
 
 Receipt verification (BUILD_SPEC §6.3): a failed X-Receipt check prints a warning and records the paymentId in the dispute ledger (default ~/.tokenshare/disputes.json; override with --disputes-file, review via the `disputes` command).
+
+TEE attestation (M7-A): `verify-attestation` does best-effort off-chain parsing of a dstack/Phala TDX quote (--quote accepts raw hex or the relay's /attestation JSON) — header fields, the report-data address binding, and the keccak256 digest that the seller anchors via the AttestationAnchor contract; --anchor <addr> compares against the on-chain digest. Full cryptographic verification needs dstack-verifier docker (the command says so).
 
 Amounts are displayed as USDC 6dp native integers with a humanized conversion (1e6 native units = 1 USDC); amount inputs accept human USDC ("5" = 5000000 native).
 """
@@ -235,6 +238,122 @@ def disputes_cmd() -> None:
     disputes = dispute_mod.load_disputes(path)
     typer.echo(f"disputes file: {path}")
     typer.echo(dispute_mod.format_disputes(disputes))
+
+
+# ---------------------------------------------------------------------------
+# verify-attestation (M7-A TEE)
+# ---------------------------------------------------------------------------
+
+
+@app.command("verify-attestation")
+def verify_attestation_cmd(
+    quote: str = typer.Option(
+        ...,
+        "--quote",
+        help="TDX attestation quote payload: raw hex (0x optional) or the relay's /attestation JSON response.",
+    ),
+    anchor: Optional[str] = typer.Option(
+        None,
+        "--anchor",
+        help="AttestationAnchor contract address; compares the quote digest with the on-chain digest (requires the chain env vars).",
+    ),
+    app_id: Optional[str] = typer.Option(
+        None,
+        "--app-id",
+        help="appId the on-chain digest is read for (default: the TEE-derived address extracted from the quote).",
+    ),
+) -> None:
+    """Best-effort off-chain parse of a TEE attestation quote (+ anchor check).
+
+    Parses SGX/TDX quote header fields, locates the seller-address binding in
+    the 64-byte report data, and computes keccak256(raw quote bytes) — the
+    digest anchored via AttestationAnchor.anchor(bytes32). With --anchor, the
+    computed digest is compared to the on-chain digest (exit 1 on mismatch).
+    Full cryptographic verification (signature chain, MRTD/RTMR collateral)
+    requires dstack-verifier docker or the Phala cloud-api verify endpoint.
+    """
+    def body() -> None:
+        try:
+            summary = attestation_mod.parse_quote(quote)
+        except attestation_mod.AttestationError as exc:
+            _fail(str(exc))
+
+        typer.echo(f"Quote length: {summary.length} bytes")
+        typer.echo(f"Digest (keccak256, for AttestationAnchor.anchor): {summary.digest}")
+        header_bits = []
+        for label, value in (
+            ("version", summary.version),
+            ("att_key_type", summary.att_key_type),
+            ("qe_svn", summary.qe_svn),
+            ("pce_svn", summary.pce_svn),
+        ):
+            if value is not None:
+                header_bits.append(f"{label}={value}")
+        if header_bits:
+            typer.echo(f"Quote header (SGX quote v4): {' '.join(header_bits)}")
+        else:
+            typer.echo("Quote header: too short to parse (SGX quote v4 header is 48 bytes)")
+
+        if summary.report_data:
+            typer.echo(f"Report data: {summary.report_data}")
+        if summary.derived_address:
+            typer.echo(
+                f"Derived address (TEE key path wallet/ethereum/tokenshare): "
+                f"{summary.derived_address}"
+            )
+            if summary.binding_offset is not None:
+                typer.echo(f"Address binding found at quote offset {summary.binding_offset}")
+        else:
+            typer.echo(
+                "no report-data address binding found — the relay's /attestation "
+                "endpoint binds the TEE-derived seller address into reportData "
+                "(dstack key path 'wallet/ethereum/tokenshare'); a quote fetched "
+                "directly via dstack get_quote(\"\") carries none"
+            )
+
+        typer.echo(
+            "NOTE: this is structural parsing only — full off-chain verification "
+            "(signature chain, MRTD/RTMR collateral) needs the dstack-verifier "
+            "docker image, or POST https://cloud-api.phala.com/api/v1/attestations/verify"
+        )
+
+        if anchor is None:
+            return
+
+        # On-chain comparison: the anchored digest for the quote's appId.
+        # (lookup_id resolved BEFORE load_config, so a missing --app-id
+        # fails without demanding chain env vars.)
+        lookup_id = app_id or summary.derived_address
+        if not lookup_id:
+            _fail(
+                "no appId to read the anchor for: pass --app-id (the mapping key "
+                "is the seller address that ran anchor(bytes32))"
+            )
+        cfg = load_config()
+        typer.echo(f"On-chain digest (appId {lookup_id}): reading {anchor} …")
+        onchain = attestation_mod.read_anchor_digest(cfg.rpc_url, anchor, lookup_id)
+        typer.echo(f"On-chain digest: {onchain}")
+        if onchain == "0x" + "00" * 32:
+            _echo_err(
+                f"warning: no digest anchored for appId {lookup_id} — run "
+                f"`cast send {anchor} 'anchor(bytes32)' {summary.digest}` "
+                "from the relay first"
+            )
+            raise typer.Exit(code=1)
+        if onchain == summary.digest:
+            typer.secho(
+                "Match: OK — quote digest == anchored digest (quote not swapped "
+                "since anchoring)",
+                fg=typer.colors.GREEN,
+            )
+        else:
+            _echo_err(
+                f"MISMATCH: computed {summary.digest} != anchored {onchain} — "
+                "the quote is not the one anchored on-chain"
+            )
+            raise typer.Exit(code=1)
+
+    _run(body)
 
 
 # ---------------------------------------------------------------------------

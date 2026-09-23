@@ -1,0 +1,42 @@
+# TokenShare seller relay — compose for Phala Cloud TDX CVMs (M7-A).
+#
+# Deploy (manual, needs your Phala account — see README-docker.md):
+#   phala deploy -n tokenshare-relay -c docker-compose.yml -e .env -t tdx.small --wait
+#
+# Key points (per the M7 material):
+#   - /var/run/dstack.sock MUST be mounted: the seller key is derived inside
+#     the TEE via dstack get_key and /attestation serves the TDX quote.
+#   - ports 8787 (inbound via https://<app-id>-8787.<gateway-domain>).
+#   - env comes from .env (phala deploy -e .env injects it too). In TEE mode
+#     RELAY_SELLER_KEY may stay unset — it is ignored.
+services:
+  relay:
+    # Build context = repo root (the image embeds the Foundry ABI artifacts
+    # from contracts/out/ — see relay/Dockerfile).
+    build:
+      context: ..
+      dockerfile: relay/Dockerfile
+    # Phala Cloud CVMs are Intel TDX (x86_64): force the platform so builds
+    # made on Apple Silicon hosts produce an amd64 image.
+    platform: linux/amd64
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    env_file:
+      # Not fatal when absent — the relay itself fails fast on missing
+      # required vars (no degraded mode); `phala deploy -e .env` injects the
+      # same file server-side.
+      - path: .env
+        required: false
+    volumes:
+      # TEE key derivation + attestation quotes (dstack guest agent socket).
+      - /var/run/dstack.sock:/var/run/dstack.sock
+    healthcheck:
+      # python:3.12-slim has no curl/wget; use the stdlib one-liner.
+      test:
+        - CMD-SHELL
+        - python -c "import os,urllib.request as u; u.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8787')+'/health', timeout=3)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

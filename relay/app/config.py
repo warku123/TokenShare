@@ -69,6 +69,24 @@ OFFICIAL_UPSTREAM_HOSTS: Final[frozenset[str]] = frozenset(
     }
 )
 
+# ---------------------------------------------------------------------------
+# TEE mode (M7-A, Phala Cloud / dstack CVM).
+#
+# When the relay runs inside a Phala Cloud Intel-TDX CVM the dstack guest
+# agent exposes a unix socket at /var/run/dstack.sock; the seller key is then
+# DERIVED INSIDE THE TEE via dstack get_key (deterministic, never lives in
+# env vars or on disk outside the CVM). Without the socket (dev laptop /
+# CI / plain docker) the relay keeps requiring RELAY_SELLER_KEY — zero
+# behavior change outside TEE mode.
+#
+# Signing deliberately uses get_key + eth_account: the dstack Sign-RPC
+# sign() returns a 64-byte signature WITHOUT the recovery id, which cannot
+# back the EIP-191 request-auth or EIP-712 receipt signatures this relay
+# needs.
+# ---------------------------------------------------------------------------
+TEE_KEY_PATH = "wallet/ethereum/tokenshare"
+DEFAULT_DSTACK_SOCKET = "/var/run/dstack.sock"
+
 # host -> provider id (the provider identity used for model consistency).
 OFFICIAL_HOST_PROVIDER: Final[dict[str, str]] = {
     "api.openai.com": "openai",
@@ -115,6 +133,45 @@ def host_provider(base_url: str) -> str | None:
     except ValueError:
         return None
     return OFFICIAL_HOST_PROVIDER.get(host)
+
+
+def dstack_client(socket_path: str):
+    """Construct a dstack SDK client (lazy import — the 'dstack-sdk'
+    dependency is only required when the relay actually runs inside a
+    dstack CVM; importing it on a dev laptop would be dead weight)."""
+    from dstack_sdk import DstackClient
+
+    return DstackClient(socket_path)
+
+
+def _load_tee_seller_key(socket_path: str) -> str:
+    """Derive the seller key inside the TEE: DstackClient.get_key(path) →
+    hex key. Any failure raises ConfigError (fail-fast, no degraded mode);
+    the key value itself is never logged."""
+    try:
+        result = dstack_client(socket_path).get_key(TEE_KEY_PATH)
+        key = result.decode_key()
+    except ImportError as exc:
+        raise ConfigError(
+            f"dstack socket found at {socket_path!r} (TEE mode) but the "
+            "'dstack-sdk' package is not installed — add it to the relay "
+            "image (requirements.txt)"
+        ) from exc
+    except Exception as exc:
+        raise ConfigError(
+            f"dstack get_key({TEE_KEY_PATH!r}) failed: {exc}"
+        ) from exc
+    if not isinstance(key, str) or not key.strip():
+        raise ConfigError("dstack get_key returned no key material")
+    key = key.strip()
+    if not key.startswith("0x"):
+        key = "0x" + key
+    if len(key) != 66:
+        raise ConfigError(
+            "dstack get_key returned key material of unexpected length "
+            "(expected a 0x-prefixed 32-byte private key)"
+        )
+    return key
 
 
 def parse_cors_origins(raw: str | None) -> list[str]:
@@ -173,6 +230,12 @@ class Config:
     completion_token_cap: int
     verify_upstream_on_start: bool
 
+    # TEE mode (M7-A): True when the seller key was derived inside a dstack
+    # CVM (socket present). tee_socket_path is only set in TEE mode and is
+    # reused by the /attestation route for get_quote.
+    tee_mode: bool = False
+    tee_socket_path: str | None = None
+
     @property
     def seller_address(self) -> str:
         """Address derived from RELAY_SELLER_KEY (the on-chain seller)."""
@@ -204,16 +267,33 @@ def load_config() -> Config:
     except ValueError as exc:
         raise ConfigError(f"{ENV_CHAIN_ID!r} must be an integer") from exc
 
-    seller_key = _require(ENV_SELLER_KEY)
-    if not seller_key.startswith("0x") or len(seller_key) != 66:
-        raise ConfigError(
-            f"{ENV_SELLER_KEY!r} must be a 0x-prefixed 32-byte hex private key"
-        )
+    # TEE branch: when the dstack socket exists (relay runs inside a Phala
+    # Cloud CVM) the seller key is DERIVED INSIDE THE TEE and RELAY_SELLER_KEY
+    # is ignored; without the socket the env key is required exactly as before
+    # (zero behavior change outside TEE mode).
+    socket_path = DEFAULT_DSTACK_SOCKET
+    tee_mode = os.path.exists(socket_path)
+    if tee_mode:
+        seller_key = _load_tee_seller_key(socket_path)
+        if (os.environ.get(ENV_SELLER_KEY) or "").strip():
+            logger.warning(
+                "TEE mode: RELAY_SELLER_KEY is present but IGNORED — the seller "
+                "key is derived inside the CVM via dstack get_key(%r)",
+                TEE_KEY_PATH,
+            )
+    else:
+        seller_key = _require(ENV_SELLER_KEY)
+        if not seller_key.startswith("0x") or len(seller_key) != 66:
+            raise ConfigError(
+                f"{ENV_SELLER_KEY!r} must be a 0x-prefixed 32-byte hex private key"
+            )
+
     try:
         # Validate the key parses; never log or print it.
         Account.from_key(seller_key)
     except Exception as exc:
-        raise ConfigError(f"{ENV_SELLER_KEY!r} is not a valid private key") from exc
+        source = "dstack TEE" if tee_mode else ENV_SELLER_KEY
+        raise ConfigError(f"seller key from {source} is not a valid private key") from exc
 
     for name in (ENV_ESCROW_ADDR, ENV_REGISTRY_ADDR, ENV_USDC_ADDR):
         addr = _require(name)
@@ -266,4 +346,6 @@ def load_config() -> Config:
         verify_upstream_on_start=(
             os.environ.get(ENV_VERIFY_UPSTREAM_ON_START, "1").strip() != "0"
         ),
+        tee_mode=tee_mode,
+        tee_socket_path=socket_path if tee_mode else None,
     )

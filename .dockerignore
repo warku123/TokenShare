@@ -1,0 +1,11 @@
+# Build-context whitelist for the relay image (build context = repo root,
+# see relay/Dockerfile). Everything not listed below stays out of the image
+# build context — keeps builds fast and guarantees zero secrets/keys shipped.
+*
+!relay/app/
+!relay/requirements.txt
+!relay/Dockerfile
+!contracts/out/Escrow.sol/Escrow.json
+!contracts/out/Registry.sol/Registry.json
+# re-excluded after the directory re-include (order matters in dockerignore)
+relay/app/**/__pycache__/

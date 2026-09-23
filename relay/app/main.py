@@ -34,15 +34,20 @@ from typing import Any, AsyncIterator
 import httpx
 from eth_account import Account
 from eth_account.messages import encode_defunct
+from eth_utils import keccak
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .chain import ChainClient
 from .config import (
+    MODEL_PROVIDER_PREFIXES,
+    OFFICIAL_UPSTREAM_HOSTS,
+    TEE_KEY_PATH,
     Config,
     ConfigError,
     ENV_CORS_ORIGINS,
+    dstack_client,
     host_provider,
     load_config,
     parse_cors_origins,
@@ -314,6 +319,107 @@ def health() -> dict[str, Any]:
         "status": "ok",
         "chainId": st.config.chain_id,
         "seller": st.chain.seller_address,
+    }
+
+
+# ------------------------------------------------------------------- TEE M7-A
+
+
+@app.get("/attestation")
+async def attestation() -> dict[str, Any]:
+    """TDX attestation quote of this relay instance (TEE mode only).
+
+    The quote's report data is bound to the TEE-derived seller address:
+    44 zero bytes + the 20-byte address (64 B total, the TDX report-data
+    limit) — the same left-padding layout as Solidity
+    `bytes32(uint256(uint160(addr)))`. A buyer can therefore check that the
+    quote covers exactly the address it pays to.
+
+    Response: {tee, appId, keyPath, derivedAddress, reportData, quote,
+    quoteDigest}; quoteDigest = keccak256(raw quote bytes) — the value to
+    anchor in AttestationAnchor.sol. Full cryptographic verification of the
+    quote needs dstack-verifier (docker) or the Phala cloud-api verify
+    endpoint (see relay/README-docker.md).
+    """
+    st = _get_state()
+    if not st.config.tee_mode or not st.config.tee_socket_path:
+        raise HTTPException(
+            status_code=404,
+            detail="relay is not running in TEE mode (no dstack socket detected)",
+        )
+
+    derived = st.chain.seller_address
+    report_data = b"\x00" * 44 + bytes.fromhex(derived[2:])
+    try:
+        client = dstack_client(st.config.tee_socket_path)
+        quote = client.get_quote(report_data)
+        app_id = getattr(client.info(), "app_id", None)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500, detail=f"dstack attestation failed: {exc}"
+        ) from exc
+
+    # dstack-sdk returns the quote as a hex string (GetQuoteResponse.quote);
+    # tolerate a raw-bytes response for SDK-version safety.
+    raw_quote = getattr(quote, "quote", None)
+    if isinstance(raw_quote, (bytes, bytearray)):
+        quote_hex = bytes(raw_quote).hex()
+    else:
+        quote_hex = str(raw_quote or "").strip()
+    if quote_hex.startswith("0x"):
+        quote_hex = quote_hex[2:]
+
+    quote_digest: str | None = None
+    if quote_hex:
+        try:
+            quote_digest = "0x" + keccak(bytes.fromhex(quote_hex)).hex()
+        except ValueError:
+            quote_digest = None
+
+    return {
+        "tee": True,
+        "appId": app_id,
+        "keyPath": TEE_KEY_PATH,
+        "derivedAddress": derived,
+        "reportData": "0x" + report_data.hex(),
+        "quote": "0x" + quote_hex if quote_hex else None,
+        "quoteDigest": quote_digest,
+    }
+
+
+@app.get("/info")
+def info() -> dict[str, Any]:
+    """Capability / policy descriptor: TEE state, seller address, and a
+    summary of the official-endpoint upstream policy (the anti-poisoning
+    guarantee whose enforcement is attested by /attestation)."""
+    st = _get_state()
+    cfg = st.config
+    official = host_provider(cfg.openai_base_url) is not None
+    return {
+        "name": "TokenShare Seller Relay",
+        "version": "1",
+        "chainId": cfg.chain_id,
+        "seller": st.chain.seller_address,
+        "tee": {
+            "enabled": cfg.tee_mode,
+            "socketPath": cfg.tee_socket_path,
+            "keyPath": TEE_KEY_PATH if cfg.tee_mode else None,
+        },
+        "upstream": {
+            "host": _upstream_host(cfg.openai_base_url),
+            "official": official,
+            "policy": (
+                "official-endpoint-only (OFFICIAL_UPSTREAM_HOSTS allowlist)"
+                if official
+                else "custom upstream (ALLOW_CUSTOM_UPSTREAM=1 — dev/test only, "
+                "authenticity guarantee void)"
+            ),
+        },
+        "officialUpstreamHosts": sorted(OFFICIAL_UPSTREAM_HOSTS),
+        "modelProviderPrefixes": {
+            provider: list(prefixes)
+            for provider, prefixes in MODEL_PROVIDER_PREFIXES.items()
+        },
     }
 
 

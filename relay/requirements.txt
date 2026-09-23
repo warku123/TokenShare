@@ -3,3 +3,6 @@ uvicorn>=0.30,<1
 web3>=7,<8
 eth-account>=0.13,<1
 httpx>=0.27,<1
+# dstack-sdk — required ONLY in TEE mode (Phala Cloud CVM, /var/run/dstack.sock
+# present); the import is lazy, so a missing package never breaks host-mode boots.
+dstack-sdk>=0.1,<1

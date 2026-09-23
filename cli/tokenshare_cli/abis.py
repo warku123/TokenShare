@@ -159,3 +159,24 @@ ERC20_ABI = [
         "stateMutability": "nonpayable",
     },
 ]
+
+# AttestationAnchor (M7-A): read-only surface for `verify-attestation --anchor`
+# (mapping(address appId => bytes32 digest)).
+ANCHOR_ABI = [
+    {
+        "type": "function",
+        "name": "digests",
+        "inputs": [{"name": "appId", "type": "address", "internalType": "address"}],
+        "outputs": [{"name": "", "type": "bytes32", "internalType": "bytes32"}],
+        "stateMutability": "view",
+    },
+    {
+        "type": "event",
+        "name": "Anchored",
+        "anonymous": False,
+        "inputs": [
+            {"name": "appId", "type": "address", "indexed": True, "internalType": "address"},
+            {"name": "digest", "type": "bytes32", "indexed": True, "internalType": "bytes32"},
+        ],
+    },
+]
