@@ -18,6 +18,7 @@ REASON_RECOVER_MISMATCH = "receipt-recover-mismatch"
 REASON_SELLER_MISMATCH = "receipt-seller-mismatch"
 REASON_PAYMENT_ID_MISMATCH = "receipt-paymentid-mismatch"
 REASON_DECODE_FAILED = "receipt-decode-failed"
+REASON_DOMAIN_MISMATCH = "receipt-domain-mismatch"
 
 
 def resolve_path(override: str | None) -> Path:

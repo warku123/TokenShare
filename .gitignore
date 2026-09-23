@@ -1,8 +1,35 @@
-.slim/deepwork/
+# secrets / local env
 .env
+.env.local
+
+# agent local state
+.slim/
+
+# private design docs
+*.pdf
+
+# foundry artifacts
 contracts/out/
 contracts/cache/
 contracts/broadcast/
+
+# python
 __pycache__/
 *.pyc
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# node (preventive)
+node_modules/
+
+# misc
 .DS_Store
+*.log

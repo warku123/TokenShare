@@ -84,6 +84,59 @@ def test_paymentid_mismatch_flagged():
     assert check.reason == "paymentid-mismatch"
 
 
+# ---------------------------------------------------------------------------
+# m1: domain assertion (chainId/name/version)
+# ---------------------------------------------------------------------------
+
+
+def test_domain_chain_id_mismatch_fails():
+    """A receipt signed on chainId=999 must NOT verify under CLI chainId=31337."""
+    from tests.conftest import make_receipt
+
+    payload = make_receipt(SELLER_KEY, 42, seller_addr=SELLER, chain_id=999)
+    receipt = decode_receipt(receipt_header(payload))
+    check = verify_receipt(
+        receipt, expected_seller=SELLER, expected_payment_id=42, expected_chain_id=CHAIN_ID
+    )
+    assert check.ok is False
+    assert check.reason == "domain-mismatch"
+    assert check.recovered is None  # domain asserted before any crypto
+
+
+def test_domain_chain_id_match_passes():
+    payload = make_receipt_from_key(SELLER_KEY, payment_id=42)
+    receipt = decode_receipt(receipt_header(payload))
+    check = verify_receipt(
+        receipt, expected_seller=SELLER, expected_payment_id=42, expected_chain_id=CHAIN_ID
+    )
+    assert check.ok is True
+    assert check.reason is None
+
+
+def test_domain_name_or_version_tamper_fails():
+    payload = make_receipt_from_key(SELLER_KEY, payment_id=42)
+    payload["domain"]["name"] = "Evil Relay"
+    receipt = decode_receipt(receipt_header(payload))
+    check = verify_receipt(receipt, expected_seller=SELLER, expected_payment_id=42, expected_chain_id=CHAIN_ID)
+    assert check.ok is False
+    assert check.reason == "domain-mismatch"
+
+    payload2 = make_receipt_from_key(SELLER_KEY, payment_id=42)
+    payload2["domain"]["version"] = "2"
+    receipt2 = decode_receipt(receipt_header(payload2))
+    check2 = verify_receipt(receipt2, expected_seller=SELLER, expected_payment_id=42, expected_chain_id=CHAIN_ID)
+    assert check2.ok is False
+    assert check2.reason == "domain-mismatch"
+
+
+def test_domain_check_skipped_without_expected_chain_id():
+    """Back-compat: no expected_chain_id -> domain not asserted (old behavior)."""
+    payload = make_receipt(SELLER_KEY, 42, seller_addr=SELLER, chain_id=999)
+    receipt = decode_receipt(receipt_header(payload))
+    check = verify_receipt(receipt, expected_seller=SELLER, expected_payment_id=42)
+    assert check.ok is True
+
+
 def make_receipt_from_key(key: str, payment_id: int, **overrides) -> dict:
     from tests.conftest import make_receipt
 

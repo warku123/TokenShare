@@ -10,7 +10,7 @@ spinning up HTTP servers.
 
 import json as _json
 from dataclasses import dataclass, field
-from typing import Iterator
+from typing import Callable, Iterator
 
 import httpx
 
@@ -33,6 +33,10 @@ class RelayStreamHandle:
     status_code: int
     headers: dict
     lines: Iterator[str]
+    # n2: closes the underlying httpx Client + stream response. `call --stream`
+    # invokes it after `data: [DONE]` (parse breaks there) so the connection
+    # lifecycle does not leak.
+    close: Callable[[], None] | None = None
 
 
 def _headers(payment_id: int, signature: str, stream: bool) -> dict:
@@ -98,8 +102,16 @@ def open_chat_stream(
             response.close()
             client.close()
         raise RelayError(response.status_code, body)
+    def _close() -> None:
+        """Close the stream response and the client (idempotent-safe)."""
+        try:
+            response.close()
+        finally:
+            client.close()
+
     return RelayStreamHandle(
         status_code=response.status_code,
         headers={k.lower(): v for k, v in response.headers.items()},
         lines=iter(response.iter_lines()),
+        close=_close,
     )

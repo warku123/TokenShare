@@ -56,8 +56,10 @@ def recover_request_signer(method: str, path: str, raw_body: bytes, payment_id: 
 
 # ---------------------------------------------------------------------------
 # EIP-712 (relay -> CLI receipts). eth_account renamed the public entry point
-# across versions; support both so the exact PIN wording (`recover_typed_data`)
-# keeps working on any eth_account the project pins.
+# across versions; `recover_typed_data` is the PIN wording. Current eth_account
+# exposes this via Account.recover_message; the legacy
+# eth_account.messages.recover_typed_data fallback was removed as dead code
+# with an incorrect API usage (m3).
 # ---------------------------------------------------------------------------
 
 
@@ -68,18 +70,8 @@ def encode_typed_receipt(domain: dict, message: dict) -> SignableMessage:
 
 
 def recover_typed_data(signable: SignableMessage, signature: str) -> str:
-    """Recover the signer address from an EIP-712 typed-data signature.
-
-    Uses `Account.recover_message` on eth_account >= 0.13 (current pin) and
-    falls back to the historical `eth_account.messages.recover_typed_data`
-    for older versions.
-    """
-    try:
-        return Account.recover_message(signable, signature=signature)
-    except TypeError:
-        from eth_account.messages import recover_typed_data as legacy_recover
-
-        return legacy_recover(signable, signature=signature)
+    """Recover the signer address from an EIP-712 typed-data signature."""
+    return Account.recover_message(signable, signature=signature)
 
 
 def receipt_types() -> dict:

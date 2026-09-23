@@ -16,6 +16,7 @@ The default relay endpoint comes from Registry getListing(seller).endpoint;
 from dataclasses import dataclass
 import json
 import os
+import time
 from typing import Optional
 
 import typer
@@ -246,12 +247,20 @@ def call_cmd(
     prompt: str = typer.Argument(..., help="User prompt sent to the seller relay."),
     seller: Optional[str] = typer.Option(None, "--seller", help="Seller (relay operator) address; defaults to env SELLER_ADDR."),
     model: Optional[str] = typer.Option(None, "--model", help="Model name; defaults to the first model of the Registry listing."),
-    max_amount: Optional[str] = typer.Option(None, "--max", help="Lock maxAmount in USDC (human); default sized from Registry prices."),
+    max_amount: Optional[str] = typer.Option(
+        None,
+        "--max",
+        help=(
+            "Lock maxAmount in USDC (human). Default is estimated from the CLI token caps "
+            "(PROMPT_TOKEN_CAP/COMPLETION_TOKEN_CAP = 200000/32000); these may be out of sync "
+            "with the relay-side caps — on HTTP 402 pass --max explicitly."
+        ),
+    ),
     ttl: int = typer.Option(600, "--ttl", help="TTL for the auto-lock (seconds)."),
     relay: Optional[str] = typer.Option(None, "--relay", help="Override the relay endpoint (default: Registry listing endpoint)."),
     payment_id: Optional[int] = typer.Option(None, "--payment-id", help="Reuse an existing Locked payment instead of locking a new one (not PIN-defined; when absent a NEW paymentId is always locked)."),
     stream: bool = typer.Option(False, "--stream", help="Pass stream=true and render SSE deltas (bonus feature)."),
-    timeout: float = typer.Option(120.0, "--timeout", help="HTTP timeout seconds."),
+    timeout: float = typer.Option(120.0, "--timeout", help="HTTP timeout seconds; also caps the receipt GET-poll deadline (max 30s)."),
 ) -> None:
     """One-shot paid call: pick seller -> lock -> POST /v1/chat/completions -> verify receipt.
 
@@ -277,9 +286,13 @@ def call_cmd(
         _require_listing(listing, relay)
 
         endpoint = relay or listing["endpoint"]
-        model_name = model or (listing["models"][0] if listing["models"] else None)
+        if relay is not None:
+            _warn_if_plain_http(relay)
+        model_name = model or next((m for m in (listing["models"] or []) if str(m).strip()), None)
         if not model_name:
             _fail("listing has no models and --model not given")
+
+        expected_seller = str(listing["operator"] or "")
 
         active_pid = payment_id
         if active_pid is not None:
@@ -288,6 +301,12 @@ def call_cmd(
                 _fail(
                     f"payment {active_pid} is not Locked (state={_state_of(existing)}); "
                     "cannot reuse it"
+                )
+            payment_buyer = str(existing.get("buyer") or "")
+            if payment_buyer and not _same_addr(payment_buyer, ctx.address):
+                _fail(
+                    f"payment {active_pid} was locked by {payment_buyer}, not by this "
+                    f"buyer ({ctx.address}); refusing to reuse it"
                 )
             typer.echo(f"paymentId: {active_pid} (reused lock)")
         else:
@@ -304,9 +323,9 @@ def call_cmd(
         signature = signing.sign_request(cfg.private_key, "POST", RELAY_CHAT_PATH, body_bytes, active_pid)
 
         if stream:
-            _run_stream(endpoint, active_pid, signature, body_bytes, seller_addr, timeout)
+            _run_stream(endpoint, active_pid, signature, body_bytes, expected_seller, timeout, cfg.chain_id)
         else:
-            _run_json(endpoint, active_pid, signature, body_bytes, seller_addr, timeout)
+            _run_json(endpoint, active_pid, signature, body_bytes, expected_seller, timeout, cfg.chain_id)
 
     _run(body)
 
@@ -347,7 +366,7 @@ def _chat_body(prompt: str, model: str, stream: bool) -> bytes:
     return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
 
-def _run_json(endpoint: str, payment_id: int, signature: str, body_bytes: bytes, expected_seller: str, timeout: float) -> None:
+def _run_json(endpoint: str, payment_id: int, signature: str, body_bytes: bytes, expected_seller: str, timeout: float, chain_id: int) -> None:
     typer.echo(f"POST {endpoint.rstrip('/')}{RELAY_CHAT_PATH}")
     response = post_chat_json(endpoint, payment_id, signature, body_bytes, timeout)
     typer.echo(f"HTTP status: {response.status_code}")
@@ -373,14 +392,17 @@ def _run_json(endpoint: str, payment_id: int, signature: str, body_bytes: bytes,
             f"completion={usage.get('completion_tokens')}"
         )
 
-    _verify_and_report(endpoint, payment_id, response.headers, expected_seller)
+    _verify_and_report(endpoint, payment_id, response.headers, expected_seller, timeout, chain_id)
 
 
-def _run_stream(endpoint: str, payment_id: int, signature: str, body_bytes: bytes, expected_seller: str, timeout: float) -> None:
+def _run_stream(endpoint: str, payment_id: int, signature: str, body_bytes: bytes, expected_seller: str, timeout: float, chain_id: int) -> None:
     handle = open_chat_stream(endpoint, payment_id, signature, body_bytes, timeout)
     typer.echo(f"HTTP status: {handle.status_code} (stream)")
     settle = _hdr(handle.headers, "X-Settle-Status")
-    text, usage = parse_sse_lines(handle.lines)
+    try:
+        text, usage = parse_sse_lines(handle.lines)
+    finally:
+        _close_stream(handle)
     typer.echo("Reply:")
     typer.echo(text)
     if usage:
@@ -390,20 +412,46 @@ def _run_stream(endpoint: str, payment_id: int, signature: str, body_bytes: byte
             f"completion={usage.get('completion_tokens')}"
         )
     typer.echo(f"Settle status: {settle or '(header missing)'}")
-    _verify_and_report(endpoint, payment_id, handle.headers, expected_seller)
+    _verify_and_report(endpoint, payment_id, handle.headers, expected_seller, timeout, chain_id)
 
 
-def _verify_and_report(endpoint: str, payment_id: int, headers: dict, expected_seller: str) -> None:
-    """Verify X-Receipt == Registry listing operator; warn + dispute on failure."""
+def _close_stream(handle) -> None:
+    """n2: parse_sse_lines breaks on `data: [DONE]` for parsing, but the httpx
+    Client + stream response must not leak. We close (aclose) them right after
+    parsing — the relay settles server-side shortly after [DONE] passthrough,
+    so holding the connection is not needed."""
+    close = getattr(handle, "close", None)
+    if close is None:
+        return
+    try:
+        close()
+    except Exception:
+        pass
+
+
+def _verify_and_report(
+    endpoint: str,
+    payment_id: int,
+    headers: dict,
+    expected_seller: str,
+    timeout: float = 30.0,
+    chain_id: int | None = None,
+) -> None:
+    """Verify X-Receipt == Registry listing operator; warn + dispute on failure.
+
+    The receipt EIP-712 domain is additionally asserted against the PIN
+    {name:"TokenShare Relay", version:"1", chainId:<cfg.chain_id>} (m1).
+    """
     disputes_path = dispute_mod.resolve_path(_disputes_path())
     raw = _hdr(headers, "X-Receipt")
     receipt: Receipt | None = None
     if not raw:
-        raw = _fetch_receipt_via_get(endpoint, payment_id)
+        raw = _fetch_receipt_via_get(endpoint, payment_id, timeout)
     if not raw:
         _echo_err(
             f"warning: no receipt available for payment {payment_id} "
-            "(settle-failed? you may refund after the TTL)"
+            f"(polled GET /receipt/{payment_id} for up to {min(max(timeout, 0.0), 30.0):g}s; "
+            "settle-failed? you may refund after the TTL)"
         )
         return
     try:
@@ -417,7 +465,7 @@ def _verify_and_report(endpoint: str, payment_id: int, headers: dict, expected_s
         typer.echo(f"Dispute recorded: payment {payment_id} -> {disputes_path}")
         return
 
-    check = verify_receipt(receipt, expected_seller, payment_id)
+    check = verify_receipt(receipt, expected_seller, payment_id, chain_id)
     if check.ok and check.reason is None:
         typer.echo(f"Receipt verification: OK (recovered={check.recovered} == seller/operator)")
         typer.echo(
@@ -435,6 +483,7 @@ def _verify_and_report(endpoint: str, payment_id: int, headers: dict, expected_s
         "recover-mismatch": dispute_mod.REASON_RECOVER_MISMATCH,
         "seller-mismatch": dispute_mod.REASON_SELLER_MISMATCH,
         "paymentid-mismatch": dispute_mod.REASON_PAYMENT_ID_MISMATCH,
+        "domain-mismatch": dispute_mod.REASON_DOMAIN_MISMATCH,
     }
     dispute_mod.record_dispute(
         disputes_path, payment_id,
@@ -444,28 +493,66 @@ def _verify_and_report(endpoint: str, payment_id: int, headers: dict, expected_s
     typer.echo(f"Dispute recorded: payment {payment_id} -> {disputes_path}")
 
 
-def _fetch_receipt_via_get(endpoint: str, payment_id: int) -> str | None:
-    """GET {endpoint}/receipt/{paymentId} fallback (PIN: same payload
-    structure as X-Receipt); returns the header-compatible payload string."""
+def _fetch_receipt_via_get(endpoint: str, payment_id: int, timeout: float) -> str | None:
+    """GET {endpoint}/receipt/{paymentId} fallback, polled (M1).
+
+    The relay settles 0.3-2s AFTER the response/[DONE] passthrough lands on
+    the wire, so a single GET is almost always a 404 and used to produce a
+    misleading "settle-failed" warning. We poll every 0.5s until
+    deadline = min(--timeout, 30s) expires; only then do we give up and let
+    the caller print the settle-failed warning. The caller has already
+    closed/drained the stream response before we poll.
+    """
     import httpx as _httpx
     from urllib.parse import quote
 
     base = endpoint.rstrip("/")
     url = f"{base}/receipt/{quote(str(int(payment_id)), safe='')}"
-    try:
-        resp = _httpx.get(url, timeout=30.0)
-    except Exception:
-        return None
-    if resp.status_code != 200:
-        return None
-    text = resp.text.strip()
-    if text.startswith("{"):
+    request_timeout = min(max(timeout, 0.1), 30.0)
+    deadline = time.monotonic() + min(max(timeout, 0.0), 30.0)
+    poll_interval = 0.5
+    while True:
         try:
-            obj = json.loads(text)
-            return _b64_of(obj)
+            resp = _httpx.get(url, timeout=request_timeout)
         except Exception:
+            resp = None
+        if resp is not None and resp.status_code == 200:
+            text = resp.text.strip()
+            if not text:
+                return None
+            if text.startswith("{"):
+                try:
+                    return _b64_of(json.loads(text))
+                except Exception:
+                    return None
+            return text
+        if time.monotonic() >= deadline:
             return None
-    return text
+        time.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
+
+
+def _warn_if_plain_http(endpoint: str) -> None:
+    """m2: warn when --relay is neither https nor a loopback target."""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(endpoint)
+    scheme = (parsed.scheme or "").lower()
+    host = (parsed.hostname or "").lower()
+    if scheme == "https" or host in ("localhost", "127.0.0.1", "::1"):
+        return
+    _echo_err(
+        f"warning: --relay {endpoint!r} uses '{scheme or 'no'}' scheme (not https); "
+        "payment headers (X-Payment-Id/X-Signature) would travel in cleartext"
+    )
+
+
+def _same_addr(a: str, b: str) -> bool:
+    from eth_utils import to_checksum_address
+
+    try:
+        return to_checksum_address(a) == to_checksum_address(b)
+    except Exception:
+        return False
 
 
 def _b64_of(obj: dict) -> str:

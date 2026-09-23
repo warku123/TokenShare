@@ -63,8 +63,9 @@ class Receipt:
 def decode_receipt(raw_b64: str) -> Receipt:
     """Decode the X-Receipt header value (base64url JSON).
 
-    Accepts both padded and unpadded base64url (relay lanes differ on
-    whether they append '=' padding; both round-trip identically).
+    The relay encodes unpadded base64url (it rstrip()s the '=' padding);
+    the CLI accepts both unpadded and padded base64url (they round-trip
+    identically).
     """
     if not raw_b64 or not raw_b64.strip():
         raise ReceiptDecodeError("X-Receipt header is empty")
@@ -107,15 +108,21 @@ def verify_receipt(
     receipt: Receipt,
     expected_seller: str,
     expected_payment_id: int | None = None,
+    expected_chain_id: int | None = None,
 ) -> ReceiptCheck:
     """Verify the receipt signature against the Registry listing operator.
 
     Checks, in order:
+      0. domain == {name:"TokenShare Relay", version:"1",
+         chainId:expected_chain_id} (name/version verbatim, chainId from the
+         CLI config; skipped when expected_chain_id is None);
       1. signature recovers to an address (recover over EIP-712);
       2. recovered address == expected seller (Registry listing operator);
       3. receipt.message.seller == expected seller;
       4. receipt.message.paymentId == the paymentId we used (optional).
     """
+    if expected_chain_id is not None and not _domain_matches(receipt.domain, expected_chain_id):
+        return ReceiptCheck(False, None, "domain-mismatch")
     try:
         recovered = recover_typed_data(
             _encode(receipt.domain, receipt.message), receipt.signature
@@ -130,6 +137,18 @@ def verify_receipt(
     if expected_payment_id is not None and receipt.payment_id != expected_payment_id:
         return ReceiptCheck(False, recovered, "paymentid-mismatch")
     return ReceiptCheck(True, recovered, None)
+
+
+def _domain_matches(domain: dict, chain_id: int) -> bool:
+    """m1: assert the PIN domain verbatim (name/version) + CLI chainId."""
+    if not isinstance(domain, dict):
+        return False
+    if domain.get("name") != RECEIPT_DOMAIN_NAME or domain.get("version") != RECEIPT_DOMAIN_VERSION:
+        return False
+    try:
+        return int(domain.get("chainId")) == int(chain_id)
+    except (TypeError, ValueError):
+        return False
 
 
 def _encode(domain: dict, message: dict):

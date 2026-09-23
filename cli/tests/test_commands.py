@@ -8,6 +8,8 @@ client functions are monkeypatched.
 
 import json
 
+import httpx
+
 from typer.testing import CliRunner
 
 from tests.conftest import (
@@ -30,6 +32,7 @@ REQUIRED_ENV_VARS = ("BUYER_PRIVATE_KEY", "RPC_URL", "CHAIN_ID", "ESCROW_ADDR", 
 import tokenshare_cli.app as app_mod  # noqa: E402
 import tokenshare_cli.chain as chain_mod  # noqa: E402
 from tokenshare_cli.app import app  # noqa: E402
+from tokenshare_cli.errors import RelayError  # noqa: E402
 from tokenshare_cli.relay_client import RelayResponse  # noqa: E402
 
 runner = CliRunner()
@@ -266,13 +269,46 @@ def test_call_tampered_receipt_records_dispute(monkeypatch, tmp_path):
     assert ledger["42"][0]["expected_seller"] == SELLER
 
 
+def _patch_receipt_polling(monkeypatch, responses):
+    """Patch the GET /receipt polling transport + the app clock so the M1
+    polling loop runs deterministically without real sleeping.
+
+    `responses` is a list-like of (status_code, text) returned per call.
+    Returns the list of requested URLs.
+    """
+    urls = []
+
+    class FakeResp:
+        def __init__(self, status_code, text=""):
+            self.status_code = status_code
+            self.text = text
+
+    def fake_get(url, timeout=None):
+        urls.append(url)
+        status_code, text = responses[min(len(urls) - 1, len(responses) - 1)]
+        return FakeResp(status_code, text)
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    clock = {"now": 0.0}
+    monkeypatch.setattr(app_mod.time, "monotonic", lambda: clock["now"])
+
+    def fake_sleep(seconds):
+        clock["now"] += seconds
+
+    monkeypatch.setattr(app_mod.time, "sleep", fake_sleep)
+    return urls
+
+
 def test_call_settled_without_receipt_warns(monkeypatch, tmp_path):
     _set_full_env(monkeypatch)
     FakeChain(monkeypatch)
-    _mock_http(monkeypatch, None)  # settled but no receipt -> warning (not dispute per PIN)
-    result = runner.invoke(app, ["call", "hi", "--seller", SELLER])
+    _mock_http(monkeypatch, None)  # settled but no receipt -> poll, then warning (not dispute per PIN)
+    _patch_receipt_polling(monkeypatch, [(404, "")])
+    result = runner.invoke(app, ["call", "hi", "--seller", SELLER, "--timeout", "1"])
     assert result.exit_code == 0
-    assert "no receipt available" in all_output(result)
+    out = all_output(result)
+    assert "no receipt available" in out
+    assert "polled GET /receipt/42" in out  # M1: polling exhausted, not a single-shot GET
 
 
 def test_call_reuses_payment_id(monkeypatch, tmp_path):
@@ -353,6 +389,7 @@ def test_call_stream_flow(monkeypatch, tmp_path):
     receipt = make_receipt(SELLER_KEY, 42, seller_addr=SELLER)
     headers = {"X-Settle-Status": "settled", "X-Receipt": receipt_header(receipt)}
     seen = {}
+    closed = {"n": 0}
 
     def fake_stream(endpoint, payment_id, signature, body_bytes, timeout=120.0):
         seen["payment_id"] = payment_id
@@ -366,7 +403,10 @@ def test_call_stream_flow(monkeypatch, tmp_path):
         ]
         from tokenshare_cli.relay_client import RelayStreamHandle
 
-        return RelayStreamHandle(status_code=200, headers=headers, lines=iter(lines))
+        return RelayStreamHandle(
+            status_code=200, headers=headers, lines=iter(lines),
+            close=lambda: closed.__setitem__("n", closed["n"] + 1),  # n2: closed after [DONE]
+        )
 
     monkeypatch.setattr(app_mod, "open_chat_stream", fake_stream)
     result = runner.invoke(app, ["call", "hi", "--seller", SELLER, "--stream"])
@@ -376,6 +416,7 @@ def test_call_stream_flow(monkeypatch, tmp_path):
     assert "Settle status: settled" in out
     assert "Receipt verification: OK" in out
     assert seen["payment_id"] == 42
+    assert closed["n"] == 1  # n2: stream handle closed exactly once after [DONE]
 
 
 def test_call_relay_override(monkeypatch):
@@ -425,3 +466,142 @@ def test_disputes_command_lists_records(monkeypatch, tmp_path):
     out = all_output(result)
     assert "paymentId 42" in out
     assert "receipt-recover-mismatch" in out
+
+
+# ---------------------------------------------------------------------------
+# M1: GET /receipt polling fallback (404 until the relay settles, then 200)
+# ---------------------------------------------------------------------------
+
+
+def test_call_receipt_polled_via_get_fallback(monkeypatch, tmp_path):
+    """M1: no X-Receipt header -> CLI polls GET /receipt/{id}; relay settles
+    0.3-2s AFTER the response, so the first GETs 404 and a later one 200."""
+    _set_full_env(monkeypatch)
+    FakeChain(monkeypatch)
+    receipt = make_receipt(SELLER_KEY, 42, seller_addr=SELLER)
+    body = json.dumps(
+        {
+            "choices": [{"message": {"content": "Hello from the seller relay!"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        }
+    )
+    headers = {"Content-Type": "application/json", "X-Settle-Status": "settled"}  # no X-Receipt
+    monkeypatch.setattr(app_mod, "post_chat_json", lambda *a, **k: RelayResponse(200, headers, body))
+
+    # The GET body is the receipt JSON object (app re-encodes to base64url).
+    get_text = json.dumps(json.loads(json.dumps(receipt)))
+    urls = _patch_receipt_polling(monkeypatch, [(404, ""), (404, ""), (200, get_text)])
+
+    disputes = tmp_path / "disputes.json"
+    result = runner.invoke(
+        app,
+        ["--disputes-file", str(disputes), "call", "hi", "--seller", SELLER, "--timeout", "1"],
+    )
+    assert result.exit_code == 0, all_output(result)
+    out = all_output(result)
+    assert "Receipt verification: OK" in out  # found via polling, NOT a settle-failed warning
+    assert "no receipt available" not in out
+    assert len(urls) == 3  # 404 -> 404 -> 200
+    assert urls[0].endswith("/receipt/42")
+    assert not disputes.exists()
+
+
+def test_call_receipt_polling_gives_up_after_deadline(monkeypatch, tmp_path):
+    """M1: 404s all the way to the deadline -> settle-failed warning, no crash."""
+    _set_full_env(monkeypatch)
+    FakeChain(monkeypatch)
+    _mock_http(monkeypatch, None)
+    _patch_receipt_polling(monkeypatch, [(404, "")])
+    result = runner.invoke(app, ["call", "hi", "--seller", SELLER, "--timeout", "1"])
+    assert result.exit_code == 0
+    assert "no receipt available" in all_output(result)
+
+
+# ---------------------------------------------------------------------------
+# m1: domain verification negative (chainId=999 receipt must NOT verify)
+# ---------------------------------------------------------------------------
+
+
+def test_call_receipt_wrong_chain_id_records_dispute(monkeypatch, tmp_path):
+    _set_full_env(monkeypatch)
+    FakeChain(monkeypatch)
+    receipt = make_receipt(SELLER_KEY, 42, seller_addr=SELLER, chain_id=999)  # wrong chainId
+    _mock_http(monkeypatch, receipt_header(receipt))
+
+    disputes = tmp_path / "disputes.json"
+    result = runner.invoke(
+        app,
+        ["--disputes-file", str(disputes), "call", "hi", "--seller", SELLER],
+    )
+    assert result.exit_code == 0
+    out = all_output(result)
+    assert "verification FAILED" in out
+    assert "domain-mismatch" in out
+    ledger = json.loads(disputes.read_text())
+    assert "42" in ledger
+    assert ledger["42"][0]["reason"] == "receipt-domain-mismatch"
+
+
+# ---------------------------------------------------------------------------
+# RelayError (401/402) command-level output
+# ---------------------------------------------------------------------------
+
+
+def test_call_relay_402_error_message(monkeypatch):
+    """Relay 402 (lock below relay minimum) -> clean exit, actionable stderr."""
+    _set_full_env(monkeypatch)
+    FakeChain(monkeypatch)
+
+    def fake_post(*a, **k):
+        raise RelayError(402, '{"error":"maxAmount below relay minimum"}')
+
+    monkeypatch.setattr(app_mod, "post_chat_json", fake_post)
+    result = runner.invoke(app, ["call", "hi", "--seller", SELLER])
+    assert result.exit_code == 2
+    out = all_output(result)
+    assert "relay HTTP 402" in out
+    assert "maxAmount below relay minimum" in out
+
+
+def test_call_relay_401_error_message(monkeypatch):
+    """Relay 401 (bad signature/payment) -> clean exit, actionable stderr."""
+    _set_full_env(monkeypatch)
+    FakeChain(monkeypatch)
+
+    def fake_post(*a, **k):
+        raise RelayError(401, '{"error":"invalid signature"}')
+
+    monkeypatch.setattr(app_mod, "post_chat_json", fake_post)
+    result = runner.invoke(app, ["call", "hi", "--seller", SELLER])
+    assert result.exit_code == 2
+    out = all_output(result)
+    assert "relay HTTP 401" in out
+    assert "invalid signature" in out
+
+
+# ---------------------------------------------------------------------------
+# m2: --relay plain-http warning
+# ---------------------------------------------------------------------------
+
+
+def test_call_relay_plain_http_warns(monkeypatch):
+    _set_full_env(monkeypatch)
+    FakeChain(monkeypatch)
+    receipt = make_receipt(SELLER_KEY, 42, seller_addr=SELLER)
+    seen = _mock_http(monkeypatch, receipt_header(receipt))
+    result = runner.invoke(app, ["call", "hi", "--seller", SELLER, "--relay", "http://other:9999/"])
+    assert result.exit_code == 0, all_output(result)
+    out = all_output(result)
+    assert "warning: --relay" in out
+    assert "not https" in out
+    assert seen["endpoint"] == "http://other:9999/"
+
+
+def test_call_relay_localhost_no_warning(monkeypatch):
+    _set_full_env(monkeypatch)
+    FakeChain(monkeypatch)
+    receipt = make_receipt(SELLER_KEY, 42, seller_addr=SELLER)
+    _mock_http(monkeypatch, receipt_header(receipt))
+    result = runner.invoke(app, ["call", "hi", "--seller", SELLER, "--relay", "http://127.0.0.1:8787"])
+    assert result.exit_code == 0, all_output(result)
+    assert "warning: --relay" not in all_output(result)
