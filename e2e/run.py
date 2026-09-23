@@ -71,6 +71,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CONTRACTS_DIR = REPO_ROOT / "contracts"
 E2E_DIR = REPO_ROOT / "e2e"
 
+# .env auto-load — BEFORE anything reads os.environ (module entry, earliest).
+# Values only enter os.environ; nothing is printed (private-key discipline).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from dotenv_loader import load_dotenv  # noqa: E402
+
+load_dotenv()
+
 # ---------------------------------------------------------------------------
 # Network config map — the ONE allowed place (besides .env.example comments and
 # deployed.json) where public RPC/USDC/chainId values appear. Values verified
@@ -417,6 +424,16 @@ def deploy_contracts(network: str, rpc_url: str, deployer_addr: str,
         "--sender", deployer_addr,
         "--force",
     ]
+    # Snapshot the pre-deploy artifact BEFORE running forge: Deploy.s.sol
+    # writes deployed.json DURING the forge run, so the poll below must only
+    # accept a write that differs from this pre-run snapshot (a content-blind
+    # poll would return the STALE artifact of a previous run; a post-run
+    # snapshot would equal the fresh write and never accept it).
+    artifact_path = CONTRACTS_DIR / "deployed.json"
+    try:
+        pre_deploy_text = artifact_path.read_text()
+    except OSError:
+        pre_deploy_text = ""
     try:
         result = subprocess.run(cmd, cwd=str(CONTRACTS_DIR), env=env,
                                 capture_output=True, text=True, timeout=300)
@@ -429,12 +446,13 @@ def deploy_contracts(network: str, rpc_url: str, deployer_addr: str,
         print((result.stdout or "")[-3000:] or (result.stderr or "")[-3000:])
         fail_all(f"forge script deploy exited {result.returncode} (log: e2e/.forge_deploy.log)")
 
-    artifact_path = CONTRACTS_DIR / "deployed.json"
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + 120  # real-chain broadcasts are slow; the
+    # content-change guard above keeps this correct on the instant fork path.
     while time.monotonic() < deadline:
         try:
-            artifact = json.loads(artifact_path.read_text())
-            if artifact.get("escrow"):
+            fresh_text = artifact_path.read_text()
+            artifact = json.loads(fresh_text)
+            if artifact.get("escrow") and fresh_text != pre_deploy_text:
                 print(
                     "deployed.json updated: "
                     f"escrow={artifact['escrow']} registry={artifact['registry']} "
@@ -927,8 +945,25 @@ def run(network: str) -> str | None:
         except (OSError, json.JSONDecodeError):
             existing = {}
         if existing.get("network") == network and existing.get("escrow"):
-            print(f"[2/8] contracts already deployed for {network}: {existing['escrow']}")
-            deployed = existing
+            if (
+                not cfg["anvil"]
+                and existing.get("usdcIsMock")
+                and os.environ.get("USDC_ADDR")
+            ):
+                # A previous run left a MockUSDC deployment on a REAL chain
+                # while the config now names official USDC — reusing it would
+                # guarantee a mint failure (real chains have no mint key).
+                # Redeploy against the configured official USDC instead.
+                print(
+                    "[2/8] redeploying: existing deployed.json has usdcIsMock=true "
+                    f"for {network} but USDC_ADDR is set — stale mock artifact"
+                )
+                deployed = deploy_contracts(
+                    network, rpc_url, seller_addr, deployer_key, is_fork=False
+                )
+            else:
+                print(f"[2/8] contracts already deployed for {network}: {existing['escrow']}")
+                deployed = existing
         else:
             if "USDC_ADDR" not in os.environ:
                 print("WARNING: USDC_ADDR unset for a REAL network — Deploy.s.sol will "

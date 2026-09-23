@@ -60,6 +60,8 @@ TokenShare rents out **official-plan** quota, so a served model must be an offic
 | `api.moonshot.cn` (Kimi domestic) | moonshot | `kimi-`, `moonshot-` |
 | `api.moonshot.ai` (Kimi international) | moonshot | `kimi-`, `moonshot-` (keys are **not** interchangeable with `.cn`) |
 
+**Seller pre-check (`GET /verify-upstream`)** — before registering (or re-registering) a listing, the seller can self-check that the configured key actually serves the models it wants to list: the relay calls the upstream's official `GET /v1/models` with its own key and cross-checks every `listing.models` entry — each model must be accessible with this key AND (official host) carry the matching provider prefix. Response body: `{key_valid, upstream_host, accessible_models, listing_ok, listed_models, mismatches, error?}` (HTTP stays 200; semantics live in the body; prices are never verified — pricing is the seller's freedom). `e2e/register_listing.py` runs this check automatically before spending register gas (`--skip-verify` / unreachable relay to bypass). On an official upstream the relay also probes `/v1/models` at startup (`VERIFY_UPSTREAM_ON_START=1` default, `0` to disable): a key rejected with 401/403 fails startup fast, transient network errors only log a WARNING.
+
 **Why this prevents poisoning:** a seller cannot point the relay at a lookalike endpoint and serve fake models or fake usage — the host is pinned to the official set, the model must carry the matching provider's catalog prefix, and every EIP-712 receipt now records `upstreamHost` + `model` so a buyer can audit exactly which official host and which model served each settled call. The relay reference implementation is the client-side guarantee; the ultimate proof of serving integrity is the **M7 TEE attestation** (remote attestation of the serving environment), which this layer is designed to hand off to.
 
 Custom upstreams (`http://127.0.0.1:…` mocks, proxies) are **development and test only** — the e2e runner sets `ALLOW_CUSTOM_UPSTREAM=1` for its mock automatically; a real-chain e2e run defaults to the official upstream from env (`OPENAI_BASE_URL` + `OPENAI_API_KEY`) and only uses the mock when `E2E_FORCE_MOCK_OPENAI=1` is set explicitly.
@@ -139,7 +141,16 @@ USDC_ADDR=0x036CbD53842c5426634e7929541eC2318f3dCF7e \
   --private-key $PRIVATE_KEY --sender $DEPLOYER_ADDR     # unset USDC_ADDR → MockUSDC
 cd ..
 
-# 2) Seller registers a listing (direct web3; the relay endpoint goes on-chain).
+# 2) Seller starts the relay (uses RELAY_SELLER_KEY + the 12 relay env names, see .env.example):
+python3 -m uvicorn relay.app.main:app --host 127.0.0.1 --port 8787   # from repo root
+
+# 3) Verify BEFORE registering — prove the key really serves the models you
+#    plan to list (key_valid=true + your models under accessible_models):
+curl -s http://127.0.0.1:8787/verify-upstream | python3 -m json.tool
+#    register_listing.py runs this same check automatically before sending
+#    the register tx; skip it only with --skip-verify.
+
+# 4) Seller registers a listing (direct web3; the relay endpoint goes on-chain).
 #    --model must be an official-plan model matching the relay's upstream:
 #    Kimi (api.moonshot.cn) → kimi-k2.6; OpenAI → gpt-4o-mini, etc.
 python3 e2e/register_listing.py --network base_sepolia \
@@ -147,10 +158,7 @@ python3 e2e/register_listing.py --network base_sepolia \
   --model kimi-k2.6 \
   --price-cached-in 1000 --price-input 2000 --price-output 3000   # per-1M-token USDC native
 
-# 3) Seller starts the relay (uses RELAY_SELLER_KEY + the 12 relay env names, see .env.example):
-python3 -m uvicorn relay.app.main:app --host 127.0.0.1 --port 8787   # from repo root
-
-# 4) Buyer (from cli/ with .env exported); --model defaults to the first model
+# 5) Buyer (from cli/ with .env exported); --model defaults to the first model
 #    of the Registry listing (here kimi-k2.6):
 cd cli
 python3 -m tokenshare_cli deposit --amount 500

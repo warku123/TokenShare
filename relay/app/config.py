@@ -34,6 +34,7 @@ ENV_PORT = "PORT"
 ENV_PROMPT_TOKEN_CAP = "PROMPT_TOKEN_CAP"
 ENV_COMPLETION_TOKEN_CAP = "COMPLETION_TOKEN_CAP"
 ENV_ALLOW_CUSTOM_UPSTREAM = "ALLOW_CUSTOM_UPSTREAM"
+ENV_VERIFY_UPSTREAM_ON_START = "VERIFY_UPSTREAM_ON_START"
 
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com"
 DEFAULT_FORWARD_MARGIN_S = 120
@@ -150,6 +151,7 @@ class Config:
     port: int
     prompt_token_cap: int
     completion_token_cap: int
+    verify_upstream_on_start: bool
 
     @property
     def seller_address(self) -> str:
@@ -238,5 +240,10 @@ def load_config() -> Config:
         prompt_token_cap=_optional_int(ENV_PROMPT_TOKEN_CAP, DEFAULT_PROMPT_TOKEN_CAP),
         completion_token_cap=_optional_int(
             ENV_COMPLETION_TOKEN_CAP, DEFAULT_COMPLETION_TOKEN_CAP
+        ),
+        # Startup key probe: enabled unless explicitly disabled with "0"
+        # (official-host boots only; custom/mock upstreams never probe).
+        verify_upstream_on_start=(
+            os.environ.get(ENV_VERIFY_UPSTREAM_ON_START, "1").strip() != "0"
         ),
     )

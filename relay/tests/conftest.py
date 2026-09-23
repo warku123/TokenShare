@@ -132,6 +132,38 @@ class MockOpenAIHandler(BaseHTTPRequestHandler):
     def log_message(self, *args: Any) -> None:  # silence test output
         pass
 
+    def do_GET(self) -> None:
+        """GET /v1/models for the verify-upstream endpoint / startup probe.
+        Behavior via server.attributes: `models_status` ("ok"|"401"|"403"|
+        "500"|"net_err") + `models_ids` (ids returned under data[].id)."""
+        server = self.server
+        with server.behavior_lock:
+            status = server.models_status
+            ids = list(server.models_ids)
+        if not self.path.split("?")[0].rstrip("/").endswith("/v1/models"):
+            self.send_response(404)
+            self.end_headers()
+            return
+        if status == "net_err":
+            # Simulate a dropped connection: no response bytes at all.
+            self.close_connection = True
+            try:
+                self.connection.close()
+            except OSError:
+                pass
+            return
+        payload = json.dumps(
+            {"object": "list", "data": [{"id": i, "object": "model"} for i in ids]}
+        ).encode()
+        self.send_response(200 if status == "ok" else int(status))
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *args: Any) -> None:  # silence test output
+        pass
+
     def do_POST(self) -> None:
         server = self.server
         length = int(self.headers.get("Content-Length", "0"))
@@ -215,6 +247,9 @@ class MockOpenAIServer(ThreadingHTTPServer):
         # Non-None replaces the per-test usage object (fallback-chain tests).
         self.usage_override: dict[str, Any] | None = None
         self.slow_seconds = 0.5
+        # GET /v1/models behavior (verify-upstream / startup probe tests).
+        self.models_status = "ok"
+        self.models_ids: list[str] = ["gpt-4o-mini"]
 
 
 import pytest  # noqa: E402  (kept after class defs for readability)
@@ -241,6 +276,8 @@ def reset_upstream(mock_openai: MockOpenAIServer) -> None:
     mock_openai.usage = dict(USAGE)
     mock_openai.usage_override = None
     mock_openai.slow_seconds = 0.5
+    mock_openai.models_status = "ok"
+    mock_openai.models_ids = ["gpt-4o-mini"]
 
 
 @pytest.fixture(autouse=True)
@@ -273,6 +310,10 @@ def setup_relay_env(monkeypatch: pytest.MonkeyPatch, base_url: str) -> None:
         "PROMPT_TOKEN_CAP": "200000",
         "COMPLETION_TOKEN_CAP": "32000",
         "ALLOW_CUSTOM_UPSTREAM": "1",
+        # Startup key probe: the mock upstream only answers /v1/models per the
+        # models_status fixture, but tests must not depend on probe ordering —
+        # OFF by default in suites, enabled explicitly in the probe tests.
+        "VERIFY_UPSTREAM_ON_START": "0",
     }
     for key, value in env.items():
         monkeypatch.setenv(key, value)

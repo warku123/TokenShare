@@ -37,17 +37,27 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .chain import ChainClient
-from .config import Config, host_provider, load_config, provider_for_model
+from .config import (
+    Config,
+    ConfigError,
+    host_provider,
+    load_config,
+    provider_for_model,
+)
 from .pricing import Prices, Usage, clamp_settle_amount, compute_actual, estimate_min_amount
 from .receipt import ReceiptStore, build_receipt, encode_x_receipt
 
 logger = logging.getLogger("tokenshare.relay")
 
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
+MODELS_PATH = "/v1/models"
 
 # Per-request timeout for NON-STREAM forwarding only. Streaming SSE requests
 # never set a short read timeout (long-lived responses).
 UPSTREAM_TIMEOUT_NON_STREAM = httpx.Timeout(10.0, read=120.0)
+
+# Bounded timeout for the /v1/models key probe (verify-upstream + startup).
+VERIFY_UPSTREAM_TIMEOUT = httpx.Timeout(10.0)
 
 # Escrow.State enum values (contracts/src/Escrow.sol).
 STATE_LOCKED = 1
@@ -92,6 +102,30 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         config.registry_addr,
         config.forward_margin_s,
     )
+    # Startup key probe (fail-fast, same philosophy as the missing-key check):
+    # on an OFFICIAL upstream host with VERIFY_UPSTREAM_ON_START!=0, hit
+    # GET /v1/models once; an auth rejection (401/403) means the configured
+    # key cannot serve anything → ConfigError. Network errors / 5xx are
+    # transient → WARNING and continue (never let official-API flakiness
+    # kill the relay). Mock/custom upstreams (dev/test) skip the probe so
+    # e2e runs and unit tests keep booting without any real network.
+    if (
+        config.verify_upstream_on_start
+        and host_provider(config.openai_base_url) is not None
+    ):
+        key_valid, _models, probe_error = await _probe_upstream_key(state)
+        if key_valid is False:
+            await state.http.aclose()
+            state = None
+            raise ConfigError(
+                "upstream API key rejected (probe /v1/models -> "
+                f"{probe_error or '401/403'}); refusing to start (no degraded mode) "
+                "— fix OPENAI_API_KEY / OPENAI_BASE_URL"
+            )
+        if probe_error:
+            logger.warning(
+                "startup upstream probe failed (transient, continuing): %s", probe_error
+            )
     try:
         yield
     finally:
@@ -107,6 +141,146 @@ def _get_state() -> RelayState:
     if state is None:
         raise HTTPException(status_code=503, detail="relay not initialized")
     return state
+
+
+# ------------------------------------------------------------- upstream verify
+
+
+async def _probe_upstream_key(
+    st: RelayState,
+) -> tuple[bool | None, list[str], str | None]:
+    """GET /v1/models on the configured upstream with the configured key.
+
+    Returns (key_valid, accessible_models, error):
+      - 200            → (True, parsed data[].id list, None) — auth proven;
+      - 401/403        → (False, [], detail) — key invalid for this host;
+      - other status   → (None, [], "HTTP <n> ...") — transient (5xx etc.);
+      - network error  → (None, [], "connect/timeout ...") — transient.
+
+    key_valid=None distinguishes "couldn't tell" (transient) from a definite
+    auth verdict, so the startup probe can warn-and-continue instead of
+    killing the relay on flaky official API connectivity.
+    """
+    _probe = MODELS_PATH  # httpx base_url is the host root → /v1/models
+    try:
+        resp = await st.http.get(_probe, timeout=VERIFY_UPSTREAM_TIMEOUT)
+    except httpx.HTTPError as exc:
+        return None, [], f"upstream unreachable: {exc}"
+    if resp.status_code in (401, 403):
+        detail = (resp.text or "").strip()[:500]
+        return False, [], detail or f"upstream rejected the key (HTTP {resp.status_code})"
+    if resp.status_code == 200:
+        try:
+            payload = resp.json()
+        except ValueError:
+            return None, [], "upstream /v1/models returned non-JSON"
+        data = payload.get("data") if isinstance(payload, dict) else None
+        models: list[str] = []
+        if isinstance(data, list):
+            models = sorted(
+                {
+                    m.get("id")
+                    for m in data
+                    if isinstance(m, dict) and isinstance(m.get("id"), str) and m.get("id")
+                }
+            )
+        return True, models, None
+    return None, [], f"HTTP {resp.status_code}: {(resp.text or '')[:300]}"
+
+
+def _filter_listed_models(listing: dict[str, Any] | None) -> list[str]:
+    """listing.models with blanks filtered (same rule as _check_model)."""
+    if not listing:
+        return []
+    return [
+        m
+        for m in (listing.get("models") or [])
+        if isinstance(m, str) and m.strip()
+    ]
+
+
+@app.get("/verify-upstream")
+async def verify_upstream() -> dict[str, Any]:
+    """Seller pre-check: can the configured key actually serve the models the
+    listing promises?
+
+    Semantics live in the BODY (HTTP status stays 200 — the caller screens
+    the JSON, not the status code):
+      key_valid        key proved by upstream /v1/models (False on 401/403 or
+                       unreachable; see `error`)
+      accessible_models  ids the upstream reported for this key
+      listing_ok       every listed model is accessible AND (official host
+                       only) provider-matches the upstream host
+      mismatches       listed models that failed a check (with reasons)
+
+    Prices are intentionally NOT verified — pricing is the seller's freedom,
+    not an upstream property.
+    """
+    st = _get_state()
+    out: dict[str, Any] = {
+        "key_valid": False,
+        "upstream_host": _upstream_host(st.config.openai_base_url),
+        "accessible_models": [],
+        "listing_ok": False,
+        "listed_models": [],
+        "mismatches": [],
+    }
+
+    # 1. Probe the key against the official upstream /v1/models.
+    key_valid, accessible, probe_error = await _probe_upstream_key(st)
+    out["key_valid"] = bool(key_valid)
+    out["accessible_models"] = accessible
+    if probe_error:
+        out["error"] = probe_error
+
+    # 2. Cross-check the seller's own Registry listing.
+    try:
+        listing = await asyncio.to_thread(st.chain.get_listing, st.chain.seller_address)
+    except Exception as exc:  # chain read failure → listing unverifiable
+        out["listing_ok"] = False
+        out.setdefault("error", "listing read failed")
+        if not probe_error:
+            out["error"] = f"listing read failed: {exc}"
+        return out
+
+    listed = _filter_listed_models(listing)
+    out["listed_models"] = listed
+    if listing is None:
+        out.setdefault("error", "unregistered: no listing for the relay seller")
+        return out
+    if not listing.get("active"):
+        out.setdefault("error", "listing inactive")
+        return out
+
+    accessible_set = set(accessible)
+    # Custom upstream (ALLOW_CUSTOM_UPSTREAM=1, dev/test): the host has no
+    # provider identity, mirroring the per-request gate — only the
+    # accessible-superset half applies.
+    custom_upstream = host_provider(st.config.openai_base_url) is None
+    mismatches: list[dict[str, str]] = []
+    if not accessible_set and listed:
+        # Nothing provable about the key (invalid/unreachable/empty catalog):
+        # no listed model can be confirmed → every listed model mismatches.
+        reason = "key invalid or upstream unreachable — nothing confirmed accessible"
+        mismatches = [{"model": model, "reason": reason} for model in listed]
+    else:
+        for model in listed:
+            if model not in accessible_set:
+                mismatches.append(
+                    {"model": model, "reason": "not accessible with this key"}
+                )
+            elif not custom_upstream and provider_for_model(model) != host_provider(
+                st.config.openai_base_url
+            ):
+                mismatches.append(
+                    {
+                        "model": model,
+                        "reason": "provider does not match the upstream host",
+                    }
+                )
+    out["mismatches"] = mismatches
+    out["listing_ok"] = not mismatches
+    return out
 
 
 # --------------------------------------------------------------------- health
