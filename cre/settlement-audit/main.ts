@@ -160,7 +160,7 @@ const onSettled = (runtime: Runtime<Config>, log: EVMLog): string => {
   )
   const listing = decodeAbiParameters(
     parseAbiParameters(
-      "address listingOperator, string endpoint, uint256 priceCachedIn, uint256 priceInput, uint256 priceOutput, bool active",
+      "address listingOperator, string endpoint, string[] models, uint256 priceCachedIn, uint256 priceInput, uint256 priceOutput, bool active",
     ),
     evm
       .callContract(runtime, {
@@ -176,10 +176,11 @@ const onSettled = (runtime: Runtime<Config>, log: EVMLog): string => {
   runtime.log(
     `getPayment: buyer=${payment[0]} maxAmount=${payment[2]} expiresAt=${payment[3]} state=${payment[4]}`,
   )
-  // listing tuple (models[] omitted): [0]=operator, [1]=endpoint,
-  // [2]=priceCachedIn, [3]=priceInput, [4]=priceOutput, [5]=active
+  // listing tuple (7 outputs, mirrors registryAbi.getListing): [0]=operator,
+  // [1]=endpoint, [2]=models, [3]=priceCachedIn, [4]=priceInput,
+  // [5]=priceOutput, [6]=active
   runtime.log(
-    `getListing: cached=${listing[2]} input=${listing[3]} output=${listing[4]} active=${listing[5]}`,
+    `getListing: cached=${listing[3]} input=${listing[4]} output=${listing[5]} active=${listing[6]}`,
   )
   // 3. CONFIDENTIAL HTTP — relay receipt fetch runs inside the enclave;
   //    {{.receipts_bearer}} is template-resolved there (never in workflow
