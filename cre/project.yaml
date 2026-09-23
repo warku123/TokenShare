@@ -1,0 +1,20 @@
+# ==========================================================================
+# CRE PROJECT SETTINGS FILE
+# ==========================================================================
+# Shared configuration for all workflows in this project. The `staging-settings`
+# target is used for local simulation (`cre workflow simulate --target staging-settings`).
+#
+# Monad testnet facts:
+#   chain id        : 10143 (0x279f)
+#   public RPC      : https://testnet-rpc.monad.xyz
+#   chain name      : monad-testnet (per CRE supported-chains, CLI >= 1.30)
+staging-settings:
+  rpcs:
+    - chain-name: monad-testnet
+      url: https://testnet-rpc.monad.xyz
+
+# ==========================================================================
+production-settings:
+  rpcs:
+    - chain-name: monad-testnet
+      url: https://testnet-rpc.monad.xyz

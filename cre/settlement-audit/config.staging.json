@@ -1,0 +1,9 @@
+{
+  "chainSelectorName": "monad-testnet",
+  "escrowAddress": "0x654c83F23669908C867f02EF3E20B2126c4753De",
+  "registryAddress": "0x3a44dB7696306DFB08266721aE660C2334FCAA93",
+  "anchorAddress": "0xYOUR_RECEIPT_ANCHOR_CONTRACT_ADDRESS",
+  "relayBaseUrl": "http://127.0.0.1:8787",
+  "maxPriceUsd6": "1000000000",
+  "workflowOwner": "0xYOUR_WORKFLOW_OWNER_ADDRESS"
+}
