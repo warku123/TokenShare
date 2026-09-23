@@ -116,7 +116,24 @@ REGISTRY_ABI = [
             {"name": "active", "type": "bool", "internalType": "bool"},
         ],
         "stateMutability": "view",
-    }
+    },
+    # Discovery source for `listings`: the Registry has NO on-chain
+    # enumeration, so sellers are collected via eth_getLogs over this event
+    # (verbatim from contracts/src/Registry.sol EVENTS; cross-checked by
+    # tests/test_listings.py against the .sol source).
+    {
+        "type": "event",
+        "name": "Registered",
+        "anonymous": False,
+        "inputs": [
+            {"name": "operator", "type": "address", "indexed": True, "internalType": "address"},
+            {"name": "endpoint", "type": "string", "indexed": False, "internalType": "string"},
+            {"name": "models", "type": "string[]", "indexed": False, "internalType": "string[]"},
+            {"name": "priceCachedIn", "type": "uint256", "indexed": False, "internalType": "uint256"},
+            {"name": "priceInput", "type": "uint256", "indexed": False, "internalType": "uint256"},
+            {"name": "priceOutput", "type": "uint256", "indexed": False, "internalType": "uint256"},
+        ],
+    },
 ]
 
 # Minimal standard ERC-20 surface (MockUSDC is OZ ERC20 with 6 decimals).

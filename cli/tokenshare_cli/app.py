@@ -25,7 +25,7 @@ from . import attestation as attestation_mod
 from . import chain as chain_mod
 from . import disputes as dispute_mod
 from . import signing
-from .config import load_config, load_seller_override
+from .config import load_config, load_listings_from_block, load_seller_override
 from .errors import TokenshareError
 from .receipt import Receipt, ReceiptDecodeError, decode_receipt, verify_receipt
 from .relay_client import post_chat_json, open_chat_stream
@@ -44,7 +44,7 @@ Env vars required by every chain-touching command (no values are ever hardcoded)
 
 Optional env: SELLER_ADDR (default seller for call), PROMPT_TOKEN_CAP / COMPLETION_TOKEN_CAP (default lock sizing, mirrors relay defaults 200000 / 32000), TX_TIMEOUT_S (tx wait timeout).
 
-Commands: deposit (approve + deposit USDC into Escrow); lock (lock(seller, maxAmount, ttl=600) -> prints paymentId); call (pick seller -> lock NEW paymentId, or reuse via --payment-id -> read Registry listing.endpoint -> POST /v1/chat/completions with EIP-191 X-Payment-Id + X-Signature -> prints reply, X-Settle-Status, and verifies the EIP-712 X-Receipt against the Registry listing operator); balance (wallet USDC + withdrawable Escrow); refund (withdraw an expired lock after its TTL); disputes (list locally recorded receipt-verification disputes); verify-attestation (best-effort off-chain parse of a TEE attestation quote + optional on-chain digest comparison).
+Commands: deposit (approve + deposit USDC into Escrow); lock (lock(seller, maxAmount, ttl=600) -> prints paymentId); call (pick seller -> lock NEW paymentId, or reuse via --payment-id -> read Registry listing.endpoint -> POST /v1/chat/completions with EIP-191 X-Payment-Id + X-Signature -> prints reply, X-Settle-Status, and verifies the EIP-712 X-Receipt against the Registry listing operator); balance (wallet USDC + withdrawable Escrow); refund (withdraw an expired lock after its TTL); disputes (list locally recorded receipt-verification disputes); verify-attestation (best-effort off-chain parse of a TEE attestation quote + optional on-chain digest comparison); listings (compare ACTIVE Registry listings — tiered prices + estimated per-call cost, cheapest first; sellers discovered via the Registered event, env LISTINGS_FROM_BLOCK tunes the scan start).
 
 Receipt verification (BUILD_SPEC §6.3): a failed X-Receipt check prints a warning and records the paymentId in the dispute ledger (default ~/.tokenshare/disputes.json; override with --disputes-file, review via the `disputes` command).
 
@@ -352,6 +352,175 @@ def verify_attestation_cmd(
                 "the quote is not the one anchored on-chain"
             )
             raise typer.Exit(code=1)
+
+    _run(body)
+
+
+# ---------------------------------------------------------------------------
+# listings (A-tier multi-seller comparison)
+# ---------------------------------------------------------------------------
+
+
+def _short_addr(address: str) -> str:
+    """0xf39F…92266 — table-display truncation; the full (copyable) address
+    is printed in the address block under the table and in --json."""
+    return f"{address[:6]}…{address[-4:]}"
+
+
+def _token_caps() -> tuple[int, int]:
+    """(prompt, completion) caps — same env names and defaults the relay uses
+    for its minAmount estimate (PROMPT_TOKEN_CAP / COMPLETION_TOKEN_CAP,
+    defaults 200000 / 32000)."""
+    return (
+        int(os.environ.get("PROMPT_TOKEN_CAP", PROMPT_TOKEN_CAP_DEFAULT)),
+        int(os.environ.get("COMPLETION_TOKEN_CAP", COMPLETION_TOKEN_CAP_DEFAULT)),
+    )
+
+
+def _estimate_call_cost(
+    price_input: int, price_output: int, prompt_cap: int, completion_cap: int
+) -> int:
+    """Estimated per-call cost in native USDC: (priceInput*P + priceOutput*C)
+    // 1e6 — mirrors the relay-side minAmount model with the default caps.
+    Assumes ZERO cached tokens; the relay's three-tier formula bills cache
+    hits at priceCachedIn, so the real cost is <= this estimate."""
+    return (int(price_input) * prompt_cap + int(price_output) * completion_cap) // 1_000_000
+
+
+@app.command("listings")
+def listings_cmd(
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Output structured JSON instead of a table (for scripts / the web console).",
+    ),
+) -> None:
+    """List ACTIVE Registry listings with tiered prices + estimated per-call cost.
+
+    Discovery: the Registry has no on-chain enumeration, so sellers are
+    collected via eth_getLogs over the Registered event (re-registers dedup;
+    per-seller CURRENT state comes from getListing). Set env
+    LISTINGS_FROM_BLOCK to start the scan closer to the Registry deployment
+    block on long chains. Rows are sorted by estimated per-call cost
+    (cheapest first); pick a seller's full address from the list for
+    `call --seller` / `lock --seller`.
+    """
+    def body() -> None:
+        cfg = load_config()
+        ctx = chain_mod.open_chain(cfg)
+        prompt_cap, completion_cap = _token_caps()
+        from_block = load_listings_from_block()
+        operators = chain_mod.registered_operators(ctx, from_block)
+
+        rows: list[dict] = []
+        seen_operators: set[str] = set()
+        for operator in operators:
+            # Discovery already dedups; this guard keeps the table correct
+            # even if a future discovery layer returns raw events.
+            if operator in seen_operators:
+                continue
+            seen_operators.add(operator)
+            try:
+                listing = chain_mod.get_listing(ctx, operator)
+            except TokenshareError:
+                raise
+            except Exception as exc:
+                raise TokenshareError(
+                    f"Registry getListing({operator}) failed: {exc}"
+                ) from exc
+            if not listing.get("active"):
+                continue
+            rows.append(
+                {
+                    "operator": operator,
+                    "endpoint": str(listing.get("endpoint") or ""),
+                    "models": [
+                        str(m)
+                        for m in (listing.get("models") or [])
+                        if str(m).strip()
+                    ],
+                    "priceCachedIn": int(listing["price_cached_in"]),
+                    "priceInput": int(listing["price_input"]),
+                    "priceOutput": int(listing["price_output"]),
+                    "estimatedCallCost": _estimate_call_cost(
+                        listing["price_input"], listing["price_output"],
+                        prompt_cap, completion_cap,
+                    ),
+                }
+            )
+        rows.sort(key=lambda r: (r["estimatedCallCost"], r["operator"].lower()))
+
+        if json_output:
+            typer.echo(
+                json.dumps(
+                    {
+                        "chainId": cfg.chain_id,
+                        "registry": cfg.registry_addr,
+                        "fromBlock": from_block,
+                        "activeOnly": True,
+                        "count": len(rows),
+                        "listings": rows,
+                    },
+                    indent=2,
+                )
+            )
+            return
+
+        if not operators:
+            typer.echo(
+                f"no Registered events found from block {from_block} — nobody has "
+                "registered a listing yet. If the chain prunes old logs, set "
+                "LISTINGS_FROM_BLOCK to the Registry deployment block."
+            )
+            return
+        if not rows:
+            typer.echo(
+                f"{len(seen_operators)} registered operator(s), none ACTIVE — all "
+                "listings were deactivated after registration."
+            )
+            return
+
+        typer.echo(
+            f"Active listings ({len(rows)}/{len(seen_operators)} sellers, chainId "
+            f"{cfg.chain_id}; Registered events scanned from block {from_block}), "
+            "sorted by estimated per-call cost:"
+        )
+        typer.echo("")
+        header = [
+            "#", "operator", "endpoint", "models",
+            "cached/1M", "input/1M", "output/1M", "est/call",
+        ]
+        table = [header]
+        for i, row in enumerate(rows, 1):
+            table.append(
+                [
+                    str(i),
+                    _short_addr(row["operator"]),
+                    row["endpoint"] or "(none)",
+                    ",".join(row["models"]) or "(none)",
+                    display_usdc(row["priceCachedIn"]),
+                    display_usdc(row["priceInput"]),
+                    display_usdc(row["priceOutput"]),
+                    display_usdc(row["estimatedCallCost"]),
+                ]
+            )
+        widths = [max(len(row[c]) for row in table) for c in range(len(header))]
+        for row in table:
+            typer.echo(
+                "  "
+                + "  ".join(
+                    cell.ljust(widths[c]) for c, cell in enumerate(row)
+                ).rstrip()
+            )
+        typer.echo("")
+        typer.echo(
+            f"est/call = (priceInput*{prompt_cap} + priceOutput*{completion_cap})//1e6 "
+            "native USDC, 0 cached tokens assumed (cache hits bill at cached/1M, "
+            "so the real cost is lower)."
+        )
+        typer.echo("Full seller addresses (for --seller):")
+        for i, row in enumerate(rows, 1):
+            typer.echo(f"  {i:>2}  {row['operator']}")
 
     _run(body)
 

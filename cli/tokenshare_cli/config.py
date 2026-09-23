@@ -27,6 +27,11 @@ REQUIRED_VARS = (
 # Optional extra (not part of the PIN): default seller for `call`.
 SELLER_ADDR_VAR = "SELLER_ADDR"
 
+# Optional extra (A-tier `listings`): first block for the Registered-event
+# eth_getLogs scan (default 0 = whole chain). Raise it to skip a slow
+# full-chain scan on long chains (e.g. Monad testnet).
+LISTINGS_FROM_BLOCK_VAR = "LISTINGS_FROM_BLOCK"
+
 _ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
@@ -107,3 +112,19 @@ def load_seller_override() -> str | None:
     if value is None:
         return None
     return _require_addr(SELLER_ADDR_VAR, value)
+
+
+def load_listings_from_block() -> int:
+    """Optional LISTINGS_FROM_BLOCK env (default 0 = scan from genesis)."""
+    raw = _read(LISTINGS_FROM_BLOCK_VAR)
+    if raw is None:
+        return 0
+    try:
+        value = int(raw, 10)
+    except ValueError as exc:
+        raise EnvError(
+            f"env {LISTINGS_FROM_BLOCK_VAR}={raw!r} is not a valid integer"
+        ) from exc
+    if value < 0:
+        raise EnvError(f"env {LISTINGS_FROM_BLOCK_VAR}={raw!r} must be >= 0")
+    return value

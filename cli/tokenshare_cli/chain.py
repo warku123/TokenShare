@@ -171,6 +171,54 @@ def get_listing(ctx: ChainContext, seller: str) -> dict:
     }
 
 
+# Registry.Registered event — canonical Solidity signature string (topic0 =
+# keccak256 of it). Must stay in sync with contracts/src/Registry.sol EVENTS;
+# tests/test_listings.py cross-checks the two against each other.
+REGISTERED_EVENT_SIG = "Registered(address,string,string[],uint256,uint256,uint256)"
+
+
+def registered_operators(ctx: ChainContext, from_block: int) -> list[str]:
+    """Operators that ever emitted Registry.Registered — event-order dedup.
+
+    The Registry has NO on-chain enumeration (only getListing(address)), so
+    eth_getLogs over the Registered event is the discovery mechanism for
+    `listings`. Re-registers emit the event again — duplicates removed here;
+    each operator's CURRENT state is read separately via getListing (the
+    latest registration overwrites the stored struct on-chain).
+
+    from_block: 0 = whole chain; callers pass LISTINGS_FROM_BLOCK so users
+    can skip a slow full-chain scan on long chains.
+    """
+    from eth_utils import keccak
+
+    topic0 = "0x" + keccak(text=REGISTERED_EVENT_SIG).hex()
+    try:
+        logs = ctx.w3.eth.get_logs(
+            {
+                "fromBlock": int(from_block),
+                "toBlock": "latest",
+                "address": ctx.registry.address,
+                "topics": [topic0],
+            }
+        )
+        decoded = [ctx.registry.events.Registered().process_log(log) for log in logs]
+    except TokenshareError:
+        raise
+    except Exception as exc:
+        raise TokenshareError(
+            f"cannot scan Registered events (eth_getLogs from block {from_block}): "
+            f"{_clean_exc(exc)}"
+        ) from exc
+    operators: list[str] = []
+    seen: set[str] = set()
+    for event in decoded:
+        operator = str(event["args"]["operator"])
+        if operator not in seen:
+            seen.add(operator)
+            operators.append(operator)
+    return operators
+
+
 def usdc_allowance(ctx: ChainContext) -> int:
     return int(ctx.usdc.functions.allowance(ctx.address, ctx.cfg.escrow_addr).call())
 
