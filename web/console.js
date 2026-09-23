@@ -498,7 +498,7 @@
   }
 
   function recordDispute(paymentId, reason, seller) {
-    T.disputes.add({ paymentId: String(paymentId), reason, seller, ts: Date.now() });
+    T.disputes.add({ paymentId: String(paymentId), reason, seller, buyer: state.address || null, ts: Date.now() });
     renderDisputes();
   }
 
@@ -646,7 +646,10 @@
   /* — disputes — */
   function renderDisputes() {
     const list = $("d-list");
-    const all = T.disputes.all();
+    /* same rule as session locks: connected → only my records; not connected
+       (or legacy records without a buyer) → show all as fallback */
+    const all = T.disputes.all().filter((d) =>
+      !state.address || T.sameAddr(d.buyer || "", state.address) || !d.buyer);
     $("d-clear").hidden = all.length === 0;
     if (!all.length) { list.innerHTML = `<p class="empty-hint">无争议记录。收据验签失败会自动记入此处。</p>`; return; }
     list.innerHTML = all.map((d) =>

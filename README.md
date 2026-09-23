@@ -104,8 +104,8 @@ pip install -r relay/requirements.txt -r cli/requirements.txt
 cd contracts && forge test && cd ..
 
 # 3. Relay + CLI unit tests
-cd relay && pytest tests && cd ..     # relay suite
-cd cli && pytest tests && cd ..       # 38+ tests green
+cd relay && pytest tests && cd ..     # 81 tests green
+cd cli && pytest tests && cd ..       # 56 tests green
 
 # 4. Configure (keys/addresses — never commit .env)
 cp .env.example .env
@@ -207,7 +207,7 @@ tokenshare/
 │   └── tests/
 ├── cli/                     # Typer buyer CLI
 │   ├── tokenshare_cli/      # signing / receipt / streaming / disputes / ...
-│   └── tests/               # 38 tests green
+│   └── tests/               # 56 tests green
 ├── web/                     # static market page (zero framework)
 ├── e2e/                     # run.py --network base_sepolia|monad_testnet + mock_openai.py
 └── TokenShare-BUILD_SPEC.md # build spec
@@ -217,6 +217,15 @@ tokenshare/
 
 <!-- M6 -->
 Live demo: Vercel deployment link — *coming soon*. Screenshots of the live market page and Monad testnet transactions will be added here.
+
+### Web frontend (`web/`)
+
+Zero-framework static pages — market (live Registry listings + relay health) and a Seller/Buyer console (register, deposit, lock, signed call, receipt verify, refund).
+
+- **Local:** `python3 -m http.server -d web` → open http://localhost:8000 (console at `/console.html`).
+- **Deploy:** point Vercel at the `web/` directory — no build step, zero runtime external references (ethers is vendored).
+- **Config:** `web/config.js` is the only chain-facts surface — fill `escrowAddr` / `registryAddr` / `sellers` from `contracts/deployed.monad.json` after a redeploy.
+- **Demo:** MetaMask required for the console; the page guides adding Monad testnet (chainId 10143) via `wallet_addEthereumChain`.
 
 ---
 
