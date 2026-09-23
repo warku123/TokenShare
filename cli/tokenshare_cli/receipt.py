@@ -3,9 +3,13 @@
 PIN (m3-m5-e2e.md 「接口契约 PIN」, must not drift):
     domain = {name: "TokenShare Relay", version: "1", chainId}
     Receipt(uint256 paymentId, uint256 promptTokens, uint256 cachedTokens,
-            uint256 completionTokens, uint256 actualAmount, address seller)
+            uint256 completionTokens, uint256 actualAmount, address seller,
+            string upstreamHost, string model)
     X-Receipt = base64url(JSON {domain, message, signature})
     Verification: recover_typed_data(...) == Registry listing operator (seller).
+
+`upstreamHost` + `model` (authenticity audit fields, PIN v1.1) let the buyer
+see WHICH official host and WHICH model served the call.
 
 On failure the CLI prints a warning and records the paymentId as a dispute
 (see disputes.py); it never crashes the already-served response.
@@ -58,6 +62,16 @@ class Receipt:
     @property
     def seller(self) -> str:
         return str(self.message.get("seller", ""))
+
+    @property
+    def upstream_host(self) -> str:
+        """Official host that served the call (authenticity audit field)."""
+        return str(self.message.get("upstreamHost", ""))
+
+    @property
+    def model(self) -> str:
+        """Actually served model name (authenticity audit field)."""
+        return str(self.message.get("model", ""))
 
 
 def decode_receipt(raw_b64: str) -> Receipt:

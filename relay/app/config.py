@@ -10,10 +10,15 @@ All amounts in this codebase are native USDC units (6 decimal places,
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
+from typing import Final
+from urllib.parse import urlparse
 
 from eth_account import Account
+
+logger = logging.getLogger("tokenshare.relay")
 
 # Env var names — the single source of truth (contract PIN §env).
 ENV_SELLER_KEY = "RELAY_SELLER_KEY"
@@ -28,12 +33,77 @@ ENV_FORWARD_MARGIN_S = "FORWARD_MARGIN_S"
 ENV_PORT = "PORT"
 ENV_PROMPT_TOKEN_CAP = "PROMPT_TOKEN_CAP"
 ENV_COMPLETION_TOKEN_CAP = "COMPLETION_TOKEN_CAP"
+ENV_ALLOW_CUSTOM_UPSTREAM = "ALLOW_CUSTOM_UPSTREAM"
 
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com"
 DEFAULT_FORWARD_MARGIN_S = 120
 DEFAULT_PORT = 8787
 DEFAULT_PROMPT_TOKEN_CAP = 200_000
 DEFAULT_COMPLETION_TOKEN_CAP = 32_000
+
+# ---------------------------------------------------------------------------
+# Official-endpoint-only upstream policy (anti-poisoning, 2026-09-23 ruling).
+#
+# Product positioning = renting out IDLE QUOTA OF OFFICIAL SUBSCRIPTION
+# PLANS, so the relay's upstream must be an OFFICIAL model-provider endpoint
+# and the served models must be official-plan models. A seller who points
+# the relay at an attacker-controlled "upstream" gets fake models/fake usage
+# — hence the startup allowlist below.
+#
+# P0 set — extendable: add new provider hosts HERE (host -> provider) plus
+# the model prefixes in MODEL_PROVIDER_PREFIXES; no other code changes.
+# ---------------------------------------------------------------------------
+OFFICIAL_UPSTREAM_HOSTS: Final[frozenset[str]] = frozenset(
+    {
+        "api.openai.com",  # OpenAI
+        "api.moonshot.cn",  # Kimi / Moonshot domestic
+        "api.moonshot.ai",  # Kimi / Moonshot international (keys not interchangeable with .cn)
+    }
+)
+
+# host -> provider id (the provider identity used for model consistency).
+OFFICIAL_HOST_PROVIDER: Final[dict[str, str]] = {
+    "api.openai.com": "openai",
+    "api.moonshot.cn": "moonshot",
+    "api.moonshot.ai": "moonshot",
+}
+
+# Official catalog model prefixes per provider. UNKNOWN prefixes => the model
+# is not an official-plan model (provider_for_model returns None). The relay
+# 400s such models instead of forwarding them to an official upstream.
+MODEL_PROVIDER_PREFIXES: Final[dict[str, tuple[str, ...]]] = {
+    "openai": ("gpt-", "o1", "o3", "o4", "chatgpt-"),
+    "moonshot": ("kimi-", "moonshot-"),
+}
+
+
+def provider_for_model(model_name: Any) -> str | None:
+    """Provider identity of an official-catalog model name (prefix match on
+    the single host-recognized prefixes). Unknown non-official prefixes (and
+    non-strings) return None — the caller must reject, never guess."""
+    if not isinstance(model_name, str):
+        return None
+    name = model_name.strip()
+    if not name:
+        return None
+    for provider, prefixes in MODEL_PROVIDER_PREFIXES.items():
+        for prefix in prefixes:
+            if name.startswith(prefix):
+                return provider
+    return None
+
+
+def host_provider(base_url: str) -> str | None:
+    """Provider of a base URL's host, or None when the host is not official.
+
+    Accepts the full (already normalized) base URL, e.g.
+    "https://api.moonshot.cn" -> "moonshot"; "http://127.0.0.1:9"
+    -> None (custom upstream — dev/test only)."""
+    try:
+        host = (urlparse(base_url).hostname or "").lower()
+    except ValueError:
+        return None
+    return OFFICIAL_HOST_PROVIDER.get(host)
 
 
 class ConfigError(RuntimeError):
@@ -128,6 +198,32 @@ def load_config() -> Config:
         if not addr.lower().startswith("0x") or len(addr) != 42:
             raise ConfigError(f"{name!r} must be a 0x-prefixed 20-byte address")
 
+    base_url = _normalize_openai_base_url(
+        os.environ.get(ENV_OPENAI_BASE_URL, DEFAULT_OPENAI_BASE_URL)
+    )
+    # Anti-poisoning startup gate: only OFFICIAL provider endpoints may serve
+    # as the upstream. A custom host would let a seller (or a tampered config)
+    # serve fake models and fake usage — the exact scenario this ruling
+    # forbids. Custom upstreams remain reachable ONLY with an explicit
+    # ALLOW_CUSTOM_UPSTREAM=1 (dev/test, e.g. the e2e mock).
+    if host_provider(base_url) is None:
+        if os.environ.get(ENV_ALLOW_CUSTOM_UPSTREAM, "").strip() == "1":
+
+            logger.warning(
+                "custom upstream enabled — dev/test only, authenticity guarantee void "
+                "(OPENAI_BASE_URL host is not in OFFICIAL_UPSTREAM_HOSTS)"
+            )
+        else:
+            raise ConfigError(
+                f"{ENV_OPENAI_BASE_URL}={base_url!r} is not an official model-provider "
+                "endpoint. TokenShare rents out idle quota of OFFICIAL subscription "
+                f"plans, so the upstream host must be one of {sorted(OFFICIAL_UPSTREAM_HOSTS)} "
+                "— this is the anti-poisoning guarantee that requests hit official "
+                "models on official endpoints. For local development and tests only "
+                "(e.g. the e2e mock upstream), set ALLOW_CUSTOM_UPSTREAM=1 explicitly; "
+                "that voids the authenticity guarantee."
+            )
+
     return Config(
         seller_key=seller_key,
         rpc_url=_require(ENV_RPC_URL),
@@ -136,9 +232,7 @@ def load_config() -> Config:
         registry_addr=_require(ENV_REGISTRY_ADDR),
         usdc_addr=_require(ENV_USDC_ADDR),
         openai_api_key=_require(ENV_OPENAI_API_KEY),
-        openai_base_url=_normalize_openai_base_url(
-            os.environ.get(ENV_OPENAI_BASE_URL, DEFAULT_OPENAI_BASE_URL)
-        ),
+        openai_base_url=base_url,
         forward_margin_s=_optional_int(ENV_FORWARD_MARGIN_S, DEFAULT_FORWARD_MARGIN_S),
         port=_optional_int(ENV_PORT, DEFAULT_PORT, minimum=1),
         prompt_token_cap=_optional_int(ENV_PROMPT_TOKEN_CAP, DEFAULT_PROMPT_TOKEN_CAP),

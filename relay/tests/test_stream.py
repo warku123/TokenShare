@@ -93,7 +93,7 @@ def test_stream_client_disconnect_never_settles(
             ),
         )
         try:
-            gen_resp = await m._forward_stream(isolated, body_dict, 77, prices, 1_000_000)
+            gen_resp = await m._forward_stream(isolated, body_dict, 77, prices, 1_000_000, "gpt-4o-mini")
             aiter = gen_resp.body_iterator
             first = await aiter.__anext__()  # consume event 1
             assert first.startswith(b"data:")

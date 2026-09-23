@@ -37,7 +37,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .chain import ChainClient
-from .config import Config, load_config
+from .config import Config, host_provider, load_config, provider_for_model
 from .pricing import Prices, Usage, clamp_settle_amount, compute_actual, estimate_min_amount
 from .receipt import ReceiptStore, build_receipt, encode_x_receipt
 
@@ -177,13 +177,26 @@ def _verify_request_signature(
 
 def _extract_usage(usage: dict[str, Any] | None) -> Usage:
     """PIN: prompt_tokens / prompt_tokens_details.cached_tokens (default 0) /
-    completion_tokens."""
+    completion_tokens.
+
+    Robustness for real upstreams (Kimi semantics, high confidence):
+      - cached_tokens fallback chain:
+        prompt_tokens_details.cached_tokens (standard position, primary)
+        → top-level usage.cached_tokens (non-standard, Kimi-style last resort)
+        → 0;
+      - null values anywhere are treated as absent (`or 0` chains cover both
+        explicit nulls and missing keys).
+    """
     if not usage:
         raise ValueError("OpenAI response contained no usage object")
-    prompt = int(usage.get("prompt_tokens", 0))
+    prompt = int(usage.get("prompt_tokens") or 0)
     details = usage.get("prompt_tokens_details") or {}
-    cached = int(details.get("cached_tokens") or 0)
-    completion = int(usage.get("completion_tokens", 0))
+    cached = int(
+        details.get("cached_tokens")
+        or usage.get("cached_tokens")
+        or 0
+    )
+    completion = int(usage.get("completion_tokens") or 0)
     return Usage(prompt_tokens=prompt, cached_tokens=cached, completion_tokens=completion)
 
 
@@ -215,7 +228,62 @@ def _check_model(listing: dict[str, Any], body: dict[str, Any]) -> None:
         raise HTTPException(status_code=400, detail="model not in listing.models")
 
 
-def _build_receipt(st: RelayState, payment_id: int, usage: Usage, actual: int) -> dict[str, Any]:
+def _upstream_host(base_url: str) -> str:
+    """Hostname of the configured upstream for the receipt `upstreamHost`
+    field (e.g. "api.moonshot.cn"). Never empty — the config gate guarantees
+    a parseable URL; fall back to the raw value for safety."""
+    from urllib.parse import urlparse as _urlparse
+
+    try:
+        host = _urlparse(base_url).hostname or ""
+    except ValueError:
+        host = ""
+    return host or base_url
+
+
+def _check_model_provider_consistency(body: dict[str, Any]) -> None:
+    """Anti-poisoning per-request gate: the buyer-requested model must belong
+    to the OFFICIAL provider the relay's configured upstream serves.
+
+    Two rejections:
+      - `provider_for_model` None → the model name carries no official catalog
+        prefix at all (a fake/invented model name — never forwarded);
+      - the model's provider ≠ the upstream host's provider (e.g. a "kimi-…"
+        name aimed at api.openai.com) — the only way such a request could be
+        "served" is a lying upstream, which the allowlist already excludes;
+        the check closes the mismatch at the request layer too.
+
+    On an explicitly allowed CUSTOM upstream (ALLOW_CUSTOM_UPSTREAM=1, dev/test
+    only) the host has no provider identity, so only the catalog-prefix half
+    is enforced — the mismatch half needs a real official host to compare to.
+
+    Complements the startup host allowlist and the listing.models check
+    (errors are distinguishable; ordering with `_check_model` is free).
+    """
+    model = body.get("model")
+    provider = provider_for_model(model)
+    if provider is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"model {model!r} is not in the official model catalog "
+                "(official-plan models only; refusing to forward)"
+            ),
+        )
+    upstream_provider = host_provider(_get_state().config.openai_base_url)
+    if upstream_provider is not None and upstream_provider != provider:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"model {model!r} (provider {provider}) does not match the official "
+                f"upstream provider {upstream_provider}; refusing to forward"
+            ),
+        )
+
+
+def _build_receipt(
+    st: RelayState, payment_id: int, usage: Usage, actual: int, model: str
+) -> dict[str, Any]:
     return build_receipt(
         chain_id=st.config.chain_id,
         payment_id=payment_id,
@@ -225,6 +293,8 @@ def _build_receipt(st: RelayState, payment_id: int, usage: Usage, actual: int) -
         actual_amount=actual,
         seller=st.chain.seller_address,
         seller_key=st.config.seller_key,
+        upstream_host=_upstream_host(st.config.openai_base_url),
+        model=model,
     )
 
 
@@ -253,6 +323,7 @@ async def _settle_and_stamp_headers(
     prices: Prices,
     max_amount: int,
     response: JSONResponse,
+    model: str,
 ) -> JSONResponse:
     settled, actual = await _try_settle(st, payment_id, usage, prices, max_amount)
     if not settled:
@@ -260,7 +331,7 @@ async def _settle_and_stamp_headers(
         return response  # no receipt; buyer can refund after ttl
 
     response.headers["X-Settle-Status"] = "settled"
-    receipt = _build_receipt(st, payment_id, usage, actual)
+    receipt = _build_receipt(st, payment_id, usage, actual, model)
     st.receipts.put(payment_id, receipt)
     response.headers["X-Receipt"] = encode_x_receipt(receipt)
     return response
@@ -275,6 +346,7 @@ async def _forward_stream(
     payment_id: int,
     prices: Prices,
     max_amount: int,
+    model: str,
 ) -> StreamingResponse:
     """Transparent SSE passthrough. Usage is taken from the final chunk (with
     injected stream_options); settle happens after the stream drains — for a
@@ -327,7 +399,7 @@ async def _forward_stream(
             return
         settled, actual = await _try_settle(st, payment_id, usage, prices, max_amount)
         if settled:
-            st.receipts.put(payment_id, _build_receipt(st, payment_id, usage, actual))
+            st.receipts.put(payment_id, _build_receipt(st, payment_id, usage, actual, model))
         else:
             logger.info(
                 "stream settle-failed paymentId=%s (buyer may refund after ttl)",
@@ -343,7 +415,12 @@ async def _forward_stream(
 
 
 def _relay_sse_event(event: bytes, usage_holder: dict[str, Usage | None]) -> bytes:
-    """Re-emit one raw SSE event verbatim; opportunistically capture usage."""
+    """Re-emit one raw SSE event verbatim; opportunistically capture usage.
+
+    Usage may appear in an empty-choices chunk or a chunk carrying
+    finish_reason, always BEFORE `data: [DONE]`; the LAST non-null usage in
+    the stream is authoritative. A later chunk with a null/absent usage must
+    not erase an earlier real one."""
     for line in event.decode("utf-8", "replace").splitlines():
         if not line.startswith("data:"):
             continue
@@ -399,6 +476,8 @@ async def chat_completions(request: Request) -> Any:
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="body must be a JSON object")
     _check_model(listing, body)
+    _check_model_provider_consistency(body)
+    model_name = str(body["model"])  # validated as a listed string above
 
     # 3. TTL margin guard: seller needs FORWARD_MARGIN_S to settle (409).
     if int(payment["expiresAt"]) - int(time.time()) < st.config.forward_margin_s:
@@ -415,8 +494,14 @@ async def chat_completions(request: Request) -> Any:
         raise HTTPException(status_code=402, detail="payment invalid (unpaid/wrong seller/expired)")
 
     # 5-6. Forward, price, settle, receipt (never swallow the LLM response).
+    # The buyer's body is forwarded to the upstream VERBATIM — zero parameter
+    # injection here. Kimi compatibility: injecting sampling parameters
+    # (temperature/top_p, any value including 0) would be rejected by the
+    # upstream with HTTP 400, so the relay must never add them.
     if body.get("stream"):
-        return await _forward_stream(st, body, payment_id, prices, int(payment["maxAmount"]))
+        return await _forward_stream(
+            st, body, payment_id, prices, int(payment["maxAmount"]), model_name
+        )
 
     try:
         upstream = await st.http.post(
@@ -439,5 +524,5 @@ async def chat_completions(request: Request) -> Any:
 
     response = JSONResponse(status_code=200, content=payload)
     return await _settle_and_stamp_headers(
-        st, payment_id, usage, prices, int(payment["maxAmount"]), response
+        st, payment_id, usage, prices, int(payment["maxAmount"]), response, model_name
     )

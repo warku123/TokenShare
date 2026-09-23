@@ -70,6 +70,8 @@ def make_receipt(signer_key: str, payment_id: int, seller_addr: str, chain_id: i
         "completionTokens": 5,
         "actualAmount": 7,
         "seller": seller_addr,
+        "upstreamHost": "api.moonshot.cn",
+        "model": "kimi-k2.6",
     }
     message.update(overrides)
     types = receipt_types()

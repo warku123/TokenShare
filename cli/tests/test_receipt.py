@@ -169,6 +169,66 @@ def test_decode_receipt_fields():
     assert receipt.seller == SELLER
 
 
+# ---------------------------------------------------------------------------
+# PIN v1.1 authenticity audit fields: upstreamHost + model
+# ---------------------------------------------------------------------------
+
+
+def test_upstream_host_and_model_roundtrip():
+    payload = make_receipt_from_key(
+        SELLER_KEY, payment_id=5, upstreamHost="api.moonshot.cn", model="kimi-k2.6"
+    )
+    receipt = decode_receipt(receipt_header(payload))
+    assert receipt.upstream_host == "api.moonshot.cn"
+    assert receipt.model == "kimi-k2.6"
+    check = verify_receipt(
+        receipt, expected_seller=SELLER, expected_payment_id=5, expected_chain_id=CHAIN_ID
+    )
+    assert check.ok is True
+    assert check.reason is None
+
+
+def test_missing_new_fields_decode_as_empty():
+    """Old receipts without the v1.1 fields still decode (empty display)."""
+    payload = make_receipt_from_key(SELLER_KEY, payment_id=6)
+    del payload["message"]["upstreamHost"]
+    del payload["message"]["model"]
+    from tokenshare_cli.signing import receipt_types
+    from eth_account import Account
+
+    acct = Account.from_key(SELLER_KEY)
+    # Re-sign over the reduced struct so the decode test stays self-consistent.
+    domain = payload["domain"]
+    signed = acct.sign_typed_data(domain, receipt_types(), payload["message"])
+    payload["signature"] = signed.signature.hex()
+    receipt = decode_receipt(receipt_header(payload))
+    assert receipt.upstream_host == ""
+    assert receipt.model == ""
+
+
+def test_tampered_upstream_host_fails_verification():
+    """A receipt claiming a fake official host must not verify."""
+    payload = make_receipt_from_key(SELLER_KEY, payment_id=7)
+    payload["message"]["upstreamHost"] = "evil.example.com"  # tampered post-signing
+    receipt = decode_receipt(receipt_header(payload))
+    check = verify_receipt(
+        receipt, expected_seller=SELLER, expected_payment_id=7, expected_chain_id=CHAIN_ID
+    )
+    assert check.ok is False
+    assert check.reason == "recover-mismatch"
+
+
+def test_tampered_model_fails_verification():
+    payload = make_receipt_from_key(SELLER_KEY, payment_id=8)
+    payload["message"]["model"] = "fake-model"  # tampered post-signing
+    receipt = decode_receipt(receipt_header(payload))
+    check = verify_receipt(
+        receipt, expected_seller=SELLER, expected_payment_id=8, expected_chain_id=CHAIN_ID
+    )
+    assert check.ok is False
+    assert check.reason == "recover-mismatch"
+
+
 def test_decode_errors():
     with pytest.raises(ReceiptDecodeError):
         decode_receipt("")  # empty

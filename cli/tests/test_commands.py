@@ -288,6 +288,9 @@ def test_call_success_flow(monkeypatch, tmp_path):
     assert "Settle status: settled" in out
     assert "Receipt verification: OK" in out
     assert "actual=7 native" in out
+    # PIN v1.1 audit fields are displayed
+    assert "upstreamHost=api.moonshot.cn" in out
+    assert "model=kimi-k2.6" in out
 
     # no dispute was recorded
     assert not disputes.exists()

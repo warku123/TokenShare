@@ -84,5 +84,7 @@ def receipt_types() -> dict:
             {"name": "completionTokens", "type": "uint256"},
             {"name": "actualAmount", "type": "uint256"},
             {"name": "seller", "type": "address"},
+            {"name": "upstreamHost", "type": "string"},
+            {"name": "model", "type": "string"},
         ]
     }

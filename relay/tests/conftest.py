@@ -146,6 +146,8 @@ class MockOpenAIHandler(BaseHTTPRequestHandler):
             mode = server.mode
 
         usage = dict(server.usage)
+        if server.usage_override is not None:
+            usage = dict(server.usage_override)
 
         if mode in ("ok", "ok_no_usage", "error_500", "slow_json"):
             if mode == "slow_json":
@@ -179,6 +181,18 @@ class MockOpenAIHandler(BaseHTTPRequestHandler):
             time.sleep(server.slow_seconds)
             self.wfile.write(b"data: [DONE]\n\n")
             return
+        if mode == "stream_usage_then_null":
+            # Kimi semantics (high confidence): usage appears BEFORE [DONE],
+            # possibly in an empty-choices chunk, and a LATER chunk may carry
+            # a null usage. The relay must keep the LAST NON-null usage.
+            self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            first = {"id": "c1", "choices": [], "usage": dict(usage)}
+            self.wfile.write(f"data: {json.dumps(first)}\n\n".encode())
+            self.wfile.write(b"data: {\"id\":\"c1\",\"choices\":[],\"usage\":null}\n\n")
+            self.wfile.write(b"data: {\"id\":\"c1\",\"choices\":[],\"usage\":null,"
+                             b"\"finish_reason\":\"stop\"}\n\n")
+            self.wfile.write(b"data: [DONE]\n\n")
+            return
         self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
         if mode == "stream_no_usage":
             self.wfile.write(b"data: {\"id\":\"c1\",\"choices\":[]}\n\n")
@@ -198,6 +212,8 @@ class MockOpenAIServer(ThreadingHTTPServer):
         self.received_paths: list[str] = []
         self.mode = "ok"
         self.usage: dict[str, Any] = dict(USAGE)
+        # Non-None replaces the per-test usage object (fallback-chain tests).
+        self.usage_override: dict[str, Any] | None = None
         self.slow_seconds = 0.5
 
 
@@ -223,6 +239,7 @@ def reset_upstream(mock_openai: MockOpenAIServer) -> None:
     mock_openai.received.clear()
     mock_openai.received_paths.clear()
     mock_openai.usage = dict(USAGE)
+    mock_openai.usage_override = None
     mock_openai.slow_seconds = 0.5
 
 
@@ -239,6 +256,9 @@ def fake_chain(monkeypatch: pytest.MonkeyPatch) -> type[FakeChain]:
 
 
 def setup_relay_env(monkeypatch: pytest.MonkeyPatch, base_url: str) -> None:
+    # The mock upstream host is not an official endpoint: the relay's startup
+    # anti-poisoning gate would refuse it, so every test boot opts into the
+    # explicit dev/test-only escape hatch (the same one the e2e runner uses).
     env = {
         "RELAY_SELLER_KEY": SELLER_KEY,
         "RPC_URL": "http://unused.invalid",
@@ -252,6 +272,7 @@ def setup_relay_env(monkeypatch: pytest.MonkeyPatch, base_url: str) -> None:
         "PORT": "8787",
         "PROMPT_TOKEN_CAP": "200000",
         "COMPLETION_TOKEN_CAP": "32000",
+        "ALLOW_CUSTOM_UPSTREAM": "1",
     }
     for key, value in env.items():
         monkeypatch.setenv(key, value)

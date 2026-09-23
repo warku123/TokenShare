@@ -83,8 +83,11 @@ def test_receipt_message_fields_exact(client: Any, fake_chain: Any) -> None:
     assert msg["completionTokens"] == 2500
     assert msg["actualAmount"] == ACTUAL
     assert msg["seller"] == SELLER
+    assert msg["upstreamHost"] == "127.0.0.1"
+    assert msg["model"] == "gpt-4o-mini"
     assert list(msg.keys()) == ["paymentId", "promptTokens", "cachedTokens",
-                                "completionTokens", "actualAmount", "seller"]
+                                "completionTokens", "actualAmount", "seller",
+                                "upstreamHost", "model"]
 
 
 def test_receipt_rejects_tampered_message(client: Any, fake_chain: Any) -> None:

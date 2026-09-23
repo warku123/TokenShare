@@ -1,6 +1,6 @@
 # TokenShare
 
-**A pay-per-call marketplace for idle LLM API quota.** Sellers run a relay on their own API keys and rent out spare quota by the call; buyers pay a few cents of USDC per request, with an on-chain escrow contract holding and settling the funds. No custody, no upgrade keys, no trusted third party.
+**Renting out idle quota of OFFICIAL LLM subscription plans.** Sellers expose the spare quota of their official plan (OpenAI, Kimi/Moonshot, …) through a relay that forwards **only to the provider's official endpoint**; buyers pay a few cents of USDC per request, with an on-chain escrow contract holding and settling the funds. No custody, no upgrade keys, no trusted third party.
 
 > Built for the **Monad Metropolis hackathon** — Track: **Trust, Identity & AI Infrastructure**.
 > TokenShare supplies *trust-minimized wholesale API supply* for x402 / agentic payment rails: sellers put idle quota back to work, buyers get per-call pricing far below retail plans.
@@ -46,6 +46,25 @@ In five steps:
 - **Verify-then-forward** — the relay is economically required to check on-chain payment before spending its own upstream quota; unpaid traffic costs the seller nothing.
 - **Chain-agnostic** — contracts contain zero chain-specific hardcoding (USDC address, chainId all injected via config). The exact same bytecode runs on Base Sepolia and Monad testnet.
 - **Signed receipts** — every settlement comes with an EIP-712 receipt the buyer can independently verify, so a misbehaving relay is detectable.
+
+## Official-endpoint-only upstreams
+
+TokenShare rents out **official-plan** quota, so a served model must be an official-plan model hitting the provider's **official endpoint**. The relay enforces this at two layers:
+
+1. **Startup host allowlist** — the relay refuses to start unless `OPENAI_BASE_URL`'s host is in `OFFICIAL_UPSTREAM_HOSTS` (relay/app/config.py). A custom upstream needs the explicit dev/test flag `ALLOW_CUSTOM_UPSTREAM=1`, which logs a WARNING that the authenticity guarantee is void.
+2. **Per-request model/provider consistency** — the requested model's official-catalog prefix must match the upstream host's provider; unknown prefixes and mismatches are rejected with 400 and never forwarded.
+
+| Official host | Provider | Model prefixes |
+|---------------|----------|----------------|
+| `api.openai.com` | openai | `gpt-`, `o1`, `o3`, `o4`, `chatgpt-` |
+| `api.moonshot.cn` (Kimi domestic) | moonshot | `kimi-`, `moonshot-` |
+| `api.moonshot.ai` (Kimi international) | moonshot | `kimi-`, `moonshot-` (keys are **not** interchangeable with `.cn`) |
+
+**Why this prevents poisoning:** a seller cannot point the relay at a lookalike endpoint and serve fake models or fake usage — the host is pinned to the official set, the model must carry the matching provider's catalog prefix, and every EIP-712 receipt now records `upstreamHost` + `model` so a buyer can audit exactly which official host and which model served each settled call. The relay reference implementation is the client-side guarantee; the ultimate proof of serving integrity is the **M7 TEE attestation** (remote attestation of the serving environment), which this layer is designed to hand off to.
+
+Custom upstreams (`http://127.0.0.1:…` mocks, proxies) are **development and test only** — the e2e runner sets `ALLOW_CUSTOM_UPSTREAM=1` for its mock automatically; a real-chain e2e run defaults to the official upstream from env (`OPENAI_BASE_URL` + `OPENAI_API_KEY`) and only uses the mock when `E2E_FORCE_MOCK_OPENAI=1` is set explicitly.
+
+> Kimi note: request bodies must not carry `temperature` / `top_p` (Kimi rejects them with HTTP 400 for any value, including 0). The relay itself injects zero sampling parameters and forwards the buyer's body verbatim.
 
 ## Architecture
 
@@ -105,7 +124,7 @@ E2E PASSED
 
 The runner drives the whole stack itself: it starts an anvil fork of Base Sepolia, deploys `Escrow` + `Registry` (+ a `MockUSDC` stand-in) via `forge script script/Deploy.s.sol`, writes `contracts/deployed.json`, mints test USDC, registers a seller listing that points at a locally started mock OpenAI and the relay, then drives the **real buyer CLI** through `deposit → lock → call → settle → refund` as a black-box subprocess and asserts the settled receipt plus the on-chain state (`Escrow` payment Settled, escrow balances moved buyer→seller, refund path credited back).
 
-For a paid call against a **real OpenAI key** instead of the mock: set `OPENAI_API_KEY` and `OPENAI_BASE_URL=https://api.openai.com` in `.env` and start the relay yourself (`uvicorn relay.app.main:app --port 8787`, run from the repo root with `.env` exported).
+For a paid call against a **real official-platform key** instead of the mock: set `OPENAI_API_KEY` and `OPENAI_BASE_URL` (test default: `https://api.moonshot.cn`, Kimi — see `.env.example`) in `.env` and start the relay yourself (`uvicorn relay.app.main:app --port 8787`, run from the repo root with `.env` exported). The host must be in the official allowlist above.
 
 ### Manual step-by-step (what `run.py` automates)
 
@@ -120,15 +139,19 @@ USDC_ADDR=0x036CbD53842c5426634e7929541eC2318f3dCF7e \
   --private-key $PRIVATE_KEY --sender $DEPLOYER_ADDR     # unset USDC_ADDR → MockUSDC
 cd ..
 
-# 2) Seller registers a listing (direct web3; the relay endpoint goes on-chain):
+# 2) Seller registers a listing (direct web3; the relay endpoint goes on-chain).
+#    --model must be an official-plan model matching the relay's upstream:
+#    Kimi (api.moonshot.cn) → kimi-k2.6; OpenAI → gpt-4o-mini, etc.
 python3 e2e/register_listing.py --network base_sepolia \
   --endpoint http://127.0.0.1:8787 \
+  --model kimi-k2.6 \
   --price-cached-in 1000 --price-input 2000 --price-output 3000   # per-1M-token USDC native
 
 # 3) Seller starts the relay (uses RELAY_SELLER_KEY + the 12 relay env names, see .env.example):
 python3 -m uvicorn relay.app.main:app --host 127.0.0.1 --port 8787   # from repo root
 
-# 4) Buyer (from cli/ with .env exported):
+# 4) Buyer (from cli/ with .env exported); --model defaults to the first model
+#    of the Registry listing (here kimi-k2.6):
 cd cli
 python3 -m tokenshare_cli deposit --amount 500
 python3 -m tokenshare_cli call "Explain EIP-712 in one sentence" --seller $SELLER_ADDR --max 5

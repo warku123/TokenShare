@@ -18,7 +18,10 @@ base_sepolia local path = EVERYTHING on this machine:
      mock OpenAI usage so the settled amount is exact and non-zero.
   4. e2e/mock_openai.py serves deterministic non-stream JSON + SSE on a free
      port. NOTE: OPENAI_BASE_URL must be the bare host root WITHOUT /v1 — the
-     relay (httpx base_url) appends /v1/chat/completions itself.
+     relay (httpx base_url) appends /v1/chat/completions itself. The mock host
+     is NOT an official endpoint, so the relay env gets the explicit dev/test
+     flag ALLOW_CUSTOM_UPSTREAM=1 (the anti-poisoning gate in
+     relay/app/config.py refuses non-official hosts otherwise).
   5. relay/app/main.py runs via uvicorn with the full relay env assembly
      (relay/app/config.py names); OPENAI_API_KEY=dummy passes the existence
      check; logs land in e2e/.relay.log.
@@ -39,6 +42,13 @@ keys (SELLER_PRIVATE_KEY / BUYER_PRIVATE_KEY) and is executed in M5b. Without
 keys the script explains the M5b prerequisites and exits 0 (config-ready, not
 a failure). Official USDC is used on real chains (Deploy.s.sol reads
 USDC_ADDR), so no mint step happens there.
+
+Real-chain upstream (authenticity architecture, 2026-09-23): the relay
+defaults to the OFFICIAL upstream from env (OPENAI_BASE_URL + OPENAI_API_KEY,
+e.g. Kimi at api.moonshot.cn) with a matching E2E_MODEL (default kimi-k2.6);
+E2E_FORCE_MOCK_OPENAI=1 falls back to the local mock (with the relay's
+ALLOW_CUSTOM_UPSTREAM=1 dev/test flag). The CLI's --model always uses the
+model registered in the seller listing.
 
 Polling per spec §9 (verified): 1s interval, 60s timeout on real chains.
 """
@@ -445,7 +455,8 @@ def deploy_contracts(network: str, rpc_url: str, deployer_addr: str,
 
 def prepare_contracts(rpc_url: str, relay_port: int, deployed: dict[str, Any],
                       seller_addr: str, seller_key: str, buyer_addr: str,
-                      mint_key: str | None, deposit_usdc: str) -> None:
+                      mint_key: str | None, deposit_usdc: str,
+                      served_model: str) -> None:
     step("[3/8] Contract prep via direct web3: mint mock USDC + register seller listing")
     w3 = w3_at(rpc_url)
     checksum = w3.to_checksum_address
@@ -466,9 +477,9 @@ def prepare_contracts(rpc_url: str, relay_port: int, deployed: dict[str, Any],
         print(f"minted MockUSDC for buyer {buyer_addr}")
 
     endpoint = os.environ.get("RELAY_PUBLIC_ENDPOINT") or f"http://127.0.0.1:{relay_port}"
-    fn = registry_register(w3, deployed["registry"], endpoint)
+    fn = registry_register(w3, deployed["registry"], endpoint, served_model)
     send_tx(w3, fn, seller_key)
-    print(f"registered listing: operator={seller_addr} endpoint={endpoint} model={MOCK_MODEL}")
+    print(f"registered listing: operator={seller_addr} endpoint={endpoint} model={served_model}")
 
     # sanity: listing readable, active, endpoint matches
     listing = w3.eth.contract(
@@ -488,10 +499,10 @@ def registry_factory(w3: Any, addr: str) -> Any:
     return w3.eth.contract(address=w3.to_checksum_address(addr), abi=REGISTRY_ABI)
 
 
-def registry_register(w3: Any, addr: str, endpoint: str) -> Any:
+def registry_register(w3: Any, addr: str, endpoint: str, served_model: str) -> Any:
     return registry_factory(w3, addr).functions.register(
         endpoint,
-        [MOCK_MODEL],
+        [served_model],
         LISTING_PRICES["cached"],
         LISTING_PRICES["input"],
         LISTING_PRICES["output"],
@@ -600,13 +611,15 @@ def parse_cli_value(cli_output: str, key: str) -> str:
     fail_all(f"no {key!r} line in CLI output:\n{cli_output}")
 
 
-def assert_call_output(out: str, prompt: str) -> None:
+def assert_call_output(out: str, prompt: str, expect_mock: bool = True) -> None:
     """CLI output must contain the model reply, settle status and a verified
-    receipt (acceptance per BUILD_SPEC §7 M4/M5)."""
-    if "TokenShare mock LLM online" not in out:
-        fail_all(f"CLI call output missing mock model reply:\n{out}")
-    if f"echo: {prompt}" not in out:
-        fail_all(f"CLI call output missing prompt echo:\n{out}")
+    receipt (acceptance per BUILD_SPEC §7 M4/M5). The reply-content asserts
+    are mock-upstream specific (a real official upstream answers freely)."""
+    if expect_mock:
+        if "TokenShare mock LLM online" not in out:
+            fail_all(f"CLI call output missing mock model reply:\n{out}")
+        if f"echo: {prompt}" not in out:
+            fail_all(f"CLI call output missing prompt echo:\n{out}")
     if "Settle status: settled" not in out:
         fail_all(f'CLI call output missing "Settle status: settled":\n{out}')
     if "Receipt verification: OK" not in out:
@@ -615,7 +628,8 @@ def assert_call_output(out: str, prompt: str) -> None:
 
 def onchain_settle_asserts(rpc_url: str, deployed: dict[str, Any], payment_id: int,
                            before: dict[str, int], after: dict[str, int],
-                           buyer_addr: str, seller_addr: str) -> None:
+                           buyer_addr: str, seller_addr: str,
+                           expected_actual: int | None = EXPECTED_ACTUAL) -> None:
     step("[7/8] On-chain asserts: Escrow Settled + balance direction")
     payment = escrow_payment(rpc_url, deployed, payment_id)
     if payment["state"] != 2:
@@ -626,8 +640,12 @@ def onchain_settle_asserts(rpc_url: str, deployed: dict[str, Any], payment_id: i
         fail_all(f"payment seller {payment['seller']} != relay seller {seller_addr}")
 
     actual = before["buyer_escrow"] - after["buyer_escrow"]
-    if actual != EXPECTED_ACTUAL:
-        fail_all(f"settled delta {actual} != priced expectation {EXPECTED_ACTUAL} "
+    if actual <= 0:
+        fail_all(f"settled delta {actual} <= 0 (before={before} after={after})")
+    # Exact-amount equality only holds for the deterministic mock usage; on a
+    # real official upstream the settled amount follows the real usage.
+    if expected_actual is not None and actual != expected_actual:
+        fail_all(f"settled delta {actual} != priced expectation {expected_actual} "
                  f"(before={before} after={after})")
     if after["seller_escrow"] - before["seller_escrow"] != actual:
         fail_all(
@@ -692,8 +710,9 @@ def start_mock(base_env: dict[str, str]) -> int:
 
 
 def start_relay(base_env: dict[str, str], deployed: dict[str, Any], rpc_url: str,
-                chain_id: int, relay_port: int, mock_port: int, seller_key: str) -> None:
-    step(f"[5/8] relay (uvicorn) on port {relay_port}, OPENAI_BASE_URL -> mock (no /v1 suffix)")
+                chain_id: int, relay_port: int, seller_key: str,
+                upstream_base_url: str) -> None:
+    step(f"[5/8] relay (uvicorn) on port {relay_port}, OPENAI_BASE_URL -> {upstream_base_url}")
     relay_env = dict(base_env)
     # Full relay env assembly — names are verbatim relay/app/config.py ENV_*.
     relay_env.update(
@@ -708,13 +727,18 @@ def start_relay(base_env: dict[str, str], deployed: dict[str, Any], rpc_url: str
             # httpx base_url appends /v1/chat/completions — the value must NOT
             # end in /v1 (relay default "https://api.openai.com/v1" would double
             # the path; reported as a relay finding for Gate G).
-            "OPENAI_BASE_URL": f"http://127.0.0.1:{mock_port}",
+            "OPENAI_BASE_URL": upstream_base_url,
             "FORWARD_MARGIN_S": base_env.get("FORWARD_MARGIN_S", "120"),
             "PORT": str(relay_port),
             "PROMPT_TOKEN_CAP": str(PROMPT_TOKEN_CAP),
             "COMPLETION_TOKEN_CAP": str(COMPLETION_TOKEN_CAP),
         }
     )
+    if _relay_upstream_is_mock(upstream_base_url):
+        # A mock/localhost upstream is NOT an official endpoint: the relay's
+        # startup anti-poisoning gate refuses non-official hosts, so every
+        # mock-upstream run must pass the explicit dev/test-only flag.
+        relay_env["ALLOW_CUSTOM_UPSTREAM"] = "1"
     start(
         "relay",
         [sys.executable, "-m", "uvicorn", "relay.app.main:app",
@@ -727,7 +751,22 @@ def start_relay(base_env: dict[str, str], deployed: dict[str, Any], rpc_url: str
     health = httpx.get(f"http://127.0.0.1:{relay_port}/health", timeout=10).json()
     if str(health.get("seller", "")).lower() != seller_key_addr(seller_key).lower():
         fail_all(f"relay health seller={health.get('seller')} != registry seller")
-    print(f"relay up: seller={health['seller']} chainId={health['chainId']}")
+    print(f"relay up: seller={health['seller']} chainId={health['chainId']} "
+          f"upstream={upstream_base_url}")
+
+
+def _relay_upstream_is_mock(upstream_base_url: str) -> bool:
+    """True when the relay upstream is the local e2e mock (never an official
+    provider host). Official hosts start with https:// (loopback mocks can't)."""
+    return not upstream_base_url.startswith("https://")
+
+
+def _normalize_base_url(raw: str) -> str:
+    """Host-root form, mirroring relay/app/config.py normalization."""
+    url = raw.strip().rstrip("/")
+    if url.endswith("/v1"):
+        url = url[: -len("/v1")]
+    return url or raw.strip()
 
 
 def seller_key_addr(seller_key: str) -> str:
@@ -738,7 +777,8 @@ def seller_key_addr(seller_key: str) -> str:
 
 def buyer_flow(deployed: dict[str, Any], rpc_url: str, chain_id: int,
                base_env: dict[str, str], buyer_key: str, buyer_addr: str,
-               seller_addr: str, deposit_usdc: str) -> int:
+               seller_addr: str, deposit_usdc: str, served_model: str,
+               upstream_is_mock: bool) -> int:
     step("[6/8] Buyer flow via CLI subprocess: deposit -> lock -> call -> refund (expired)")
     buyer_env = cli_env(base_env, deployed, rpc_url, chain_id, buyer_key, seller_addr)
     disputes_file = E2E_DIR / ".disputes.json"
@@ -764,17 +804,20 @@ def buyer_flow(deployed: dict[str, Any], rpc_url: str, chain_id: int,
     prompt = "Explain EIP-712 receipts in one sentence."
     call_out = run_cli(
         ["--disputes-file", str(disputes_file), "call", prompt,
-         "--seller", seller_addr, "--model", MOCK_MODEL, "--max", CALL_MAX_USDC],
+         "--seller", seller_addr, "--model", served_model, "--max", CALL_MAX_USDC],
         buyer_env,
     )
-    assert_call_output(call_out, prompt)
+    assert_call_output(call_out, prompt, expect_mock=upstream_is_mock)
     settle_pid = int(parse_cli_value(call_out, "paymentId"))
     print(f"call used paymentId {settle_pid} (auto-locked, settled)")
 
-    # On-chain asserts for the settled payment.
+    # On-chain asserts for the settled payment. Exact EXPECTED_ACTUAL equality
+    # only applies to the deterministic mock usage; a real official upstream
+    # settles from its real usage (still asserted: Settled, buyer->seller flow).
     onchain_settle_asserts(rpc_url, deployed, settle_pid, before,
                            escrow_balances(rpc_url, deployed, buyer_addr, seller_addr),
-                           buyer_addr, seller_addr)
+                           buyer_addr, seller_addr,
+                           expected_actual=EXPECTED_ACTUAL if upstream_is_mock else None)
 
     # Refund path (M4): the CLI pre-check uses wall-clock time, the contract
     # uses block.timestamp — and an anvil FORK's chain clock lags the host
@@ -905,14 +948,45 @@ def run(network: str) -> str | None:
 
     # Ports: relay prefers 8787 (PIN default), mock gets a random free port.
     relay_port = pick_free_port(int(base_env.get("RELAY_PORT", "8787")))
+    # Upstream decision (authenticity architecture, 2026-09-23):
+    #   - the anvil fork path ALWAYS uses the local mock (a fork run must
+    #     never spend real quota); the mock host is not an official endpoint,
+    #     so the relay gets the dev/test-only ALLOW_CUSTOM_UPSTREAM=1;
+    #   - the real-chain path defaults to the OFFICIAL upstream from env
+    #     (OPENAI_BASE_URL + OPENAI_API_KEY, e.g. Kimi at api.moonshot.cn) and
+    #     only falls back to the mock when E2E_FORCE_MOCK_OPENAI=1 is set
+    #     explicitly (same escape flag injected for the relay).
+    force_mock = base_env.get("E2E_FORCE_MOCK_OPENAI", "").strip() == "1"
+    use_mock = bool(cfg["anvil"]) or force_mock
+    if use_mock:
+        upstream_base_url = f"http://127.0.0.1:{start_mock(base_env)}"
+        served_model = MOCK_MODEL
+    else:
+        upstream_base_url = _normalize_base_url(base_env.get("OPENAI_BASE_URL", ""))
+        if not upstream_base_url:
+            fail_all(
+                "official-upstream e2e needs OPENAI_BASE_URL in env (e.g. "
+                "https://api.moonshot.cn) — or set E2E_FORCE_MOCK_OPENAI=1 to run "
+                "against the local mock"
+            )
+        if not (base_env.get("OPENAI_API_KEY") or "").strip():
+            fail_all(
+                "official-upstream e2e needs OPENAI_API_KEY in env — or set "
+                "E2E_FORCE_MOCK_OPENAI=1 to run against the local mock"
+            )
+        # Must be an official-plan model matching the upstream provider; the
+        # relay enforces both at startup and per request.
+        served_model = (base_env.get("E2E_MODEL") or "kimi-k2.6").strip()
+    print(f"upstream: {upstream_base_url} (mock={use_mock}) model={served_model}")
+
     prepare_contracts(rpc_url, relay_port, deployed, seller_addr, seller_key,
                       buyer_addr, mint_key=deployer_key if cfg["anvil"] else None,
-                      deposit_usdc=deposit_usdc)
-    mock_port = start_mock(base_env)
+                      deposit_usdc=deposit_usdc, served_model=served_model)
     start_relay(base_env, deployed, rpc_url, int(deployed.get("chainId") or cfg["chain_id"]),
-                relay_port, mock_port, seller_key)
+                relay_port, seller_key, upstream_base_url)
     buyer_flow(deployed, rpc_url, int(deployed.get("chainId") or cfg["chain_id"]),
-               base_env, buyer_key, buyer_addr, seller_addr, deposit_usdc)
+               base_env, buyer_key, buyer_addr, seller_addr, deposit_usdc,
+               served_model, use_mock)
     return None
 
 

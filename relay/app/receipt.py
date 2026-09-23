@@ -3,8 +3,14 @@
 PIN contract (verbatim structure):
     domain  = {name: "TokenShare Relay", version: "1", chainId}
     Receipt = (uint256 paymentId, uint256 promptTokens, uint256 cachedTokens,
-               uint256 completionTokens, uint256 actualAmount, address seller)
+               uint256 completionTokens, uint256 actualAmount, address seller,
+               string upstreamHost, string model)
     X-Receipt = base64url(JSON {domain, message, signature})
+
+`upstreamHost` (e.g. "api.moonshot.cn") and `model` (the actually served
+model name) make every receipt independently auditable against the
+official-endpoint policy: the buyer can see WHICH official host and WHICH
+model served the call.
 
 GET /receipt/{paymentId} returns the same structure for the most recent
 receipt of that payment (kept in an in-memory store).
@@ -37,6 +43,8 @@ RECEIPT_TYPES: Final[dict[str, Any]] = {
         {"name": "completionTokens", "type": "uint256"},
         {"name": "actualAmount", "type": "uint256"},
         {"name": "seller", "type": "address"},
+        {"name": "upstreamHost", "type": "string"},
+        {"name": "model", "type": "string"},
     ],
 }
 
@@ -67,6 +75,8 @@ def build_receipt(
     actual_amount: int,
     seller: str,
     seller_key: str,
+    upstream_host: str,
+    model: str,
 ) -> dict[str, Any]:
     """Sign the receipt with the seller key and return the PIN JSON structure
     {domain, message, signature} (all values are plain JSON types)."""
@@ -78,6 +88,8 @@ def build_receipt(
         "completionTokens": completion_tokens,
         "actualAmount": actual_amount,
         "seller": to_checksum_address(seller),
+        "upstreamHost": upstream_host,
+        "model": model,
     }
 
     encoded = encode_typed_data(

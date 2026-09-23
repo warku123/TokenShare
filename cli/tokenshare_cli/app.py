@@ -473,7 +473,8 @@ def _verify_and_report(
         typer.echo(
             f"Receipt: paymentId={receipt.payment_id} prompt={receipt.prompt_tokens} "
             f"cached={receipt.cached_tokens} completion={receipt.completion_tokens} "
-            f"actual={display_usdc(receipt.actual_amount)} seller={receipt.seller}"
+            f"actual={display_usdc(receipt.actual_amount)} seller={receipt.seller} "
+            f"upstreamHost={receipt.upstream_host} model={receipt.model}"
         )
         return
 

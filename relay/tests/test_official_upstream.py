@@ -1,0 +1,333 @@
+"""Official-endpoint-only upstream policy (anti-poisoning, 2026-09-23):
+
+  - startup: non-official OPENAI_BASE_URL host → ConfigError without the
+    explicit ALLOW_CUSTOM_UPSTREAM=1 flag; with the flag → WARNING logged;
+  - per-request: unknown model prefix → 400; provider/host mismatch → 400;
+  - usage: LAST non-null streaming usage wins; cached_tokens fallback chain
+    (prompt_tokens_details.cached_tokens → top-level usage.cached_tokens → 0);
+  - receipt: upstreamHost + model fields present, sign/verify round-trip.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+import pytest
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
+
+import relay.app.config as cfg
+import relay.app.main as m
+from relay.app.config import (
+    ConfigError,
+    OFFICIAL_HOST_PROVIDER,
+    OFFICIAL_UPSTREAM_HOSTS,
+    host_provider,
+    provider_for_model,
+)
+from relay.app.receipt import decode_x_receipt
+
+from .conftest import ACTUAL, CHAIN_ID, SELLER, chat_body, post_chat, setup_relay_env
+
+
+# ----------------------------------------------------------------- constants
+
+
+def test_official_allowlist_shape() -> None:
+    assert OFFICIAL_UPSTREAM_HOSTS == frozenset(
+        {"api.openai.com", "api.moonshot.cn", "api.moonshot.ai"}
+    )
+    assert OFFICIAL_HOST_PROVIDER["api.openai.com"] == "openai"
+    assert OFFICIAL_HOST_PROVIDER["api.moonshot.cn"] == "moonshot"
+    assert OFFICIAL_HOST_PROVIDER["api.moonshot.ai"] == "moonshot"
+
+
+def test_provider_for_model_prefixes() -> None:
+    for name in ("gpt-4o-mini", "o3", "o1-mini", "o4-mini", "chatgpt-4o-latest"):
+        assert provider_for_model(name) == "openai", name
+    for name in ("kimi-k2.6", "moonshot-v1-8k", "kimi-latest"):
+        assert provider_for_model(name) == "moonshot", name
+    # Unknown / non-official prefixes must NOT be guessed.
+    assert provider_for_model("claude-3-sonnet") is None
+    assert provider_for_model("my-fake-model") is None
+    assert provider_for_model("gpt") is None  # prefix must match exactly
+    assert provider_for_model("") is None
+    assert provider_for_model(None) is None
+    assert provider_for_model(42) is None
+
+
+def test_host_provider_mapping() -> None:
+    assert host_provider("https://api.openai.com") == "openai"
+    assert host_provider("https://api.moonshot.cn") == "moonshot"
+    assert host_provider("https://api.moonshot.ai") == "moonshot"
+    # Scheme-relative case-insensitivity of hosts.
+    assert host_provider("https://API.OPENAI.COM") == "openai"
+    assert host_provider("http://127.0.0.1:9") is None
+    assert host_provider("https://evil.example.com") is None
+
+
+# ------------------------------------------------------- startup host gate
+
+
+def test_startup_rejects_non_official_host_without_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup_relay_env(monkeypatch, "http://127.0.0.1:1/v1")
+    monkeypatch.delenv(cfg.ENV_ALLOW_CUSTOM_UPSTREAM, raising=False)
+    with pytest.raises(ConfigError, match="official"):
+        with TestClient(m.app):
+            pass
+
+
+def test_startup_rejects_lookalike_official_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lookalike domain must not pass the allowlist."""
+    setup_relay_env(monkeypatch, "https://api.openai.com.evil.invalid")
+    monkeypatch.delenv(cfg.ENV_ALLOW_CUSTOM_UPSTREAM, raising=False)
+    with pytest.raises(ConfigError, match="official"):
+        with TestClient(m.app):
+            pass
+
+
+def test_startup_allows_official_host_without_flag(
+    monkeypatch: pytest.MonkeyPatch, fake_chain: Any
+) -> None:
+    """An official host boots normally even without the flag. Only /health is
+    called, so nothing is forwarded to the real network."""
+    setup_relay_env(monkeypatch, "https://api.openai.com")
+    monkeypatch.delenv(cfg.ENV_ALLOW_CUSTOM_UPSTREAM, raising=False)
+    with TestClient(m.app) as client:
+        assert client.get("/health").status_code == 200
+
+
+def test_startup_flag_allows_custom_host_with_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_chain: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    setup_relay_env(monkeypatch, "http://127.0.0.1:1/v1")
+    monkeypatch.setenv(cfg.ENV_ALLOW_CUSTOM_UPSTREAM, "1")
+    with caplog.at_level(logging.WARNING, logger="tokenshare.relay"):
+        with TestClient(m.app) as client:
+            assert client.get("/health").status_code == 200
+    assert any(
+        "custom upstream enabled" in rec.message and "authenticity guarantee void" in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_startup_flag_other_values_do_not_enable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only '1' (after strip) enables; anything else does NOT (explicitness)."""
+    for value in ("0", "true", "yes", "on", ""):
+        setup_relay_env(monkeypatch, "http://127.0.0.1:1/v1")
+        monkeypatch.setenv(cfg.ENV_ALLOW_CUSTOM_UPSTREAM, value)
+        with pytest.raises(ConfigError, match="official"):
+            with TestClient(m.app):
+                pass
+
+
+# ---------------------------------------------------- per-request gate (400)
+
+
+def _state_with_base_url(monkeypatch: pytest.MonkeyPatch, base_url: str) -> None:
+    """Boot a RelayState (FakeChain patched in) and install it as the module
+    state, so the per-request gate can read the configured upstream."""
+    import relay.app.config as config_mod
+
+    setup_relay_env(monkeypatch, base_url)
+    config = config_mod.load_config()
+    st = m.RelayState(config)
+    monkeypatch.setattr(m, "state", st)
+
+
+def test_unknown_model_prefix_rejected_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    _state_with_base_url(monkeypatch, "https://api.moonshot.cn")
+    with pytest.raises(HTTPException) as exc:
+        m._check_model_provider_consistency({"model": "claude-3-5-sonnet"})
+    assert exc.value.status_code == 400
+    assert "official model catalog" in exc.value.detail
+
+    with pytest.raises(HTTPException) as exc:
+        m._check_model_provider_consistency({"model": "totally-fake-model"})
+    assert exc.value.status_code == 400
+
+
+def test_provider_mismatch_rejected_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A moonshot model name aimed at the OpenAI official host → 400."""
+    _state_with_base_url(monkeypatch, "https://api.openai.com")
+    with pytest.raises(HTTPException) as exc:
+        m._check_model_provider_consistency({"model": "kimi-k2.6"})
+    assert exc.value.status_code == 400
+    assert "does not match" in exc.value.detail
+
+    # And the reverse: an openai model aimed at the Kimi host.
+    _state_with_base_url(monkeypatch, "https://api.moonshot.cn")
+    with pytest.raises(HTTPException) as exc:
+        m._check_model_provider_consistency({"model": "gpt-4o-mini"})
+    assert exc.value.status_code == 400
+
+
+def test_matching_provider_passes_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    _state_with_base_url(monkeypatch, "https://api.moonshot.cn")
+    m._check_model_provider_consistency({"model": "kimi-k2.6"})  # no raise
+    _state_with_base_url(monkeypatch, "https://api.moonshot.ai")
+    m._check_model_provider_consistency({"model": "moonshot-v1-8k"})  # no raise
+
+
+def test_gate_on_custom_upstream_enforces_catalog_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the dev/test flag on a custom host, only the catalog-prefix half
+    applies (a mock has no provider identity to compare against)."""
+    _state_with_base_url(monkeypatch, "http://127.0.0.1:9")
+    m._check_model_provider_consistency({"model": "kimi-k2.6"})  # no raise
+    with pytest.raises(HTTPException) as exc:
+        m._check_model_provider_consistency({"model": "not-a-real-model"})
+    assert exc.value.status_code == 400
+
+
+def test_gate_runs_before_forwarding(
+    client: Any, fake_chain: Any, mock_openai: Any
+) -> None:
+    """The full route 400s an unknown-prefix model and never touches the
+    upstream (zero-cost rejection). The model is listed (so the listing check
+    passes) but carries no official catalog prefix."""
+    fake_chain.models = ["gpt-4o-mini", "poisoned-model-name"]
+    r = post_chat(client, chat_body(model="poisoned-model-name"))
+    assert r.status_code == 400
+    assert "official model catalog" in r.json()["detail"]
+    assert mock_openai.received == []
+    assert fake_chain.settle_calls == []
+
+
+# ------------------------------------------------------- usage robustness
+
+
+def test_non_stream_cached_tokens_top_level_fallback(
+    client: Any, fake_chain: Any, mock_openai: Any
+) -> None:
+    """Kimi-style top-level usage.cached_tokens (no prompt_tokens_details)
+    feeds the tiered price; (7*25k + 93*50k + 20*100k)//1e6 = 6."""
+    mock_openai.usage_override = {
+        "prompt_tokens": 100,
+        "completion_tokens": 20,
+        "cached_tokens": 7,
+    }
+    r = post_chat(client, chat_body())
+    assert r.status_code == 200
+    assert fake_chain.settle_calls == [(42, 6)]
+    receipt = decode_x_receipt(r.headers["X-Receipt"])
+    assert receipt["message"]["cachedTokens"] == 7
+
+
+def test_non_stream_null_fields_default_to_zero(
+    client: Any, fake_chain: Any, mock_openai: Any
+) -> None:
+    """Explicit nulls (Kimi edge) behave like absent keys, never TypeError."""
+    mock_openai.usage_override = {
+        "prompt_tokens": 100,
+        "completion_tokens": 20,
+        "prompt_tokens_details": None,
+        "cached_tokens": None,
+    }
+    r = post_chat(client, chat_body())
+    assert r.status_code == 200
+    # (100*50k + 20*100k) // 1e6 = 7 (no cached tier — cached defaults to 0)
+    assert fake_chain.settle_calls == [(42, 7)]
+
+
+def test_stream_last_non_null_usage_wins(
+    client: Any, fake_chain: Any, mock_openai: Any
+) -> None:
+    """usage → null → null-with-finish_reason → [DONE]: the FIRST real usage
+    (the only non-null one) must drive pricing; nulls must not erase it."""
+    mock_openai.mode = "stream_usage_then_null"
+    r = post_chat(client, chat_body(extra={"stream": True}))
+    assert r.status_code == 200
+    assert "data: [DONE]" in r.text
+    assert fake_chain.settle_calls == [(42, ACTUAL)]
+
+
+def test_extract_usage_unit_fallback_chain() -> None:
+    assert m._extract_usage(
+        {"prompt_tokens": 5, "completion_tokens": 2,
+         "prompt_tokens_details": {"cached_tokens": 3}}
+    ).cached_tokens == 3
+    assert m._extract_usage(
+        {"prompt_tokens": 5, "completion_tokens": 2, "cached_tokens": 4}
+    ).cached_tokens == 4
+    assert m._extract_usage(
+        {"prompt_tokens": 5, "completion_tokens": 2,
+         "prompt_tokens_details": {"cached_tokens": 3}, "cached_tokens": 9}
+    ).cached_tokens == 3  # standard position wins
+    assert m._extract_usage({"prompt_tokens": 1, "completion_tokens": 1}).cached_tokens == 0
+    assert m._extract_usage(
+        {"prompt_tokens": None, "completion_tokens": None}
+    ) == m.Usage(prompt_tokens=0, cached_tokens=0, completion_tokens=0)
+
+
+# ------------------------------------------------- receipt authenticity fields
+
+
+def test_receipt_carries_upstream_host_and_model(
+    client: Any, fake_chain: Any
+) -> None:
+    r = post_chat(client, chat_body())
+    assert r.status_code == 200
+    receipt = decode_x_receipt(r.headers["X-Receipt"])
+    assert receipt["message"]["upstreamHost"] == "127.0.0.1"
+    assert receipt["message"]["model"] == "gpt-4o-mini"
+    # GET /receipt serves the same fields.
+    served = client.get("/receipt/42").json()
+    assert served["message"]["upstreamHost"] == "127.0.0.1"
+    assert served["message"]["model"] == "gpt-4o-mini"
+
+
+def test_upstream_host_extraction_official_hosts() -> None:
+    """The receipt's upstreamHost derives from the configured base URL's
+    host — for official hosts it is the official provider host itself."""
+    from relay.app.main import _upstream_host
+
+    assert _upstream_host("https://api.moonshot.cn") == "api.moonshot.cn"
+    assert _upstream_host("https://api.moonshot.cn/v1") == "api.moonshot.cn"
+    assert _upstream_host("https://api.openai.com") == "api.openai.com"
+    assert _upstream_host("http://127.0.0.1:8787") == "127.0.0.1"
+
+
+def test_build_receipt_tamper_covers_new_fields(
+    client: Any, fake_chain: Any
+) -> None:
+    """Tampering the NEW fields must break verification like any other."""
+    from eth_account import Account
+    from eth_account.messages import encode_typed_data
+
+    from relay.app.receipt import RECEIPT_TYPES
+
+    r = post_chat(client, chat_body())
+    receipt = decode_x_receipt(r.headers["X-Receipt"])
+    for field, evil in (("upstreamHost", "evil.example.com"), ("model", "fake-model")):
+        tampered = dict(receipt["message"], **{field: evil})
+        encoded = encode_typed_data(
+            full_message={
+                "types": RECEIPT_TYPES,
+                "primaryType": "Receipt",
+                "domain": receipt["domain"],
+                "message": tampered,
+            }
+        )
+        recovered = Account.recover_message(encoded, signature=receipt["signature"])
+        assert recovered != SELLER, field
+
+
+def test_receipt_domain_unchanged_by_v1_1_fields(client: Any, fake_chain: Any) -> None:
+    r = post_chat(client, chat_body())
+    receipt = decode_x_receipt(r.headers["X-Receipt"])
+    assert receipt["domain"] == {
+        "name": "TokenShare Relay",
+        "version": "1",
+        "chainId": CHAIN_ID,
+    }
