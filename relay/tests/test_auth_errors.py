@@ -96,6 +96,8 @@ def test_402_never_forwards_upstream(client: Any, fake_chain: Any, mock_openai: 
     """Zero-cost rejection: neither 401 nor 402 may touch the upstream."""
     body = chat_body()
     r = post_chat(client, body, headers={"X-Payment-Id": "42"})
+    assert r.status_code == 401  # first request lacks X-Signature
+    assert fake_chain.payment_reads == 0  # 401 decided pre-chain, no RPC read
     fake_chain.valid = False
     assert post_chat(client, body).status_code == 402
     assert mock_openai.received == []

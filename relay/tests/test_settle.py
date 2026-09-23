@@ -8,7 +8,7 @@ import json
 from typing import Any
 from relay.app.receipt import decode_x_receipt
 
-from .conftest import ACTUAL, USAGE, chat_body, post_chat
+from .conftest import ACTUAL, SELLER, USAGE, chat_body, post_chat
 
 
 def test_settle_equals_tiered_pricing(client: Any, fake_chain: Any) -> None:
@@ -17,6 +17,8 @@ def test_settle_equals_tiered_pricing(client: Any, fake_chain: Any) -> None:
     assert r.status_code == 200
     assert r.headers["X-Settle-Status"] == "settled"
     assert fake_chain.settle_calls == [(42, ACTUAL)]
+    assert fake_chain.payment_reads == 1
+    assert fake_chain.valid_calls == [(42, SELLER, 13_200)]
 
     # Receipt echoes the same tiered usage and the unclamped actual.
     receipt = decode_x_receipt(r.headers["X-Receipt"])

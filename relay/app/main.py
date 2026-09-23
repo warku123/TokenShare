@@ -97,6 +97,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     finally:
         if state is not None:
             await state.http.aclose()
+        state = None  # prevent bare app calls from reusing stale config
 
 
 app = FastAPI(title="TokenShare Seller Relay", version="1", lifespan=lifespan)
@@ -315,6 +316,7 @@ async def _forward_stream(
             await resp.aclose()
 
         # Stream fully drained → price from the last usage chunk and settle.
+        # settle 仅在生成器正常完成路径可达（取消/断开在 except re-raise，不可达此处）
         usage = usage_holder["usage"]
         if usage is None:
             logger.warning(
