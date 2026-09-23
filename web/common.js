@@ -335,6 +335,37 @@ window.TS = (() => {
     clear() { localStorage.removeItem(DISPUTES_KEY); },
   };
 
+  /* ── relay /info probe (M7) — TEE + upstream policy descriptor.
+     Graceful by contract: any failure returns null, callers hide the badge. */
+  async function probeInfo(endpoint, timeoutMs = 5000) {
+    const r = await fetchJson(joinUrl(endpoint, "/info"), {}, timeoutMs);
+    if (!r.ok || !r.body) return null;
+    const b = r.body;
+    return {
+      teeEnabled: Boolean(b.tee && b.tee.enabled),
+      official: Boolean(b.upstream && b.upstream.official),
+      upstreamHost: (b.upstream && b.upstream.host) || null,
+      seller: b.seller || null,
+      chainId: b.chainId ?? null,
+    };
+  }
+
+  /* click-to-copy affordance: <span data-copy="0x…">…</span> —
+     one delegated listener per page handles the copy + flash */
+  function installCopyHandlers(root = document) {
+    root.addEventListener("click", (e) => {
+      const el = e.target.closest("[data-copy]");
+      if (!el) return;
+      e.preventDefault(); /* a data-copy link copies instead of navigating */
+      const text = el.dataset.copy;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).catch(() => {});
+      }
+      el.classList.add("copied");
+      setTimeout(() => el.classList.remove("copied"), 900);
+    });
+  }
+
   /* ── relay error copy (PIN error codes) ──────────────────── */
   function relayErrorCopy(status) {
     switch (status) {
@@ -354,7 +385,7 @@ window.TS = (() => {
     readProvider, registry, escrow, usdc,
     toNative, fmtUsdc, fmtUsdcTrim, fmtInt,
     esc, truncAddr, addrLink, txLink, joinUrl, hostOf, sameAddr, isZeroAddr,
-    probeHealth, fetchJson, fetchListing, fetchListings, minAmountEstimate,
+    probeHealth, probeInfo, installCopyHandlers, fetchJson, fetchListing, fetchListings, minAmountEstimate,
     RELAY_CHAT_PATH, buildEip191Message,
     RECEIPT_DOMAIN_NAME, RECEIPT_DOMAIN_VERSION, RECEIPT_TYPES,
     decodeReceiptHeader, verifyReceipt,

@@ -61,6 +61,8 @@
     walletInfo.hidden = false;
     walletAddr.textContent = T.truncAddr(state.address);
     walletAddr.href = T.addrLink(state.address);
+    walletAddr.dataset.copy = state.address;
+    walletAddr.title = `${state.address} — click copies, ⧉ explorer via market page`;
   }
 
   function renderNet(ok) {
@@ -68,7 +70,23 @@
     netBadge.textContent = ok
       ? `${(cfg.chainName || "chain").toUpperCase()} · ${cfg.chainId}`
       : `WRONG NETWORK — switch to ${cfg.chainName} (${cfg.chainId})`;
+    netBadge.title = ok ? "" : "click to switch";
+    netBadge.style.cursor = ok ? "" : "pointer";
+    const banner = $("net-banner");
+    banner.hidden = ok;
+    $("net-banner-name").textContent = `${cfg.chainName} (chainId ${cfg.chainId})`;
   }
+
+  async function switchChain() {
+    try {
+      await ensureChain();
+      await connect(false);
+    } catch (e) {
+      if (!(e && (e.code === 4001 || e.code === "ACTION_REJECTED"))) console.error("chain switch failed:", e);
+    }
+  }
+  $("net-switch").addEventListener("click", switchChain);
+  netBadge.addEventListener("click", () => { if (netBadge.classList.contains("bad")) switchChain(); });
 
   async function refreshBalances() {
     if (!state.address || !T.cfgReady()) return;
@@ -109,7 +127,7 @@
     }
   }
 
-  async function connect() {
+  async function connect(autoSwitch = true) {
     if (!window.ethereum) {
       connectBtn.textContent = "[ NO WALLET — INSTALL METAMASK ]";
       connectBtn.disabled = true;
@@ -121,6 +139,7 @@
       const net = await state.provider.getNetwork();
       if (Number(net.chainId) !== Number(cfg.chainId)) {
         renderNet(false);
+        if (!autoSwitch) { renderWallet(); return; }
         await ensureChain();
       }
       /* re-create after a possible switch */
@@ -138,16 +157,27 @@
     }
   }
 
-  connectBtn.addEventListener("click", connect);
+  connectBtn.addEventListener("click", () => connect(true));
   if (window.ethereum) {
-    window.ethereum.on("accountsChanged", () => { state.signer = null; state.address = null; renderWallet(); connect(); });
+    window.ethereum.on("accountsChanged", () => { state.signer = null; state.address = null; renderWallet(); connect(false); });
     window.ethereum.on("chainChanged", () => window.location.reload());
+    /* silent resume: previously-authorized wallet reconnects without a popup */
+    window.ethereum.request({ method: "eth_accounts" })
+      .then((accs) => { if (accs && accs.length) connect(false); })
+      .catch(() => {});
   }
   renderWallet();
 
   const needWallet = () => {
     if (!state.signer) { connectBtn.focus(); connectBtn.classList.add("flash"); setTimeout(() => connectBtn.classList.remove("flash"), 900); return true; }
     return false;
+  };
+
+  /* button anti-double-click: disable for the duration of the async op */
+  const guard = async (btn, fn) => {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    try { await fn(); } finally { btn.disabled = false; }
   };
   const needConfig = () => {
     if (T.cfgReady()) return false;
@@ -205,6 +235,18 @@
         `<div class="kv"><span>ENDPOINT</span><b class="mono wrap-anywhere">${T.esc(l.endpoint)}</b></div>` +
         `<div class="kv"><span>MODELS</span><b>${l.models.map((m) => `<span class="mtag">${T.esc(m)}</span>`).join(" ") || "—"}</b></div>` +
         `<div class="kv"><span>PRICES /1M</span><b class="mono">cached $${T.fmtUsdc(l.priceCachedIn)} · in $${T.fmtUsdc(l.priceInput)} · out $${T.fmtUsdc(l.priceOutput)}</b></div>`;
+      /* M7 touchpoint: TEE / upstream-policy rows via GET /info — silent degrade */
+      T.probeInfo(l.endpoint).then((info) => {
+        if (!info) return;
+        const rows =
+          `<div class="kv"><span>TEE</span><b>${info.teeEnabled
+            ? `<a class="ok" href="${T.esc(T.joinUrl(l.endpoint, "/attestation"))}" target="_blank" rel="noopener">✓ TEE attested — view quote ↗</a>`
+            : `<span class="dim">off (env key)</span>`}</b></div>` +
+          (info.upstreamHost
+            ? `<div class="kv"><span>UPSTREAM</span><b class="mono">${T.esc(info.upstreamHost)} <span class="${info.official ? "ok" : "bad"}">${info.official ? "· official" : "· CUSTOM (dev)"}</span></b></div>`
+            : "");
+        box.insertAdjacentHTML("beforeend", rows);
+      }).catch(() => {});
       /* prefill form */
       $("s-endpoint").value = l.endpoint;
       setTimeout(() => {
@@ -261,8 +303,9 @@
   function readPrice(id) {
     const v = $(id).value.trim();
     if (!v || isNaN(Number(v)) || Number(v) < 0) return null;
-    return T.toNative(v);
+    try { return T.toNative(v); } catch { return null; } /* >6dp decimals etc. */
   }
+  const PRICE_ERR = "amounts must be non-negative numbers, ≤6 decimals (USDC)";
 
   function updatePreview() {
     const endpoint = $("s-endpoint").value.trim();
@@ -296,7 +339,7 @@
     $(id).addEventListener("input", updatePreview));
   $("s-active").addEventListener("change", updatePreview);
 
-  $("s-submit").addEventListener("click", async () => {
+  $("s-submit").addEventListener("click", () => guard($("s-submit"), async () => {
     if (needWallet() || needConfig()) return;
     const txbox = $("s-tx");
     txbox.innerHTML = "";
@@ -308,7 +351,7 @@
     if (active) {
       if (!endpoint) return formErr(txbox, "endpoint required (https://…:8787)");
       if (!models.length) return formErr(txbox, "select at least one model");
-      if (pc === null || pi === null || po === null) return formErr(txbox, "prices must be non-negative numbers (USDC per 1M tokens)");
+      if (pc === null || pi === null || po === null) return formErr(txbox, PRICE_ERR + " — prices are USDC per 1M tokens");
     }
 
     const reg = T.registry(state.signer);
@@ -340,7 +383,7 @@
     } catch (e) {
       formErr(txbox, e.shortMessage || e.message);
     }
-  });
+  }));
   const formErr = (box, msg) => {
     const el = document.createElement("div");
     el.className = "txl is-bad";
@@ -349,7 +392,7 @@
   };
 
   /* — upstream precheck — */
-  $("p-run").addEventListener("click", async () => {
+  $("p-run").addEventListener("click", () => guard($("p-run"), async () => {
     const base = $("p-base").value.trim();
     const out = $("p-result");
     if (!base) { out.innerHTML = `<p class="empty-hint err">enter the relay base URL first</p>`; return; }
@@ -369,17 +412,20 @@
     const b = r.body;
     const want = new Set(selectedModels());
     const accessible = b.accessible_models || [];
-    const mismatches = b.mismatches || [];
+    /* relay shape: mismatches = [{model, reason}] (objects, not strings) */
+    const mismatches = (b.mismatches || []).map((m) =>
+      (m && typeof m === "object") ? `${m.model} — ${m.reason}` : String(m));
     const diffExtra = [...want].filter((m) => !accessible.includes(m));
     out.innerHTML =
       `<div class="kv"><span>KEY</span><b class="${b.key_valid ? "ok" : "bad"}">${b.key_valid ? "✓ valid" : "✗ INVALID"}</b></div>` +
       `<div class="kv"><span>UPSTREAM</span><b class="mono">${T.esc(b.upstream_host || "—")}</b></div>` +
+      (b.error ? `<div class="kv"><span>ERROR</span><b class="bad mono wrap-anywhere">${T.esc(b.error)}</b></div>` : "") +
       `<div class="kv"><span>ACCESSIBLE</span><b>${accessible.length ? accessible.map((m) => `<span class="mtag">${T.esc(m)}</span>`).join(" ") : "—"}</b></div>` +
       `<div class="kv"><span>LISTING ON-CHAIN</span><b class="${b.listing_ok ? "ok" : "dim"}">${b.listing_ok ? "✓ consistent" : "✗ mismatch / not registered"}</b></div>` +
-      (b.listed_models ? `<div class="kv"><span>LISTED</span><b>${b.listed_models.map((m) => `<span class="mtag">${T.esc(m)}</span>`).join(" ")}</b></div>` : "") +
+      (b.listed_models && b.listed_models.length ? `<div class="kv"><span>LISTED</span><b>${b.listed_models.map((m) => `<span class="mtag">${T.esc(m)}</span>`).join(" ")}</b></div>` : "") +
       (mismatches.length ? `<div class="kv"><span>MISMATCHES</span><b class="bad">${mismatches.map((m) => `<span class="mtag">${T.esc(m)}</span>`).join(" ")}</b></div>` : "") +
       (diffExtra.length ? `<div class="kv"><span>FORM vs KEY</span><b class="bad">selected but not accessible: ${diffExtra.map((m) => `<span class="mtag">${T.esc(m)}</span>`).join(" ")}</b></div>` : "");
-  });
+  }));
 
   /* ═══ BUYER tab ═══════════════════════════════════════════ */
 
@@ -400,12 +446,12 @@
   $("b-seller").addEventListener("change", syncSellerInfo);
 
   /* — deposit (approve → deposit) — */
-  $("b-dep-btn").addEventListener("click", async () => {
+  $("b-dep-btn").addEventListener("click", () => guard($("b-dep-btn"), async () => {
     if (needWallet() || needConfig()) return;
     const txbox = $("b-dep-tx");
     txbox.innerHTML = "";
     const amt = readPrice("b-dep-amt");
-    if (amt === null || amt <= 0n) return formErr(txbox, "enter a positive USDC amount");
+    if (amt === null || amt <= 0n) return formErr(txbox, "enter a positive USDC amount (≤6 decimals)");
 
     const token = T.usdc(state.signer);
     const esc = T.escrow(state.signer);
@@ -422,18 +468,18 @@
       const rcpt = await T.runTx(T.txLine(txbox, `deposit(${T.fmtInt(amt)}) — step 2/2`), esc.deposit(amt));
       if (rcpt) await refreshBalances();
     } catch (e) { formErr(txbox, e.shortMessage || e.message); }
-  });
+  }));
 
   /* — withdraw — */
-  $("b-withdraw-btn").addEventListener("click", async () => {
+  $("b-withdraw-btn").addEventListener("click", () => guard($("b-withdraw-btn"), async () => {
     if (needWallet() || needConfig()) return;
     const txbox = $("b-bal-tx");
     txbox.innerHTML = "";
     const amt = readPrice("b-withdraw-amt");
-    if (amt === null || amt <= 0n) return formErr(txbox, "enter a positive USDC amount");
+    if (amt === null || amt <= 0n) return formErr(txbox, "enter a positive USDC amount (≤6 decimals)");
     const rcpt = await T.runTx(T.txLine(txbox, `withdraw(${T.fmtInt(amt)})`), T.escrow(state.signer).withdraw(amt));
     if (rcpt) await refreshBalances();
-  });
+  }));
 
   /* — lock — */
   function renderSessionLocks() {
@@ -445,7 +491,7 @@
     rlist.innerHTML = opts;
   }
 
-  $("b-lock-btn").addEventListener("click", async () => {
+  $("b-lock-btn").addEventListener("click", () => guard($("b-lock-btn"), async () => {
     if (needWallet() || needConfig()) return;
     const txbox = $("b-lock-tx");
     txbox.innerHTML = "";
@@ -454,7 +500,7 @@
     const max = readPrice("b-max");
     const ttl = parseInt($("b-ttl").value, 10);
     if (!l) return formErr(txbox, "choose a seller");
-    if (max === null || max <= 0n) return formErr(txbox, "enter a positive maxAmount");
+    if (max === null || max <= 0n) return formErr(txbox, "enter a positive maxAmount (≤6 decimals)");
     if (!ttl || ttl < 60) return formErr(txbox, "ttl ≥ 60s");
     const min = T.minAmountEstimate(l);
     if (max < min) formErr(txbox, `note: maxAmount below relay min estimate $${T.fmtUsdc(min)} — calls will 402`);
@@ -467,7 +513,7 @@
     const pid = T.parseLockedPaymentId(rcpt);
     if (pid !== null) {
       state.lastPaymentId = pid;
-      $("b-payment-id").innerHTML = `<span class="pid-label">PAYMENT ID</span><span class="pid">${pid.toString()}</span>`;
+      $("b-payment-id").innerHTML = `<span class="pid-label">PAYMENT ID — click to copy</span><span class="pid" data-copy="${pid.toString()}" title="click to copy">${pid.toString()}</span>`;
       T.locks.add({
         paymentId: pid.toString(), buyer: state.address, seller,
         maxAmount: max.toString(), ttl, txHash: rcpt.hash, ts: Date.now(),
@@ -479,7 +525,7 @@
       $("b-payment-id").innerHTML = `<span class="dim mono">Locked — paymentId in the Locked event (see tx)</span>`;
     }
     await refreshBalances();
-  });
+  }));
 
   /* — call demo — */
   function syncCallModels() {
@@ -502,7 +548,7 @@
     renderDisputes();
   }
 
-  $("c-send").addEventListener("click", async () => {
+  $("c-send").addEventListener("click", () => guard($("c-send"), async () => {
     if (needWallet()) return;
     const l = listingOf($("c-seller").value);
     const model = $("c-model").value;
@@ -619,10 +665,10 @@
         `<p class="dim mono" style="margin-top:6px">已记入争议列表（localStorage）。recovered: ${T.esc(check.recovered || "—")} · expected: ${T.esc(T.truncAddr(l.operator))}</p>`;
       recordDispute(paymentId, check.reason, l.operator);
     }
-  });
+  }));
 
   /* — refund — */
-  $("r-btn").addEventListener("click", async () => {
+  $("r-btn").addEventListener("click", () => guard($("r-btn"), async () => {
     if (needWallet() || needConfig()) return;
     const txbox = $("r-tx");
     txbox.innerHTML = "";
@@ -641,7 +687,7 @@
 
     const rcpt = await T.runTx(T.txLine(txbox, `refund(${pid})`), T.escrow(state.signer).refund(pid));
     if (rcpt) await refreshBalances();
-  });
+  }));
 
   /* — disputes — */
   function renderDisputes() {
@@ -661,6 +707,7 @@
   $("d-clear").addEventListener("click", () => { T.disputes.clear(); renderDisputes(); });
 
   /* ── boot ────────────────────────────────────────────────── */
+  T.installCopyHandlers();
   renderCustomChips();
   renderSessionLocks();
   renderDisputes();

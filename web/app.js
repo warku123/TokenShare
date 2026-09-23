@@ -109,7 +109,7 @@
     return (
       `<article class="card listing rv in${l.active ? "" : " inactive"}" data-endpoint="${T.esc(l.endpoint)}">` +
         `<div class="ls-top">` +
-          `<a class="ls-addr" href="${T.addrLink(l.operator)}" target="_blank" rel="noopener" title="${T.esc(l.operator)}">${T.truncAddr(l.operator)}</a>` +
+          `<a class="ls-addr" data-copy="${T.esc(l.operator)}" href="${T.addrLink(l.operator)}" target="_blank" rel="noopener" title="${T.esc(l.operator)} — click copies address">${T.truncAddr(l.operator)}</a>` +
           `<span class="ls-health" title="relay /health probe pending"><span class="hdot"></span><span class="ls-health-lbl">probing</span></span>` +
           badge +
         `</div>` +
@@ -140,6 +140,28 @@
         dot.classList.add("ok");
         lbl.textContent = `${r.ms}ms`;
         slot.title = `relay /health OK · ${r.ms}ms`;
+        /* M7 touchpoint: TEE / upstream-policy badges via GET /info.
+           Silent degrade — unreachable or non-JSON → no badge, no throw. */
+        const info = await T.probeInfo(endpoint);
+        if (info) {
+          const top = el.querySelector(".ls-top");
+          if (info.teeEnabled) {
+            const a = document.createElement("a");
+            a.className = "badge tee";
+            a.href = T.joinUrl(endpoint, "/attestation");
+            a.target = "_blank";
+            a.rel = "noopener";
+            a.title = "TEE attested relay — view /attestation quote (derived key, reportData, quoteDigest)";
+            a.textContent = "TEE";
+            top.insertBefore(a, top.querySelector(".badge"));
+          }
+          if (info.upstreamHost) {
+            const meta = el.querySelector(".ls-meta span");
+            meta.innerHTML =
+              `upstream <b class="${info.official ? "ok" : "bad"}">${T.esc(info.upstreamHost)}${info.official ? " · official" : " · CUSTOM"}</b> · ` +
+              meta.innerHTML;
+          }
+        }
       } else {
         dot.classList.add("off");
         lbl.textContent = "offline";
@@ -208,6 +230,7 @@
   }
 
   if (refreshBtn) refreshBtn.addEventListener("click", loadMarket);
+  T.installCopyHandlers();
   loadMarket();
   /* light auto-refresh keeps the demo table alive */
   setInterval(loadMarket, 30000);
