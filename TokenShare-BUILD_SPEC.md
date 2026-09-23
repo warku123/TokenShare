@@ -46,8 +46,8 @@
 
 | 网络 | 用途 | chainId | RPC | 结算币 |
 |------|------|---------|-----|--------|
-| Base Sepolia | 日常开发 / CI | 84532 | `https://sepolia.base.org` | USDC `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` |
-| Monad testnet | **参赛交付** | 10143 | `https://testnet-rpc.monad.xyz` | USDC 地址见 §9 checklist 核实结果 |
+| Base Sepolia | 日常开发 / CI | 84532 | `https://sepolia.base.org` | USDC `0x036CbD53842c5426634e7929541eC2318f3dCF7e`（Circle 官方 testnet，2026-09 核正；旧值 0x8335…2913 系 Base 主网地址，作废） |
+| Monad testnet | **参赛交付** | 10143 | `https://testnet-rpc.monad.xyz` | USDC `0x534b2f3A21130d7a60830c2Df862319e593943A3`（Circle 官方 testnet USDC，§9 已核实，无需 Mock） |
 
 ## 5. 仓库结构（agent 按此创建）
 
@@ -108,13 +108,22 @@ CLI 收到响应后用 Registry 中的卖方地址 ecrecover 验签，失败则�
 4. 测试必须真跑，失败就修到绿，不要跳过；
 5. 最终交付：`forge test` 全绿 + 两链 e2e 均输出 `E2E PASSED` + README 完整。
 
-## 9. 部署前置 checklist（M5 启动前逐项核实，结果回填本文）
+## 9. 部署前置 checklist（2026-09-23 librarian 核实回填；官方来源 + 链上只读实测）
 
-- [ ] **Monad testnet USDC 合约地址**：查 Monad 官方文档 / 水龙头确认原生 USDC 地址；若无官方 USDC，
-      用标准 ERC-20 mock（OpenZeppelin）部署到 Monad testnet 并在 .env 记录，README 注明"测试代币"；
-- [ ] **MON 测试币水龙头**：确认 `https://testnet-rpc.monad.xyz` 对应的水龙头入口（官方 Discord / 文档），
-      部署与 e2e 各需 1–2 MON；
-- [ ] **Monad testnet 稳定出块与确认时间**：e2e 脚本轮询 confirmation 的超时按实测调整；
-- [ ] **facilitator 确认**：CDP 不支持 Monad → demo 采用买方自付 gas 的逐笔 lock/settle（Monad gas 极低，可接受），
-      代码中预留 `FACILITATOR_URL` 环境变量但 P0 不实现；
-- [ ] **etherscan 类浏览器**：确认 Monad testnet 区块浏览器地址，把 e2e 输出的 tx hash 拼成可点击链接写进 README。
+- [x] **Monad testnet USDC 合约地址**：官方 Circle USDC 存在 → `0x534b2f3A21130d7a60830c2Df862319e593943A3`
+      （实测 symbol=USDC、decimals=6、有代码；developers.circle.com/stablecoins/usdc-contract-addresses + docs.monad.xyz/guides/x402）。
+      **无需自部署 Mock**。注意 Monad mainnet USDC 是 `0x754704Bc059F8C67012fEd69BC8A327a5aafb603`，勿混用。
+- [x] **Base Sepolia USDC 核正**：`0x036CbD53842c5426634e7929541eC2318f3dCF7e`（Circle 官方，实测 USDC/6dp）。
+      原 spec 所写 `0x8335…2913` 为 Base **主网**地址（Base Sepolia 上 eth_getCode 为空），已废（§4 已同步改）。
+      领币：faucet.circle.com 选 USDC+Base Sepolia（1 次/2h）或 CDP faucet（USDC 1/claim、ETH 0.0001/claim，可编程 API）。
+- [x] **MON 测试币水龙头**：`https://faucet.monad.xyz`（官方 docs.monad.xyz/developer-essentials/faucet；网页粘贴 EVM 地址即领，
+      连社交账号可加量；额度未官方公布，社区口径 ~1 MON/24h，置信度中）。第三方备用：quicknode/chainstack/thirdweb。
+- [x] **Monad testnet 出块与确认时间**：出块 300 ms（MIP-12，v0.15.0 起），投机最终性 300 ms、完全最终性 600 ms（实测 ≈277 ms/块）。
+      e2e 定稿：轮询间隔 1 s、超时 60 s。testnet 曾 2025-12-16 genesis 重置，脚本勿缓存旧块高。
+- [x] **facilitator 确认**：CDP 不支持 Monad → demo 采用买方自付 gas 的逐笔 lock/settle（Monad gas 极低，可接受），
+      代码中预留 `FACILITATOR_URL` 环境变量但 P0 不实现（维持原判）；
+- [x] **etherscan 类浏览器**：官方 `https://testnet.monadvision.com` 与 `https://testnet.monadscan.com`
+      （旧域 testnet.monadexplorer.com 已 308 跳转 monadvision）；e2e 输出的 tx hash 用这两个域名拼链接写进 README。
+- [x] **chainId 复核**：Monad testnet=10143（eth_chainId 实测 0x279f）、Base Sepolia=84532，均通过。
+- 备注：Metropolis 黑客松 **10/13 截止**（10/14–27 评审，11/3 公布）；"必须部署在 testnet"未在公开官方材料证实
+      （细则在 hackathon.monad.xyz 报名平台内），交付维持 Monad testnet 选择，报名后顺手复核一次。
