@@ -6,6 +6,7 @@ solc_version = "0.8.24"
 optimizer = true
 optimizer_runs = 200
 via_ir = false
+fs_permissions = [{ path = "./", access = "read-write" }]
 
 # Remappings point into lib/ (OpenZeppelin installed via `forge install OpenZeppelin/openzeppelin-contracts`,
 # forge-std via `forge install foundry-rs/forge-std`)
@@ -15,5 +16,6 @@ remappings = [
 ]
 
 [rpc_endpoints]
-base_sepolia = "https://sepolia.base.org"
-monad_testnet = "https://testnet-rpc.monad.xyz"
+base_sepolia = "${BASE_SEPOLIA_RPC:-https://sepolia.base.org}"
+monad_testnet = "${MONAD_TESTNET_RPC:-https://testnet-rpc.monad.xyz}"
+

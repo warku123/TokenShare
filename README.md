@@ -55,7 +55,7 @@ In five steps:
 | [`relay/`](relay/) | Seller relay — OpenAI-compatible FastAPI server (`POST /v1/chat/completions`, streaming supported) that verifies payments, forwards requests, prices usage, settles, and signs receipts |
 | [`cli/`](cli/) | Buyer CLI — `deposit` / `lock` / `call` / `balance` / `refund` / `disputes`, with signature, receipt verification, and dispute ledger |
 | [`web/`](web/) | Zero-framework static market page (listings, three-tier prices, escrow state) |
-| [`e2e/`](e2e/) | End-to-end integration + dual-network deployment scripts — **upcoming (M5a)** |
+| [`e2e/`](e2e/) | End-to-end runner (`e2e/run.py --network base_sepolia\|monad_testnet`) + mock OpenAI |
 
 **Stack:** Foundry (Solidity ^0.8.24, OpenZeppelin) · Python 3.11+ · FastAPI · Typer · web3.py · plain HTML/CSS/JS (no build step).
 
@@ -63,7 +63,7 @@ In five steps:
 
 | Network | Purpose | Chain ID | USDC |
 |---------|---------|----------|------|
-| Base Sepolia | development / CI | 84532 | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` |
+| Base Sepolia | development / CI — **optional** (Monad is the primary hackathon chain) | 84532 | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` |
 | Monad testnet | **hackathon deliverable** | 10143 | `0x534b2f3A21130d7a60830c2Df862319e593943A3` |
 
 - **Faucets:** `https://faucet.monad.xyz` (MON) · `https://faucet.circle.com` (USDC for both chains)
@@ -73,24 +73,93 @@ Both networks run the **same deployed bytecode** — only configuration (RPC, ch
 
 ## Quickstart
 
-> ⚠️ **The placeholders below will be filled in at M5a** (deployment script, `.env.example`, and the e2e runner are being finalized).
+**Requirements:** Python 3.11+ · [Foundry](https://book.getfoundry.sh) (`forge` / `anvil`) · a public Base Sepolia RPC for the local fork run (the default `https://sepolia.base.org` works).
 
 ```bash
-# 1. Build & test contracts
-cd contracts && forge test        # 54 tests green
+# 1. Install Python dependencies (relay + CLI)
+pip install -r relay/requirements.txt -r cli/requirements.txt
 
-# 2. Relay unit tests
-cd relay && pytest tests          # suite landing at M3b
+# 2. Build & test contracts (54 tests green)
+cd contracts && forge test && cd ..
 
-# 3. Buyer CLI unit tests
-cd cli && pytest tests            # 38 tests green
+# 3. Relay + CLI unit tests
+cd relay && pytest tests && cd ..     # relay suite
+cd cli && pytest tests && cd ..       # 38+ tests green
 
-# 4. Deploy (M5a) — Deploy.s.sol + .env.example
-<!-- M5a -->
+# 4. Configure (keys/addresses — never commit .env)
+cp .env.example .env
 
-# 5. End-to-end run (M5a) — e2e/run.py --network base_sepolia|monad_testnet
-<!-- M5a -->
+# 5. Full end-to-end run on a local Base-Sepolia anvil fork — no funds,
+#    no API key needed (a deterministic mock OpenAI is started automatically):
+python3 e2e/run.py --network base_sepolia
 ```
+
+Expected tail of a successful run:
+
+```
+OK: payment 2 Settled, actual=11400 native (0.011400 USDC) <= maxAmount 5000000
+OK: payment 1 Refunded (M4 refund path verified on-chain)
+
+E2E PASSED
+```
+
+The runner drives the whole stack itself: it starts an anvil fork of Base Sepolia, deploys `Escrow` + `Registry` (+ a `MockUSDC` stand-in) via `forge script script/Deploy.s.sol`, writes `contracts/deployed.json`, mints test USDC, registers a seller listing that points at a locally started mock OpenAI and the relay, then drives the **real buyer CLI** through `deposit → lock → call → settle → refund` as a black-box subprocess and asserts the settled receipt plus the on-chain state (`Escrow` payment Settled, escrow balances moved buyer→seller, refund path credited back).
+
+For a paid call against a **real OpenAI key** instead of the mock: set `OPENAI_API_KEY` and `OPENAI_BASE_URL=https://api.openai.com` in `.env` and start the relay yourself (`uvicorn relay.app.main:app --port 8787`, run from the repo root with `.env` exported).
+
+### Manual step-by-step (what `run.py` automates)
+
+With `.env` filled (see `.env.example` for every variable) and contracts deployed:
+
+```bash
+# 1) Deploy (writes contracts/deployed.json — relay/CLI read it for the addresses):
+cd contracts
+USDC_ADDR=0x036CbD53842c5426634e7929541eC2318f3dCF7e \
+  forge script script/Deploy.s.sol --sig run(string) base_sepolia \
+  --rpc-url https://sepolia.base.org --broadcast \
+  --private-key $PRIVATE_KEY --sender $DEPLOYER_ADDR     # unset USDC_ADDR → MockUSDC
+cd ..
+
+# 2) Seller registers a listing (direct web3; the relay endpoint goes on-chain):
+python3 e2e/register_listing.py --network base_sepolia \
+  --endpoint http://127.0.0.1:8787 \
+  --price-cached-in 1000 --price-input 2000 --price-output 3000   # per-1M-token USDC native
+
+# 3) Seller starts the relay (uses RELAY_SELLER_KEY + the 12 relay env names, see .env.example):
+python3 -m uvicorn relay.app.main:app --host 127.0.0.1 --port 8787   # from repo root
+
+# 4) Buyer (from cli/ with .env exported):
+cd cli
+python3 -m tokenshare_cli deposit --amount 500
+python3 -m tokenshare_cli call "Explain EIP-712 in one sentence" --seller $SELLER_ADDR --max 5
+python3 -m tokenshare_cli balance
+cd ..
+```
+
+`deployed.json` holds `{network, chainId, escrow, registry, usdc, usdcIsMock, deployer, deployedAt}`; copy those addresses into `.env` (`ESCROW_ADDR` / `REGISTRY_ADDR` / `USDC_ADDR`).
+
+### Monad testnet (real chain — M5b)
+
+Same code path, configuration-only switch. Prerequisites (executed in M5b, with user-provided funded test accounts):
+
+1. Fund two test accounts: `https://faucet.monad.xyz` (MON gas) + `https://faucet.circle.com` (USDC), put `SELLER_PRIVATE_KEY` / `BUYER_PRIVATE_KEY` in `.env`.
+2. Deploy once (official Circle USDC, no mock):
+
+   ```bash
+   cd contracts
+   USDC_ADDR=0x534b2f3A21130d7a60830c2Df862319e593943A3 \
+     forge script script/Deploy.s.sol --sig run(string) monad_testnet \
+     --rpc-url https://testnet-rpc.monad.xyz --broadcast --private-key <SELLER key>
+   cd ..
+   ```
+
+3. Run the same e2e against the real chain (reads `contracts/deployed.json` + env keys):
+
+   ```bash
+   python3 e2e/run.py --network monad_testnet
+   ```
+
+4. For buyer-facing demos the relay must be reachable over the internet: expose it (e.g. a tunnel), then `export RELAY_PUBLIC_ENDPOINT=https://…` before the run so the Registry listing carries the public URL. Transactions are viewable at `https://testnet.monadscan.com`.
 
 ## Repo layout
 
@@ -99,8 +168,7 @@ tokenshare/
 ├── contracts/               # Foundry: Escrow + Registry, 54 tests green
 │   ├── src/Escrow.sol
 │   ├── src/Registry.sol
-│   ├── script/Deploy.s.sol  # upcoming (M5a)
-│   └── test/
+│   └── script/Deploy.s.sol  # --sig run(string), writes deployed.json
 ├── relay/                   # FastAPI seller relay
 │   ├── app/                 # main / pricing / receipt / chain / config
 │   └── tests/
@@ -108,7 +176,7 @@ tokenshare/
 │   ├── tokenshare_cli/      # signing / receipt / streaming / disputes / ...
 │   └── tests/               # 38 tests green
 ├── web/                     # static market page (zero framework)
-├── e2e/                     # upcoming (M5a): run.py --network base_sepolia|monad_testnet
+├── e2e/                     # run.py --network base_sepolia|monad_testnet + mock_openai.py
 └── TokenShare-BUILD_SPEC.md # build spec
 ```
 

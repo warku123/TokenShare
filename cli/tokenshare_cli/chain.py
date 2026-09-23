@@ -241,4 +241,4 @@ def refund(ctx: ChainContext, payment_id: int) -> dict:
 def _now() -> int:
     import time
 
-    return int(time())
+    return int(time.time())

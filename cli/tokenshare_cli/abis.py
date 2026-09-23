@@ -76,6 +76,29 @@ ESCROW_ABI = [
         "outputs": [],
         "stateMutability": "nonpayable",
     },
+    {
+        "type": "event",
+        "name": "Locked",
+        "anonymous": False,
+        "inputs": [
+            {"name": "paymentId", "type": "uint256", "indexed": True, "internalType": "uint256"},
+            {"name": "buyer", "type": "address", "indexed": True, "internalType": "address"},
+            {"name": "seller", "type": "address", "indexed": True, "internalType": "address"},
+            {"name": "maxAmount", "type": "uint256", "indexed": False, "internalType": "uint256"},
+            {"name": "expiresAt", "type": "uint64", "indexed": False, "internalType": "uint64"},
+        ],
+    },
+    {
+        "type": "event",
+        "name": "Refunded",
+        "anonymous": False,
+        "inputs": [
+            {"name": "paymentId", "type": "uint256", "indexed": True, "internalType": "uint256"},
+            {"name": "buyer", "type": "address", "indexed": True, "internalType": "address"},
+            {"name": "amount", "type": "uint256", "indexed": False, "internalType": "uint256"},
+            {"name": "caller", "type": "address", "indexed": True, "internalType": "address"},
+        ],
+    },
 ]
 
 REGISTRY_ABI = [

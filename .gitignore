@@ -33,3 +33,4 @@ node_modules/
 # misc
 .DS_Store
 *.log
+contracts/deployed.json

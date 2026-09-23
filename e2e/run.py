@@ -1,0 +1,918 @@
+#!/usr/bin/env python3
+"""TokenShare end-to-end runner (M5a, BUILD_SPEC §5 / §7).
+
+    python3 e2e/run.py --network base_sepolia     # full-local anvil-fork run
+    python3 e2e/run.py --network monad_testnet    # same code, config switch (M5b)
+
+base_sepolia local path = EVERYTHING on this machine:
+  1. anvil --fork-url $BASE_SEPOLIA_RPC (public RPC default, env overridable).
+     The public RPC URL is a documented network fact (spec §9), never a source
+     chain binding. Anvil's PUBLIC default accounts (well-known test mnemonic)
+     act as deployer/seller/buyer — valueless test keys, local path ONLY.
+  2. forge script Deploy.s.sol --sig run(string) deploys Escrow + Registry
+     (+ MockUSDC, since fork accounts hold no real testnet USDC) and writes
+     contracts/deployed.json.
+  3. Direct web3 (deepwork decision 4: "contract prep via direct web3"):
+     deployer mints MockUSDC for the buyer; seller registers a listing with
+     endpoint http://127.0.0.1:<relay_port> and tiered prices paired with the
+     mock OpenAI usage so the settled amount is exact and non-zero.
+  4. e2e/mock_openai.py serves deterministic non-stream JSON + SSE on a free
+     port. NOTE: OPENAI_BASE_URL must be the bare host root WITHOUT /v1 — the
+     relay (httpx base_url) appends /v1/chat/completions itself.
+  5. relay/app/main.py runs via uvicorn with the full relay env assembly
+     (relay/app/config.py names); OPENAI_API_KEY=dummy passes the existence
+     check; logs land in e2e/.relay.log.
+  6. Buyer side is driven through the REAL CLI as a subprocess (black box):
+     deposit -> lock (short TTL) -> call (auto-locks a NEW paymentId, --max
+     explicit because the CLI's cap-based default can exceed the deposit) ->
+     refund the short lock after its TTL expires. CLI output must contain the
+     model reply, `Settle status: settled` and `Receipt verification: OK`.
+  7. On-chain asserts: Escrow payment Settled (state=2), settled amount equals
+     the PIN pricing formula, escrow balances moved buyer->seller; refund path
+     leaves the payment Refunded (state=3) with the buyer credited back.
+  8. All subprocesses are killed; the run prints E2E PASSED (verbatim) on
+     success, or E2E FAILED: <reason> with a non-zero exit code otherwise.
+
+monad_testnet path: same functions, no anvil, real RPC from the NETWORKS map.
+Deployment + registration are IDENTICAL functions; the run needs real funded
+keys (SELLER_PRIVATE_KEY / BUYER_PRIVATE_KEY) and is executed in M5b. Without
+keys the script explains the M5b prerequisites and exits 0 (config-ready, not
+a failure). Official USDC is used on real chains (Deploy.s.sol reads
+USDC_ADDR), so no mint step happens there.
+
+Polling per spec §9 (verified): 1s interval, 60s timeout on real chains.
+"""
+
+from __future__ import annotations
+
+import argparse
+import atexit
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any, NoReturn
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+CONTRACTS_DIR = REPO_ROOT / "contracts"
+E2E_DIR = REPO_ROOT / "e2e"
+
+# ---------------------------------------------------------------------------
+# Network config map — the ONE allowed place (besides .env.example comments and
+# deployed.json) where public RPC/USDC/chainId values appear. Values verified
+# 2026-09-23 and recorded in TokenShare-BUILD_SPEC.md §4/§9 (librarian-1).
+# ---------------------------------------------------------------------------
+NETWORKS: dict[str, dict[str, Any]] = {
+    "base_sepolia": {
+        "chain_id": 84532,
+        "default_rpc": "https://sepolia.base.org",
+        "rpc_env": "BASE_SEPOLIA_RPC",
+        "usdc_official": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        "anvil": True,  # local fork path (M5a e2e)
+    },
+    "monad_testnet": {
+        "chain_id": 10143,
+        "default_rpc": "https://testnet-rpc.monad.xyz",
+        "rpc_env": "MONAD_TESTNET_RPC",
+        "usdc_official": "0x534b2f3A21130d7a60830c2Df862319e593943A3",
+        "anvil": False,  # real testnet path (M5b)
+    },
+}
+
+# Model served by the mock OpenAI AND registered in the seller listing.
+MOCK_MODEL = "gpt-4o-mini-tokenshare"
+# Usage the mock OpenAI always reports (paired with LISTING_PRICES below).
+MOCK_USAGE = {"prompt_tokens": 5000, "cached_tokens": 1000, "completion_tokens": 800}
+# Seller listing prices: USDC native units per 1M tokens, 6dp (1 USDC = 1e6).
+# actual = (cached*PC + (prompt-cached)*PI + completion*PO) // 1e6
+#        = (1000*1e6 + 4000*2e6 + 800*3e6) // 1e6 = 11,400 native = 0.0114 USDC
+LISTING_PRICES = {"cached": 1_000_000, "input": 2_000_000, "output": 3_000_000}
+# Relay minAmount estimate caps (match relay/CLI defaults; same formula):
+# (2e6*200000 + 3e6*32000)//1e6 = 496,000 native = 0.496 USDC <= lock maxAmount.
+PROMPT_TOKEN_CAP = 200_000
+COMPLETION_TOKEN_CAP = 32_000
+# Buyer deposits 500 USDC (mock mint on the fork; faucet-funded on real chains,
+# override with E2E_DEPOSIT_USDC when the funded balance is smaller).
+BUYER_DEPOSIT_USDC = "500"
+# Explicit lock maxAmount for the CLI `call` (human USDC). The CLI's DEFAULT
+# lock size is (listing price x token cap) rounded up to whole USDC, which with
+# these prices is far above any sane deposit — so the e2e passes --max
+# explicitly (CLI help documents exactly this for HTTP 402 / sizing control).
+CALL_MAX_USDC = "5"
+# Short lock for the refund path: lock 1 USDC with ttl=3s, then refund.
+REFUND_MAX_USDC = "1"
+REFUND_TTL_S = 3
+# settle amount expected from MOCK_USAGE x LISTING_PRICES (PIN formula).
+EXPECTED_ACTUAL = (
+    MOCK_USAGE["cached_tokens"] * LISTING_PRICES["cached"]
+    + (MOCK_USAGE["prompt_tokens"] - MOCK_USAGE["cached_tokens"]) * LISTING_PRICES["input"]
+    + MOCK_USAGE["completion_tokens"] * LISTING_PRICES["output"]
+) // 10**6
+
+# ---------------------------------------------------------------------------
+# anvil PUBLIC default accounts (mnemonic "test test ... junk"). Well-known
+# valueless test keys used ONLY on the local fork path — documented in anvil's
+# README. Index 0 = deployer; 1 = buyer; 2 = seller. Index 0's key/address are
+# pinned below; 1/2 are derived from the mnemonic at runtime (anvil_account).
+# Never valid for real networks; real chains take keys from env.
+# ---------------------------------------------------------------------------
+ANVIL_MNEMONIC = "test test test test test test test test test test test junk"
+
+
+def step(msg: str) -> None:
+    print(f"\n=== {msg}", flush=True)
+
+
+def fail(reason: str) -> NoReturn:
+    print(f"\nE2E FAILED: {reason}", flush=True)
+    sys.exit(1)
+
+
+def pick_free_port(preferred: int | None = None) -> int:
+    if preferred is not None:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("127.0.0.1", preferred))
+                return preferred
+            except OSError:
+                pass  # fall through to a random free port
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+def wait_http(url: str, timeout: float = 60.0, interval: float = 1.0) -> None:
+    import httpx
+
+    deadline = time.monotonic() + timeout
+    last = ""
+    while time.monotonic() < deadline:
+        try:
+            r = httpx.get(url, timeout=5.0)
+            if r.status_code < 500:
+                return
+            last = f"HTTP {r.status_code}"
+        except Exception as exc:  # noqa: BLE001
+            last = str(exc)
+        time.sleep(interval)
+    fail(f"endpoint not ready within {timeout}s: {url} ({last})")
+
+
+def rpc_chain_id(rpc_url: str) -> int:
+    import httpx
+
+    resp = httpx.post(
+        rpc_url, json={"jsonrpc": "2.0", "method": "eth_chainId", "params": [], "id": 1}, timeout=10.0
+    )
+    return int(resp.json()["result"], 16)
+
+
+class Proc:
+    """Tracked subprocess; output goes to a log file, printed on failure."""
+
+    def __init__(self, name: str, cmd: list[str], *, cwd: Path, env: dict[str, str],
+                 log_path: Path) -> None:
+        self.name = name
+        self.log_path = log_path
+        self.cmd = cmd
+        self.handle = subprocess.Popen(
+            cmd,
+            cwd=str(cwd),
+            env=env,
+            stdout=open(log_path, "w"),
+            stderr=subprocess.STDOUT,
+        )
+
+    def tail(self, lines: int = 40) -> str:
+        try:
+            return "\n".join(self.log_path.read_text(errors="replace").splitlines()[-lines:])
+        except OSError:
+            return "(no log)"
+
+    def terminate(self) -> None:
+        if self.handle.poll() is None:
+            self.handle.terminate()
+            try:
+                self.handle.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.handle.kill()
+                self.handle.wait(timeout=5)
+
+
+procs: list[Proc] = []
+
+
+def start(name: str, cmd: list[str], *, cwd: Path, env: dict[str, str],
+          log_path: Path) -> Proc:
+    print(f"[start] {name}: {' '.join(cmd[:4])} … (log: {log_path})", flush=True)
+    p = Proc(name, cmd, cwd=cwd, env=env, log_path=log_path)
+    procs.append(p)
+    return p
+
+
+def cleanup() -> None:
+    for p in reversed(procs):
+        try:
+            p.terminate()
+        except Exception:
+            pass
+
+
+def fail_all(reason: str) -> NoReturn:
+    cleanup()
+    fail(reason)
+
+
+atexit.register(cleanup)
+
+
+# ---------------------------------------------------------------------------
+# tool discovery (forge/anvil may live in ~/.foundry/bin, not on PATH)
+# ---------------------------------------------------------------------------
+
+
+def foundry_env(env: dict[str, str]) -> dict[str, str]:
+    out = dict(env)
+    foundry_bin = Path.home() / ".foundry" / "bin"
+    if foundry_bin.is_dir():
+        out["PATH"] = f"{foundry_bin}{os.pathsep}{out.get('PATH', os.defpath)}"
+    return out
+
+
+def resolve_tool(name: str) -> str:
+    path = shutil.which(name) or shutil.which(name, path=str(Path.home() / ".foundry" / "bin"))
+    if not path:
+        fail(f"{name!r} not found on PATH (install Foundry: curl -L https://foundry.paradigm.xyz | bash)")
+    return path
+
+
+# ---------------------------------------------------------------------------
+# anvil well-known account derivation (index via HD path)
+# ---------------------------------------------------------------------------
+
+
+def anvil_account(index: int) -> tuple[str, str]:
+    """(address, private_key) for anvil's public default account `index`."""
+    from eth_account import Account
+
+    Account.enable_unaudited_hdwallet_features()
+    acct = Account.from_mnemonic(ANVIL_MNEMONIC, account_path=f"m/44'/60'/0'/0/{index}")
+    return acct.address, "0x" + acct.key.hex()
+
+
+# ---------------------------------------------------------------------------
+# Minimal ABI fragments for direct-web3 contract prep (deepwork decision 4).
+# Relay/CLI use their own embedded ABIs; these cover e2e-only reads/writes.
+# ---------------------------------------------------------------------------
+
+MOCK_MINT_ABI = [
+    {
+        "type": "function",
+        "name": "mint",
+        "stateMutability": "nonpayable",
+        "inputs": [{"name": "to", "type": "address"}, {"name": "amount", "type": "uint256"}],
+        "outputs": [],
+    },
+    {
+        "type": "function",
+        "name": "balanceOf",
+        "stateMutability": "view",
+        "inputs": [{"name": "account", "type": "address"}],
+        "outputs": [{"type": "uint256"}],
+    },
+]
+
+REGISTRY_ABI = [
+    {
+        "type": "function",
+        "name": "register",
+        "stateMutability": "nonpayable",
+        "inputs": [
+            {"name": "endpoint", "type": "string"},
+            {"name": "models", "type": "string[]"},
+            {"name": "priceCachedIn", "type": "uint256"},
+            {"name": "priceInput", "type": "uint256"},
+            {"name": "priceOutput", "type": "uint256"},
+        ],
+        "outputs": [],
+    },
+    {
+        "type": "function",
+        "name": "getListing",
+        "stateMutability": "view",
+        "inputs": [{"name": "operator", "type": "address"}],
+        "outputs": [
+            {"name": "listingOperator", "type": "address"},
+            {"name": "endpoint", "type": "string"},
+            {"name": "models", "type": "string[]"},
+            {"name": "priceCachedIn", "type": "uint256"},
+            {"name": "priceInput", "type": "uint256"},
+            {"name": "priceOutput", "type": "uint256"},
+            {"name": "active", "type": "bool"},
+        ],
+    },
+]
+
+ESCROW_ABI = [
+    {
+        "type": "function",
+        "name": "getPayment",
+        "stateMutability": "view",
+        "inputs": [{"name": "paymentId", "type": "uint256"}],
+        "outputs": [
+            {"name": "buyer", "type": "address"},
+            {"name": "seller", "type": "address"},
+            {"name": "maxAmount", "type": "uint256"},
+            {"name": "expiresAt", "type": "uint64"},
+            {"name": "state", "type": "uint8"},
+        ],
+    },
+    {
+        "type": "function",
+        "name": "balances",
+        "stateMutability": "view",
+        "inputs": [{"name": "account", "type": "address"}],
+        "outputs": [{"type": "uint256"}],
+    },
+]
+
+
+def w3_at(rpc_url: str) -> Any:
+    from web3 import Web3
+
+    w3 = Web3(Web3.HTTPProvider(rpc_url))
+    if not w3.is_connected():
+        fail(f"RPC {rpc_url} is not reachable")
+    return w3
+
+
+def send_tx(w3: Any, fn: Any, key: str, gas: int = 400_000) -> str:
+    """Sign+send+wait a simple function call (anvil auto-mines; real chains
+    wait with a 1s poll / 60s timeout per spec §9)."""
+    from eth_account import Account
+
+    acct = Account.from_key(key)
+    tx = fn.build_transaction(
+        {
+            "from": acct.address,
+            "nonce": w3.eth.get_transaction_count(acct.address),
+            "gas": gas,
+            "chainId": w3.eth.chain_id,
+        }
+    )
+    latest = w3.eth.get_block("latest")
+    if latest.get("baseFeePerGas") is not None:
+        base = int(latest["baseFeePerGas"])
+        tx["maxFeePerGas"] = base * 2 + 1_000_000_000
+        tx["maxPriorityFeePerGas"] = 1_000_000_000
+        tx.pop("gasPrice", None)
+    else:
+        tx["gasPrice"] = w3.eth.gas_price * 2
+    signed = acct.sign_transaction(tx)
+    raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
+    tx_hash = w3.eth.send_raw_transaction(raw)
+    receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60.0, poll_latency=1.0)
+    if receipt.get("status", 0) != 1:
+        fail(f"tx reverted: {tx_hash.hex()}")
+    return tx_hash.hex()
+
+
+# ---------------------------------------------------------------------------
+# step 2: forge deploy + deployed.json
+# ---------------------------------------------------------------------------
+
+
+def deploy_contracts(network: str, rpc_url: str, deployer_addr: str,
+                     deployer_key: str) -> dict[str, Any]:
+    step("[2/8] Deploying contracts via forge script (USDC_ADDR unset → MockUSDC)")
+    forge = resolve_tool("forge")
+    env = foundry_env(dict(os.environ))
+    env.pop("USDC_ADDR", None)  # fork/local path always deploys MockUSDC
+    cmd = [
+        forge, "script", "script/Deploy.s.sol",
+        "--sig", "run(string)", network,
+        "--rpc-url", rpc_url,
+        "--broadcast",
+        "--private-key", deployer_key,
+        "--sender", deployer_addr,
+        "--force",
+    ]
+    try:
+        result = subprocess.run(cmd, cwd=str(CONTRACTS_DIR), env=env,
+                                capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired as exc:
+        fail_all(f"forge script deploy timed out: {exc}")
+    (E2E_DIR / ".forge_deploy.log").write_text(
+        (result.stdout or "") + "\n" + (result.stderr or ""), errors="replace"
+    )
+    if result.returncode != 0:
+        print((result.stdout or "")[-3000:] or (result.stderr or "")[-3000:])
+        fail_all(f"forge script deploy exited {result.returncode} (log: e2e/.forge_deploy.log)")
+
+    artifact_path = CONTRACTS_DIR / "deployed.json"
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        try:
+            artifact = json.loads(artifact_path.read_text())
+            if artifact.get("escrow"):
+                print(
+                    "deployed.json updated: "
+                    f"escrow={artifact['escrow']} registry={artifact['registry']} "
+                    f"usdc={artifact['usdc']} usdcIsMock={artifact.get('usdcIsMock')} "
+                    f"deployer={artifact.get('deployer')}"
+                )
+                return artifact
+        except (OSError, json.JSONDecodeError):
+            pass
+        time.sleep(0.5)
+    fail_all("contracts/deployed.json not written / invalid after deploy")
+
+
+# ---------------------------------------------------------------------------
+# step 3: contract prep via direct web3 (mint + register listing)
+# ---------------------------------------------------------------------------
+
+
+def prepare_contracts(rpc_url: str, relay_port: int, deployed: dict[str, Any],
+                      seller_addr: str, seller_key: str, buyer_addr: str,
+                      mint_key: str | None) -> None:
+    step("[3/8] Contract prep via direct web3: mint mock USDC + register seller listing")
+    w3 = w3_at(rpc_url)
+    checksum = w3.to_checksum_address
+
+    usdc_is_mock = bool(deployed.get("usdcIsMock"))
+
+    # Fork/local path only: mint mock USDC for the buyer. Real chains use
+    # faucet-funded official USDC (faucet.circle.com) — official USDC has no
+    # permissionless mint, so minting is skipped when usdcIsMock is false.
+    if usdc_is_mock:
+        if mint_key is None:
+            fail_all("usdcIsMock=true but no deployer key available for minting")
+        usdc = w3.eth.contract(address=checksum(deployed["usdc"]), abi=MOCK_MINT_ABI)
+        units_needed = int(BUYER_DEPOSIT_USDC) * 10**6
+        if int(usdc.functions.balanceOf(checksum(buyer_addr)).call()) < units_needed:
+            amount = units_needed * 100  # 100x headroom for locks
+            send_tx(w3, usdc.functions.mint(checksum(buyer_addr), amount), mint_key)
+        print(f"minted MockUSDC for buyer {buyer_addr}")
+
+    endpoint = os.environ.get("RELAY_PUBLIC_ENDPOINT") or f"http://127.0.0.1:{relay_port}"
+    fn = registry_register(w3, deployed["registry"], endpoint)
+    send_tx(w3, fn, seller_key)
+    print(f"registered listing: operator={seller_addr} endpoint={endpoint} model={MOCK_MODEL}")
+
+    # sanity: listing readable, active, endpoint matches
+    listing = w3.eth.contract(
+        address=checksum(deployed["registry"]), abi=REGISTRY_ABI
+    ).functions.getListing(checksum(seller_addr)).call()
+    listing_operator, listing_endpoint, _models, _pc, _pi, _po, active = listing
+    if not active or listing_operator.lower() != checksum(seller_addr).lower():
+        fail_all("seller listing not active / operator mismatch after register")
+    print(f"listing verified: active endpoint={listing_endpoint_safe(listing_endpoint)}")
+
+
+def listing_endpoint_safe(endpoint: str) -> str:
+    return endpoint or "(empty)"
+
+
+def registry_factory(w3: Any, addr: str) -> Any:
+    return w3.eth.contract(address=w3.to_checksum_address(addr), abi=REGISTRY_ABI)
+
+
+def registry_register(w3: Any, addr: str, endpoint: str) -> Any:
+    return registry_factory(w3, addr).functions.register(
+        endpoint,
+        [MOCK_MODEL],
+        LISTING_PRICES["cached"],
+        LISTING_PRICES["input"],
+        LISTING_PRICES["output"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# buyer side via the CLI subprocess (black box; deepwork decision 4)
+# ---------------------------------------------------------------------------
+
+
+def cli_env(base: dict[str, str], deployed: dict[str, Any], rpc_url: str, chain_id: int,
+            buyer_key: str, seller_addr: str) -> dict[str, str]:
+    env = dict(base)
+    cli_path = str(REPO_ROOT / "cli")
+    env["PYTHONPATH"] = cli_path if not env.get("PYTHONPATH") else cli_path + os.pathsep + env["PYTHONPATH"]
+    env.update(
+        {
+            "BUYER_PRIVATE_KEY": buyer_key,
+            "RPC_URL": rpc_url,
+            "CHAIN_ID": str(chain_id),
+            "ESCROW_ADDR": deployed["escrow"],
+            "REGISTRY_ADDR": deployed["registry"],
+            "USDC_ADDR": deployed["usdc"],
+            "SELLER_ADDR": seller_addr,
+            "PROMPT_TOKEN_CAP": str(PROMPT_TOKEN_CAP),
+            "COMPLETION_TOKEN_CAP": str(COMPLETION_TOKEN_CAP),
+            "TX_TIMEOUT_S": "60",
+        }
+    )
+    return env
+
+
+def run_cli(cmd: list[str], env: dict[str, str], timeout: float = 180.0) -> str:
+    result = subprocess.run(
+        [sys.executable, "-m", "tokenshare_cli", *cmd],
+        cwd=str(REPO_ROOT), env=env, capture_output=True, text=True, timeout=timeout,
+    )
+    if result.stdout:
+        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+    if result.stderr:
+        print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
+    if result.returncode != 0:
+        fail_all(f"CLI {' '.join(cmd)} exited {result.returncode}")
+    return result.stdout
+
+
+# ---------------------------------------------------------------------------
+# on-chain reads / asserts
+# ---------------------------------------------------------------------------
+
+
+def warp_chain_past(rpc_url: str, target_ts: int) -> None:
+    """anvil-only: advance the chain clock past `target_ts` (evm_increaseTime +
+    evm_mine). Used on the local fork path because a fork's block timestamps
+    lag the host clock while the refund TTL check is on-chain time."""
+    import httpx
+
+    def rpc(method: str, params: list[Any]) -> Any:
+        resp = httpx.post(
+            rpc_url,
+            json={"jsonrpc": "2.0", "method": method, "params": params, "id": 1},
+            timeout=10.0,
+        )
+        body = resp.json()
+        if "error" in body:
+            fail_all(f"anvil RPC {method} failed: {body['error']}")
+        return body.get("result")
+
+    latest = rpc("eth_getBlockByNumber", ["latest", False]) or {}
+    chain_now = int(latest.get("timestamp", "0x0"), 16)
+    delta = target_ts + 2 - chain_now
+    if delta > 0:
+        rpc("evm_increaseTime", [delta])
+        rpc("evm_mine", [])  # materialize a block with the shifted timestamp
+        print(f"anvil time warped +{delta}s (fork clock lags host clock)")
+
+
+def escrow_balances(rpc_url: str, deployed: dict[str, Any], buyer: str, seller: str) -> dict[str, int]:
+    w3 = w3_at(rpc_url)
+    escrow = w3.eth.contract(
+        address=w3.to_checksum_address(deployed["escrow"]), abi=ESCROW_ABI
+    )
+    return {
+        "buyer_escrow": int(escrow.functions.balances(w3.to_checksum_address(buyer)).call()),
+        "seller_escrow": int(escrow.functions.balances(w3.to_checksum_address(seller)).call()),
+    }
+
+
+def escrow_payment(rpc_url: str, deployed: dict[str, Any], payment_id: int) -> dict[str, Any]:
+    w3 = w3_at(rpc_url)
+    escrow = w3.eth.contract(
+        address=w3.to_checksum_address(deployed["escrow"]), abi=ESCROW_ABI
+    )
+    buyer, seller, max_amount, expires_at, state = escrow.functions.getPayment(int(payment_id)).call()
+    return {
+        "buyer": buyer, "seller": seller, "maxAmount": int(max_amount),
+        "expiresAt": int(expires_at), "state": int(state),
+    }
+
+
+def parse_cli_value(cli_output: str, key: str) -> str:
+    for line in cli_output.splitlines():
+        if line.startswith(f"{key}: "):
+            return line.split(":", 1)[1].strip()
+    fail_all(f"no {key!r} line in CLI output:\n{cli_output}")
+
+
+def assert_call_output(out: str, prompt: str) -> None:
+    """CLI output must contain the model reply, settle status and a verified
+    receipt (acceptance per BUILD_SPEC §7 M4/M5)."""
+    if "TokenShare mock LLM online" not in out:
+        fail_all(f"CLI call output missing mock model reply:\n{out}")
+    if f"echo: {prompt}" not in out:
+        fail_all(f"CLI call output missing prompt echo:\n{out}")
+    if "Settle status: settled" not in out:
+        fail_all(f'CLI call output missing "Settle status: settled":\n{out}')
+    if "Receipt verification: OK" not in out:
+        fail_all(f'CLI call output missing "Receipt verification: OK":\n{out}')
+
+
+def onchain_settle_asserts(rpc_url: str, deployed: dict[str, Any], payment_id: int,
+                           before: dict[str, int], after: dict[str, int],
+                           buyer_addr: str, seller_addr: str) -> None:
+    step("[7/8] On-chain asserts: Escrow Settled + balance direction")
+    payment = escrow_payment(rpc_url, deployed, payment_id)
+    if payment["state"] != 2:
+        fail_all(f"payment {payment_id} state={payment['state']} (expected 2 = Settled)")
+    if payment["buyer"].lower() != buyer_addr.lower():
+        fail_all(f"payment buyer {payment['buyer']} != CLI buyer {buyer_addr}")
+    if payment["seller"].lower() != seller_addr.lower():
+        fail_all(f"payment seller {payment['seller']} != relay seller {seller_addr}")
+
+    actual = before["buyer_escrow"] - after["buyer_escrow"]
+    if actual != EXPECTED_ACTUAL:
+        fail_all(f"settled delta {actual} != priced expectation {EXPECTED_ACTUAL} "
+                 f"(before={before} after={after})")
+    if after["seller_escrow"] - before["seller_escrow"] != actual:
+        fail_all(
+            f"seller escrow delta ({after['seller_escrow'] - before['seller_escrow']}) "
+            f"!= buyer delta ({actual})"
+        )
+    if actual > payment["maxAmount"]:
+        fail_all(f"actual {actual} exceeds locked maxAmount {payment['maxAmount']}")
+    print(
+        f"OK: payment {payment_id} Settled, actual={actual} native "
+        f"({actual / 1e6:.6f} USDC) <= maxAmount {payment['maxAmount']}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# orchestration
+# ---------------------------------------------------------------------------
+
+
+def start_anvil(cfg: dict[str, Any], base_env: dict[str, str]) -> tuple[str, int]:
+    step("[1/8] anvil fork (public RPC default from spec §9, env-overridable)")
+    anvil = resolve_tool("anvil")
+    anvil_port = pick_free_port(int(base_env.get("ANVIL_PORT", "8545")))
+    fork_rpc = base_env.get(cfg["rpc_env"], cfg["default_rpc"])
+    proc = start(
+        "anvil", [anvil, "--fork-url", fork_rpc, "--port", str(anvil_port)],
+        cwd=REPO_ROOT, env=foundry_env(base_env), log_path=E2E_DIR / ".anvil.log",
+    )
+    rpc_url = f"http://127.0.0.1:{anvil_port}"
+    deadline = time.monotonic() + 90
+    chain_id = None
+    while time.monotonic() < deadline:
+        try:
+            chain_id = rpc_chain_id(rpc_url)
+            break
+        except Exception:
+            time.sleep(1.0)
+    if chain_id is None:
+        print(proc.tail())
+        fail_all("anvil did not become ready in 90s (is the fork RPC reachable?)")
+    if chain_id != cfg["chain_id"]:
+        fail_all(f"anvil fork chainId {chain_id} != {cfg['chain_id']}")
+    print(f"anvil up: {rpc_url} (forking {fork_rpc}, chainId {chain_id})")
+    return rpc_url, anvil_port
+
+
+def start_mock(base_env: dict[str, str]) -> int:
+    step(f"[4/8] mock OpenAI (deterministic usage {MOCK_USAGE})")
+    mock_port = pick_free_port()
+    proc = start(
+        "mock_openai",
+        [sys.executable, str(E2E_DIR / "mock_openai.py"),
+         "--port", str(mock_port),
+         "--prompt-tokens", str(MOCK_USAGE["prompt_tokens"]),
+         "--cached-tokens", str(MOCK_USAGE["cached_tokens"]),
+         "--completion-tokens", str(MOCK_USAGE["completion_tokens"])],
+        cwd=REPO_ROOT, env=base_env, log_path=E2E_DIR / ".mock_openai.log",
+    )
+    wait_http(f"http://127.0.0.1:{mock_port}/health", timeout=30)
+    print(f"mock OpenAI up: http://127.0.0.1:{mock_port}/v1/chat/completions")
+    return mock_port
+
+
+def start_relay(base_env: dict[str, str], deployed: dict[str, Any], rpc_url: str,
+                chain_id: int, relay_port: int, mock_port: int, seller_key: str) -> None:
+    step(f"[5/8] relay (uvicorn) on port {relay_port}, OPENAI_BASE_URL -> mock (no /v1 suffix)")
+    relay_env = dict(base_env)
+    # Full relay env assembly — names are verbatim relay/app/config.py ENV_*.
+    relay_env.update(
+        {
+            "RELAY_SELLER_KEY": seller_key,
+            "RPC_URL": rpc_url,
+            "CHAIN_ID": str(chain_id),
+            "ESCROW_ADDR": deployed["escrow"],
+            "REGISTRY_ADDR": deployed["registry"],
+            "USDC_ADDR": deployed["usdc"],
+            "OPENAI_API_KEY": base_env.get("OPENAI_API_KEY") or "dummy-local-e2e-key",
+            # httpx base_url appends /v1/chat/completions — the value must NOT
+            # end in /v1 (relay default "https://api.openai.com/v1" would double
+            # the path; reported as a relay finding for Gate G).
+            "OPENAI_BASE_URL": f"http://127.0.0.1:{mock_port}",
+            "FORWARD_MARGIN_S": base_env.get("FORWARD_MARGIN_S", "120"),
+            "PORT": str(relay_port),
+            "PROMPT_TOKEN_CAP": str(PROMPT_TOKEN_CAP),
+            "COMPLETION_TOKEN_CAP": str(COMPLETION_TOKEN_CAP),
+        }
+    )
+    start(
+        "relay",
+        [sys.executable, "-m", "uvicorn", "relay.app.main:app",
+         "--host", "127.0.0.1", "--port", str(relay_port), "--log-level", "info"],
+        cwd=REPO_ROOT, env=relay_env, log_path=E2E_DIR / ".relay.log",
+    )
+    wait_http(f"http://127.0.0.1:{relay_port}/health", timeout=60)
+    import httpx
+
+    health = httpx.get(f"http://127.0.0.1:{relay_port}/health", timeout=10).json()
+    if str(health.get("seller", "")).lower() != seller_key_addr(seller_key).lower():
+        fail_all(f"relay health seller={health.get('seller')} != registry seller")
+    print(f"relay up: seller={health['seller']} chainId={health['chainId']}")
+
+
+def seller_key_addr(seller_key: str) -> str:
+    from eth_account import Account
+
+    return Account.from_key(seller_key).address
+
+
+def buyer_flow(deployed: dict[str, Any], rpc_url: str, chain_id: int,
+               base_env: dict[str, str], buyer_key: str, buyer_addr: str,
+               seller_addr: str) -> int:
+    step("[6/8] Buyer flow via CLI subprocess: deposit -> lock -> call -> refund (expired)")
+    buyer_env = cli_env(base_env, deployed, rpc_url, chain_id, buyer_key, seller_addr)
+    disputes_file = E2E_DIR / ".disputes.json"
+
+    deposit_out = run_cli(["--disputes-file", str(disputes_file), "deposit",
+                           "--amount", BUYER_DEPOSIT_USDC], buyer_env)
+    if "deposited:" not in deposit_out:
+        fail_all(f"CLI deposit output missing 'deposited:' line:\n{deposit_out}")
+
+    # Separate short-TTL lock that the refund path will exercise (payment stays
+    # Locked — the call below locks its own NEW paymentId per app.py default).
+    lock_out = run_cli(["--disputes-file", str(disputes_file), "lock",
+                        "--seller", seller_addr, "--max", REFUND_MAX_USDC,
+                        "--ttl", str(REFUND_TTL_S)], buyer_env)
+    refund_pid = int(parse_cli_value(lock_out, "paymentId"))
+    expires_at = int(parse_cli_value(lock_out, "expiresAt").split("unix ")[1])
+    print(f"locked paymentId {refund_pid} (ttl={REFUND_TTL_S}s) for the refund path")
+
+    # Snapshot before the paid call: the settle must move exactly
+    # EXPECTED_ACTUAL out of the buyer's escrow balance into the seller's.
+    before = escrow_balances(rpc_url, deployed, buyer_addr, seller_addr)
+
+    prompt = "Explain EIP-712 receipts in one sentence."
+    call_out = run_cli(
+        ["--disputes-file", str(disputes_file), "call", prompt,
+         "--seller", seller_addr, "--model", MOCK_MODEL, "--max", CALL_MAX_USDC],
+        buyer_env,
+    )
+    assert_call_output(call_out, prompt)
+    settle_pid = int(parse_cli_value(call_out, "paymentId"))
+    print(f"call used paymentId {settle_pid} (auto-locked, settled)")
+
+    # On-chain asserts for the settled payment.
+    onchain_settle_asserts(rpc_url, deployed, settle_pid, before,
+                           escrow_balances(rpc_url, deployed, buyer_addr, seller_addr),
+                           buyer_addr, seller_addr)
+
+    # Refund path (M4): the CLI pre-check uses wall-clock time, the contract
+    # uses block.timestamp — and an anvil FORK's chain clock lags the host
+    # clock (it only advances when blocks are mined). So: wait out the wall
+    # clock for the CLI, then warp the local chain past the expiry (fork only;
+    # real chains simply wait).
+    wait_s = expires_at - int(time.time()) + 1.5
+    if wait_s > 0:
+        print(f"waiting {wait_s:.1f}s for lock {refund_pid} TTL to elapse …")
+        time.sleep(wait_s)
+    if rpc_url.startswith(("http://127.0.0.1", "http://localhost")):
+        warp_chain_past(rpc_url, expires_at)
+    refund_out = run_cli(["--disputes-file", str(disputes_file), "refund",
+                          "--payment-id", str(refund_pid)], buyer_env)
+    if f"paymentId: {refund_pid} refunded" not in refund_out:
+        fail_all(f"CLI refund output missing confirmation:\n{refund_out}")
+    payment = escrow_payment(rpc_url, deployed, refund_pid)
+    if payment["state"] != 3:
+        fail_all(f"refund: payment {refund_pid} state={payment['state']} (expected 3 = Refunded)")
+    print(f"OK: payment {refund_pid} Refunded (M4 refund path verified on-chain)")
+    return settle_pid
+
+
+def run(network: str) -> None:
+    cfg = NETWORKS[network]
+    base_env = dict(os.environ)
+
+    if cfg["anvil"]:
+        # ----- local fork path ------------------------------------------------
+        rpc_url, _anvil_port = start_anvil(cfg, base_env)
+        # Index roles: 0 = deployer (forge script), 1 = buyer (CLI), 2 = seller
+        # (relay + Registry listing). All derived from anvil's public default
+        # mnemonic at runtime — zero private-key literals in source.
+        deployer_addr, deployer_key = anvil_account(0)
+        seller_addr, seller_key = anvil_account(2)
+        buyer_addr, buyer_key = anvil_account(1)
+        print("using anvil public test accounts (NO real assets): "
+              f"deployer={deployer_addr} seller={seller_addr} buyer={buyer_addr}")
+        deployed = deploy_contracts(network, rpc_url, deployer_addr, deployer_key)
+    else:
+        # ----- real-chain path (M5b): keys + RPC from env ---------------------
+        rpc_url = base_env.get(cfg["rpc_env"], cfg["default_rpc"])
+        seller_key = base_env.get("SELLER_PRIVATE_KEY")
+        buyer_key = base_env.get("BUYER_PRIVATE_KEY")
+        if not seller_key or not buyer_key:
+            print(
+                f"[skip] {network}: real-chain e2e is ready but not runnable yet "
+                "(M5b). Prerequisites:\n"
+                "  1. put SELLER_PRIVATE_KEY / BUYER_PRIVATE_KEY in .env\n"
+                "  2. fund both addresses: faucet.monad.xyz (MON gas) + "
+                "faucet.circle.com (USDC)\n"
+                "  3. deploy:\n"
+                f"     USDC_ADDR={cfg['usdc_official']} forge script script/Deploy.s.sol "
+                f"--sig run(string) {network} --rpc-url {rpc_url} --broadcast "
+                "(from contracts/)\n"
+                "  4. export RELAY_PUBLIC_ENDPOINT=<public URL of your relay> and rerun\n"
+                "Config is ready — nothing else changes (same code path)."
+            )
+            return
+        from eth_account import Account as _Account
+
+        seller_addr = _Account.from_key(seller_key).address
+        buyer_addr = _Account.from_key(buyer_key).address
+        deployer_key = seller_key  # deployer on real chains = seller account
+        deployed_path = CONTRACTS_DIR / "deployed.json"
+        if base_env.get("ESCROW_ADDR") and base_env.get("REGISTRY_ADDR"):
+            deployed = {
+                "escrow": base_env["ESCROW_ADDR"],
+                "registry": base_env["REGISTRY_ADDR"],
+                "usdc": base_env.get("USDC_ADDR", cfg["usdc_official"]),
+                "usdcIsMock": False,
+            }
+        else:
+            try:
+                deployed = json.loads(deployed_path.read_text())
+            except OSError:
+                print(
+                    f"[skip] {network}: no ESCROW_ADDR/REGISTRY_ADDR in env and "
+                    "contracts/deployed.json is missing. Deploy first:\n"
+                    f"  cd contracts && USDC_ADDR={cfg['usdc_official']} "
+                    f"forge script script/Deploy.s.sol --sig run(string) {network} "
+                    f"--rpc-url {rpc_url} --broadcast --private-key <SELLER key>"
+                )
+                return
+            if deployed.get("network") != network:
+                print(
+                    f"[skip] {network}: contracts/deployed.json holds network="
+                    f"{deployed.get('network')!r}. Re-run the deploy against {network}:\n"
+                    f"  cd contracts && USDC_ADDR={cfg['usdc_official']} forge script "
+                    f"script/Deploy.s.sol --sig run(string) {network} --rpc-url {rpc_url} "
+                    "--broadcast --private-key <SELLER key>"
+                )
+                return
+        # Deploy is skipped when an artifact for this network already exists
+        # (M5b pre-deploy); otherwise deploy now with the seller key.
+        try:
+            existing = json.loads(deployed_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+        if existing.get("network") == network and existing.get("escrow"):
+            print(f"[2/8] contracts already deployed for {network}: {existing['escrow']}")
+            deployed = existing
+        else:
+            deployed = deploy_contracts(network, rpc_url, seller_addr, deployer_key)
+
+    # Deployed chain must match the configured chain (fork or real).
+    remote_chain = rpc_chain_id(rpc_url)
+    expected_chain = int(deployed.get("chainId") or cfg["chain_id"])
+    if remote_chain != expected_chain:
+        fail_all(f"RPC chainId {remote_chain} != deployed chainId {expected_chain}")
+
+    # Ports: relay prefers 8787 (PIN default), mock gets a random free port.
+    relay_port = pick_free_port(int(base_env.get("RELAY_PORT", "8787")))
+    prepare_contracts(rpc_url, relay_port, deployed, seller_addr, seller_key,
+                      buyer_addr, mint_key=deployer_key if cfg["anvil"] else None)
+    mock_port = start_mock(base_env)
+    start_relay(base_env, deployed, rpc_url, int(deployed.get("chainId") or cfg["chain_id"]),
+                relay_port, mock_port, seller_key)
+    buyer_flow(deployed, rpc_url, int(deployed.get("chainId") or cfg["chain_id"]),
+               base_env, buyer_key, buyer_addr, seller_addr)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="TokenShare e2e runner")
+    parser.add_argument("--network", required=True, choices=sorted(NETWORKS))
+    args = parser.parse_args()
+
+    step(f"TokenShare E2E — network={args.network} repo={REPO_ROOT}")
+    try:
+        run(args.network)
+    except SystemExit:
+        raise
+    except KeyboardInterrupt:
+        cleanup()
+        fail("interrupted")
+    except Exception as exc:  # noqa: BLE001
+        import traceback
+
+        traceback.print_exc()
+        cleanup()
+        fail(f"unexpected error: {exc}")
+    cleanup()
+    print("\nE2E PASSED", flush=True)
+
+
+if __name__ == "__main__":
+    main()
