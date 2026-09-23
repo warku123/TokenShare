@@ -36,17 +36,26 @@ from .conftest import ACTUAL, CHAIN_ID, SELLER, chat_body, post_chat, setup_rela
 
 def test_official_allowlist_shape() -> None:
     assert OFFICIAL_UPSTREAM_HOSTS == frozenset(
-        {"api.openai.com", "api.moonshot.cn", "api.moonshot.ai"}
+        {"api.openai.com", "api.moonshot.cn", "api.moonshot.ai", "api.kimi.com"}
     )
     assert OFFICIAL_HOST_PROVIDER["api.openai.com"] == "openai"
     assert OFFICIAL_HOST_PROVIDER["api.moonshot.cn"] == "moonshot"
     assert OFFICIAL_HOST_PROVIDER["api.moonshot.ai"] == "moonshot"
+    assert OFFICIAL_HOST_PROVIDER["api.kimi.com"] == "moonshot"
 
 
 def test_provider_for_model_prefixes() -> None:
     for name in ("gpt-4o-mini", "o3", "o1-mini", "o4-mini", "chatgpt-4o-latest"):
         assert provider_for_model(name) == "openai", name
-    for name in ("kimi-k2.6", "moonshot-v1-8k", "kimi-latest"):
+    for name in (
+        "kimi-k2.6",
+        "moonshot-v1-8k",
+        "kimi-latest",
+        "kimi-for-coding",
+        "kimi-for-coding-highspeed",
+        "k3",
+        "k3-256k",
+    ):
         assert provider_for_model(name) == "moonshot", name
     # Unknown / non-official prefixes must NOT be guessed.
     assert provider_for_model("claude-3-sonnet") is None
@@ -61,6 +70,11 @@ def test_host_provider_mapping() -> None:
     assert host_provider("https://api.openai.com") == "openai"
     assert host_provider("https://api.moonshot.cn") == "moonshot"
     assert host_provider("https://api.moonshot.ai") == "moonshot"
+    # Kimi Coding plan base: the /coding path is irrelevant to the host gate;
+    # host_provider parses the NORMALIZED (trailing /v1 stripped) URL.
+    assert host_provider("https://api.kimi.com") == "moonshot"
+    assert host_provider("https://api.kimi.com/coding") == "moonshot"
+    assert host_provider("https://api.kimi.com/coding/") == "moonshot"
     # Scheme-relative case-insensitivity of hosts.
     assert host_provider("https://API.OPENAI.COM") == "openai"
     assert host_provider("http://127.0.0.1:9") is None
@@ -97,6 +111,18 @@ def test_startup_allows_official_host_without_flag(
     """An official host boots normally even without the flag. Only /health is
     called, so nothing is forwarded to the real network."""
     setup_relay_env(monkeypatch, "https://api.openai.com")
+    monkeypatch.delenv(cfg.ENV_ALLOW_CUSTOM_UPSTREAM, raising=False)
+    with TestClient(m.app) as client:
+        assert client.get("/health").status_code == 200
+
+
+def test_startup_accepts_kimi_coding_plan_base(
+    monkeypatch: pytest.MonkeyPatch, fake_chain: Any
+) -> None:
+    """Kimi Coding plan base (SDK-style /coding/v1) passes the startup
+    allowlist: normalization strips the trailing /v1 and host_provider must
+    resolve the RESULTING URL's host (api.kimi.com) as official."""
+    setup_relay_env(monkeypatch, "https://api.kimi.com/coding/v1")
     monkeypatch.delenv(cfg.ENV_ALLOW_CUSTOM_UPSTREAM, raising=False)
     with TestClient(m.app) as client:
         assert client.get("/health").status_code == 200
@@ -176,6 +202,26 @@ def test_matching_provider_passes_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     m._check_model_provider_consistency({"model": "kimi-k2.6"})  # no raise
     _state_with_base_url(monkeypatch, "https://api.moonshot.ai")
     m._check_model_provider_consistency({"model": "moonshot-v1-8k"})  # no raise
+
+
+def test_kimi_coding_plan_models_pass_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Kimi Coding plan model face through the api.kimi.com upstream."""
+    _state_with_base_url(monkeypatch, "https://api.kimi.com/coding/v1")
+    m._check_model_provider_consistency({"model": "k3"})  # no raise
+    m._check_model_provider_consistency({"model": "k3-256k"})  # no raise
+    m._check_model_provider_consistency({"model": "kimi-for-coding"})  # no raise
+    m._check_model_provider_consistency(
+        {"model": "kimi-for-coding-highspeed"}
+    )  # no raise
+
+
+def test_k3_on_openai_host_rejected_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provider mismatch still bites: a k3 model aimed at api.openai.com → 400."""
+    _state_with_base_url(monkeypatch, "https://api.openai.com")
+    with pytest.raises(HTTPException) as exc:
+        m._check_model_provider_consistency({"model": "k3"})
+    assert exc.value.status_code == 400
+    assert "does not match" in exc.value.detail
 
 
 def test_gate_on_custom_upstream_enforces_catalog_only(

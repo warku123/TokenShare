@@ -26,6 +26,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
@@ -34,14 +35,17 @@ import httpx
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .chain import ChainClient
 from .config import (
     Config,
     ConfigError,
+    ENV_CORS_ORIGINS,
     host_provider,
     load_config,
+    parse_cors_origins,
     provider_for_model,
 )
 from .pricing import Prices, Usage, clamp_settle_amount, compute_actual, estimate_min_amount
@@ -135,6 +139,23 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="TokenShare Seller Relay", version="1", lifespan=lifespan)
+
+# CORS for the browser front-end, which calls the relay directly and must
+# READ the response headers X-Receipt / X-Settle-Status from JS — without
+# `expose_headers` browsers hide them from the fetch response. Origins come
+# from RELAY_CORS_ORIGINS (comma-separated; default "*" — DEMO default, in
+# production set the front-end's own domain list). Parsed here at IMPORT
+# time: the middleware stack is built before startup, so it cannot wait for
+# the lifespan-time config load. Preflight OPTIONS with Origin +
+# Access-Control-Request-Method is short-circuited by this middleware before
+# any routing (no 405 short-circuit against the GET/POST-only routes).
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=parse_cors_origins(os.environ.get(ENV_CORS_ORIGINS)),
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Payment-Id", "X-Signature"],
+    expose_headers=["X-Receipt", "X-Settle-Status"],
+)
 
 
 def _get_state() -> RelayState:

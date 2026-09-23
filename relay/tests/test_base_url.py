@@ -80,6 +80,10 @@ def test_normalize_variants() -> None:
     assert _normalize_openai_base_url(
         "https://proxy.invalid/openai/v1"
     ) == "https://proxy.invalid/openai"
+    # Kimi Coding plan: /coding/v1 -> /coding (host gate then sees api.kimi.com).
+    assert _normalize_openai_base_url(
+        "https://api.kimi.com/coding/v1"
+    ) == "https://api.kimi.com/coding"
 
 
 def test_forward_no_double_v1_env_unset(

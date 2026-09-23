@@ -35,12 +35,16 @@ ENV_PROMPT_TOKEN_CAP = "PROMPT_TOKEN_CAP"
 ENV_COMPLETION_TOKEN_CAP = "COMPLETION_TOKEN_CAP"
 ENV_ALLOW_CUSTOM_UPSTREAM = "ALLOW_CUSTOM_UPSTREAM"
 ENV_VERIFY_UPSTREAM_ON_START = "VERIFY_UPSTREAM_ON_START"
+ENV_CORS_ORIGINS = "RELAY_CORS_ORIGINS"
 
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com"
 DEFAULT_FORWARD_MARGIN_S = 120
 DEFAULT_PORT = 8787
 DEFAULT_PROMPT_TOKEN_CAP = 200_000
 DEFAULT_COMPLETION_TOKEN_CAP = 32_000
+# Demo default: any origin may call the relay. Production MUST pin the
+# front-end's own domain list via RELAY_CORS_ORIGINS instead.
+DEFAULT_CORS_ORIGINS: Final[tuple[str, ...]] = ("*",)
 
 # ---------------------------------------------------------------------------
 # Official-endpoint-only upstream policy (anti-poisoning, 2026-09-23 ruling).
@@ -59,6 +63,9 @@ OFFICIAL_UPSTREAM_HOSTS: Final[frozenset[str]] = frozenset(
         "api.openai.com",  # OpenAI
         "api.moonshot.cn",  # Kimi / Moonshot domestic
         "api.moonshot.ai",  # Kimi / Moonshot international (keys not interchangeable with .cn)
+        "api.kimi.com",  # Kimi Coding plan (subscription coding quota; base
+        #                   https://api.kimi.com/coding/v1 — SDK-style value,
+        #                   the relay strips the trailing /v1 before gating).
     }
 )
 
@@ -67,14 +74,17 @@ OFFICIAL_HOST_PROVIDER: Final[dict[str, str]] = {
     "api.openai.com": "openai",
     "api.moonshot.cn": "moonshot",
     "api.moonshot.ai": "moonshot",
+    "api.kimi.com": "moonshot",
 }
 
 # Official catalog model prefixes per provider. UNKNOWN prefixes => the model
 # is not an official-plan model (provider_for_model returns None). The relay
 # 400s such models instead of forwarding them to an official upstream.
+# "k3" covers the Kimi Coding plan model face: k3 / k3-256k
+# (kimi-for-coding / kimi-for-coding-highspeed already match "kimi-").
 MODEL_PROVIDER_PREFIXES: Final[dict[str, tuple[str, ...]]] = {
     "openai": ("gpt-", "o1", "o3", "o4", "chatgpt-"),
-    "moonshot": ("kimi-", "moonshot-"),
+    "moonshot": ("kimi-", "moonshot-", "k3"),
 }
 
 
@@ -105,6 +115,16 @@ def host_provider(base_url: str) -> str | None:
     except ValueError:
         return None
     return OFFICIAL_HOST_PROVIDER.get(host)
+
+
+def parse_cors_origins(raw: str | None) -> list[str]:
+    """Parse RELAY_CORS_ORIGINS: a comma-separated origin list, entries
+    stripped, blank entries dropped. Unset/blank -> ["*"] — the DEMO default
+    (any origin); production must pin the front-end's own domain list."""
+    if raw is None or not raw.strip():
+        return list(DEFAULT_CORS_ORIGINS)
+    origins = [entry.strip() for entry in raw.split(",")]
+    return [entry for entry in origins if entry]
 
 
 class ConfigError(RuntimeError):
