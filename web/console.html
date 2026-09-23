@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="TokenShare console — register a seller listing, or deposit, lock and pay per call as a buyer. Wallet-only, keys never touch the page.">
+<title>TokenShare — Console</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body class="console-page">
+
+<header class="topbar">
+  <div class="wrap topbar-in">
+    <a class="brand" href="index.html">TOKENSHARE<span class="brand-dim"> / console</span></a>
+    <nav class="topnav" aria-label="Sections">
+      <a href="index.html#market">MARKET</a>
+      <a href="index.html#mechanism">MECHANISM</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <!-- ══ WALLET BAR ══ -->
+  <section class="con-head">
+    <div>
+      <h1 class="con-title">CONSOLE<span class="cursor" aria-hidden="true"></span></h1>
+      <p class="con-sub">Seller registers an official-plan listing. Buyer deposits, locks, and pays per call.
+        All signing happens in your wallet — keys never touch this page.</p>
+    </div>
+    <div class="wallet-box">
+      <button class="btn" id="wallet-connect" type="button">[ CONNECT WALLET ]</button>
+      <div class="wallet-info" id="wallet-info" hidden>
+        <a class="wallet-addr mono" id="wallet-addr" href="#" target="_blank" rel="noopener">—</a>
+        <span class="net-badge" id="net-badge">—</span>
+        <span class="wallet-usdc mono" id="wallet-usdc" title="wallet USDC balance">—</span>
+      </div>
+    </div>
+  </section>
+
+  <div class="mkt-notice" id="config-banner" hidden></div>
+
+  <!-- ══ TABS ══ -->
+  <div class="tabs" role="tablist" aria-label="Console role">
+    <button class="tab-btn active" id="tab-seller" role="tab" aria-selected="true" aria-controls="panel-seller" type="button">SELLER</button>
+    <button class="tab-btn" id="tab-buyer" role="tab" aria-selected="false" aria-controls="panel-buyer" type="button">BUYER</button>
+  </div>
+
+  <!-- ════════════ SELLER ════════════ -->
+  <section class="panel" id="panel-seller" role="tabpanel" aria-labelledby="tab-seller">
+
+    <div class="grid-2">
+      <!-- my listing -->
+      <article class="card rv">
+        <h2 class="card-title">MY LISTING<span class="card-tag">Registry.getListing(me)</span></h2>
+        <div class="card-body" id="s-my-listing"><p class="empty-hint">连接钱包后展示你的 Registry listing。</p></div>
+      </article>
+
+      <!-- register / update -->
+      <article class="card rv">
+        <h2 class="card-title">REGISTER / UPDATE<span class="card-tag">Registry</span></h2>
+        <div class="card-body">
+          <label class="fld">
+            <span class="fld-lbl">RELAY ENDPOINT <i>base URL — buyers POST {endpoint}/v1/chat/completions</i></span>
+            <input type="url" id="s-endpoint" placeholder="https://relay.example.com:8787" spellcheck="false" autocomplete="off">
+          </label>
+
+          <div class="fld">
+            <span class="fld-lbl">MODELS <i>official-plan models only — relay enforces prefix/host consistency</i></span>
+            <div class="model-checks">
+              <label class="mcheck"><input type="checkbox" name="s-model" value="kimi-k2.6" checked><span>kimi-k2.6</span></label>
+              <label class="mcheck"><input type="checkbox" name="s-model" value="kimi-k2.7-code"><span>kimi-k2.7-code</span></label>
+              <label class="mcheck"><input type="checkbox" name="s-model" value="kimi-k2.7-code-highspeed"><span>kimi-k2.7-code-highspeed</span></label>
+              <label class="mcheck"><input type="checkbox" name="s-model" value="kimi-k3"><span>kimi-k3</span></label>
+            </div>
+            <div class="custom-add">
+              <input type="text" id="s-custom-model" placeholder="custom model, e.g. moonshot-v1-128k" spellcheck="false" autocomplete="off">
+              <button class="btn btn-sm btn-ghost" id="s-add-model" type="button">[ + ADD ]</button>
+            </div>
+            <div class="custom-list" id="s-custom-list"></div>
+          </div>
+
+          <div class="fld-row">
+            <label class="fld"><span class="fld-lbl">CACHED IN <i>USDC / 1M tok</i></span>
+              <input type="text" inputmode="decimal" id="s-price-cached" placeholder="0.16"></label>
+            <label class="fld"><span class="fld-lbl">INPUT <i>USDC / 1M tok</i></span>
+              <input type="text" inputmode="decimal" id="s-price-input" placeholder="0.95"></label>
+            <label class="fld"><span class="fld-lbl">OUTPUT <i>USDC / 1M tok</i></span>
+              <input type="text" inputmode="decimal" id="s-price-output" placeholder="4.00"></label>
+          </div>
+
+          <label class="mswitch">
+            <input type="checkbox" id="s-active" checked>
+            <span class="mswitch-lbl">LISTING ACTIVE <i>off → deactivate() · re-on after shape change → deactivate + register</i></span>
+          </label>
+
+          <pre class="preview mono" id="s-preview" aria-label="transaction preview"></pre>
+          <button class="btn btn-wide" id="s-submit" type="button">[ SUBMIT TO REGISTRY ]</button>
+          <div class="txbox" id="s-tx"></div>
+        </div>
+      </article>
+    </div>
+
+    <!-- upstream precheck -->
+    <article class="card rv">
+      <h2 class="card-title">UPSTREAM PRECHECK<span class="card-tag">GET {relay}/verify-upstream</span></h2>
+      <div class="card-body">
+        <div class="precheck-row">
+          <input type="url" id="p-base" placeholder="https://relay.example.com:8787" spellcheck="false" autocomplete="off">
+          <button class="btn" id="p-run" type="button">[ RUN PRECHECK ]</button>
+        </div>
+        <p class="fld-hint">Relay 用配置的官方平台 key 打 <code class="inl">/v1/models</code>，再与链上 listing 交叉核验。
+          与上方表单勾选对比，差异即时可见。</p>
+        <div class="precheck-result" id="p-result"><p class="empty-hint">precheck result renders here — key validity, accessible models, listing consistency.</p></div>
+      </div>
+    </article>
+  </section>
+
+  <!-- ════════════ BUYER ════════════ -->
+  <section class="panel" id="panel-buyer" role="tabpanel" aria-labelledby="tab-buyer" hidden>
+
+    <div class="grid-3">
+      <!-- balances -->
+      <article class="card rv">
+        <h2 class="card-title">BALANCES<span class="card-tag">USDC · Escrow</span></h2>
+        <div class="card-body">
+          <div class="bal-row"><span>WALLET</span><b class="mono" id="b-wallet-note"><span id="b-wallet-usdc-mirror">see wallet bar ↑</span></b></div>
+          <div class="bal-row"><span>ESCROW balances(me)</span><b class="mono" id="b-escrow-bal">—</b></div>
+          <div class="fld-row" style="margin-top:14px">
+            <label class="fld"><span class="fld-lbl">WITHDRAW <i>USDC</i></span>
+              <input type="text" inputmode="decimal" id="b-withdraw-amt" placeholder="0.10"></label>
+            <button class="btn btn-sm btn-ghost btn-end" id="b-withdraw-btn" type="button">[ WITHDRAW ]</button>
+          </div>
+          <div class="txbox" id="b-bal-tx"></div>
+        </div>
+      </article>
+
+      <!-- deposit -->
+      <article class="card rv">
+        <h2 class="card-title">DEPOSIT<span class="card-tag">approve → deposit</span></h2>
+        <div class="card-body">
+          <label class="fld"><span class="fld-lbl">AMOUNT <i>USDC — one deposit backs many calls</i></span>
+            <input type="text" inputmode="decimal" id="b-dep-amt" placeholder="0.50"></label>
+          <button class="btn btn-wide" id="b-dep-btn" type="button">[ APPROVE + DEPOSIT ]</button>
+          <div class="txbox" id="b-dep-tx"></div>
+        </div>
+      </article>
+
+      <!-- lock -->
+      <article class="card rv">
+        <h2 class="card-title">LOCK<span class="card-tag">Escrow.lock → paymentId</span></h2>
+        <div class="card-body">
+          <label class="fld"><span class="fld-lbl">SELLER <i>from the market listings</i></span>
+            <select id="b-seller"><option value="">— choose seller —</option></select></label>
+          <div class="mini-info" id="b-lock-info"><p class="empty-hint">选择卖家后显示三档价与 minAmount 估计。</p></div>
+          <div class="fld-row">
+            <label class="fld"><span class="fld-lbl">MAX AMOUNT <i>USDC</i></span>
+              <input type="text" inputmode="decimal" id="b-max" placeholder="0.05"></label>
+            <label class="fld"><span class="fld-lbl">TTL <i>seconds</i></span>
+              <input type="number" id="b-ttl" value="600" min="60" step="60"></label>
+          </div>
+          <p class="fld-hint" id="b-lock-hint">≥ 卖家三档价×caps 估计，参考市场页三档价</p>
+          <button class="btn btn-wide" id="b-lock-btn" type="button">[ LOCK ]</button>
+          <div class="txbox" id="b-lock-tx"></div>
+          <div class="pid-box" id="b-payment-id"></div>
+        </div>
+      </article>
+    </div>
+
+    <!-- call demo -->
+    <article class="card rv call-card">
+      <h2 class="card-title">CALL DEMO<span class="card-tag">sign → relay → verify receipt</span></h2>
+      <div class="card-body">
+        <div class="call-grid">
+          <label class="fld"><span class="fld-lbl">SELLER</span>
+            <select id="c-seller"><option value="">— choose seller —</option></select></label>
+          <label class="fld"><span class="fld-lbl">MODEL <i>= seller's listed models</i></span>
+            <select id="c-model"><option value="">— seller first —</option></select></label>
+          <label class="fld"><span class="fld-lbl">PAYMENT ID <i>from a lock above, or paste</i></span>
+            <input type="text" inputmode="numeric" id="c-payment" list="c-payment-list" placeholder="42" spellcheck="false" autocomplete="off">
+            <datalist id="c-payment-list"></datalist></label>
+        </div>
+        <label class="fld"><span class="fld-lbl">PROMPT <i>body = {"model", "messages":[user]} — zero extra fields (Kimi 400s on temperature)</i></span>
+          <textarea id="c-prompt" rows="3" placeholder="Explain EIP-712 in one sentence." spellcheck="false">Explain EIP-712 in one sentence.</textarea></label>
+        <button class="btn btn-wide" id="c-send" type="button">[ SIGN + CALL ]</button>
+
+        <div class="term call-term">
+          <div class="term-bar"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span><span class="term-title">call trace — EIP-191 signature, relay response, usage, settle status</span></div>
+          <div class="term-body call-out" id="c-out"><div><span class="t-d">trace renders here — the EIP-191 message, the response, three-tier usage, X-Settle-Status</span></div></div>
+        </div>
+        <div class="rcpt" id="c-receipt" hidden></div>
+      </div>
+    </article>
+
+    <div class="grid-2">
+      <!-- refund -->
+      <article class="card rv">
+        <h2 class="card-title">REFUND<span class="card-tag">Escrow.refund — after ttl</span></h2>
+        <div class="card-body">
+          <label class="fld"><span class="fld-lbl">PAYMENT ID <i>session locks suggested</i></span>
+            <input type="text" inputmode="numeric" id="r-payment" list="r-payment-list" placeholder="42" spellcheck="false" autocomplete="off">
+            <datalist id="r-payment-list"></datalist></label>
+          <button class="btn btn-wide" id="r-btn" type="button">[ REFUND ]</button>
+          <div class="txbox" id="r-tx"></div>
+        </div>
+      </article>
+
+      <!-- disputes -->
+      <article class="card rv">
+        <h2 class="card-title">DISPUTES<span class="card-tag">localStorage ledger</span></h2>
+        <div class="card-body">
+          <div class="disp-list" id="d-list"></div>
+          <button class="btn btn-sm btn-ghost" id="d-clear" type="button" hidden>[ CLEAR ]</button>
+        </div>
+      </article>
+    </div>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <div class="wrap">
+    <p class="foot-fine">Wallet-only signing · zero keys on the page · amounts in USDC 6-decimal native units on-chain.</p>
+  </div>
+</footer>
+
+<script src="vendor/ethers.umd.min.js"></script>
+<script src="config.js"></script>
+<script src="common.js"></script>
+<script src="console.js"></script>
+</body>
+</html>

@@ -3,8 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="TokenShare — a pay-per-call marketplace for idle LLM API quota. On-chain escrow, verify-then-forward relays, USDC settlement.">
-<title>TokenShare — Pay-per-call market for idle LLM quota</title>
+<meta name="description" content="TokenShare — rent out idle quota of official LLM subscription plans. Pay per call in USDC, on-chain escrow, EIP-712 receipts. Kimi (Moonshot) first, on Monad testnet.">
+<title>TokenShare — Official-plan LLM quota, pay per call</title>
+<link rel="icon" href="data:,">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -12,13 +13,14 @@
 <!-- ══ STATUS BAR ══ -->
 <header class="topbar">
   <div class="wrap topbar-in">
-    <span class="brand">TOKENSHARE<span class="brand-dim"> / market prototype</span></span>
+    <a class="brand" href="index.html">TOKENSHARE<span class="brand-dim"> / official-plan quota market</span></a>
     <button class="nav-toggle" aria-expanded="false" aria-controls="topnav" aria-label="Toggle navigation">[ MENU ]</button>
     <nav class="topnav" id="topnav" aria-label="Sections">
       <a href="#market">MARKET</a>
       <a href="#mechanism">MECHANISM</a>
       <a href="#state">STATE&nbsp;MACHINE</a>
       <a href="#features">FEATURES</a>
+      <a href="console.html" class="nav-console">[ CONSOLE ]</a>
     </nav>
   </div>
 </header>
@@ -31,24 +33,26 @@
     <div class="hero-copy">
       <p class="kicker rv">x402 / agentic payment rails &middot; trust-minimized API supply</p>
       <h1 class="rv" style="--d:.05s">TOKEN<br>SHARE<span class="cursor" aria-hidden="true"></span></h1>
-      <p class="tagline rv" style="--d:.1s">Idle LLM quota, sold by the call.</p>
+      <p class="tagline rv" style="--d:.1s">Idle official-plan quota, sold by the call. <span class="chip chip-kimi">KIMI / MOONSHOT FIRST</span></p>
       <p class="lede rv" style="--d:.15s">
-        Sellers run a relay on their own API keys. Buyers lock a few cents of USDC
-        on-chain and pay per request. An escrow contract holds the funds, the relay
-        only forwards paid calls, and settlement is priced on real usage —
-        cached input, input, output. No custody, no upgrade keys, no trusted third party.
+        Sellers rent out the spare quota of their <b>official LLM subscription plans</b> —
+        a relay holds their own platform key and forwards only to the provider's official
+        endpoint. Buyers lock a few cents of USDC on-chain and pay per request. An
+        immutable escrow holds the funds, settlement is priced on real usage in three
+        tiers, and every call comes back with an EIP-712 receipt anyone can verify.
+        No custody, no upgrade keys, no trusted third party.
       </p>
       <div class="hero-cta rv" style="--d:.2s">
-        <a class="btn" href="#market">[ BROWSE MARKET ]</a>
-        <a class="btn btn-ghost" href="#mechanism">[ HOW IT WORKS ]</a>
+        <a class="btn" href="console.html">[ OPEN CONSOLE ]</a>
+        <a class="btn btn-ghost" href="#market">[ BROWSE MARKET ]</a>
       </div>
       <dl class="hero-stats rv" style="--d:.25s">
-        <div><dt>CALLS SETTLED</dt><dd>12,847</dd></div>
-        <div><dt>USDC ROUTED</dt><dd>6,412.55</dd></div>
-        <div><dt>ACTIVE LISTINGS</dt><dd>4</dd></div>
-        <div><dt>AVG SETTLE</dt><dd>1.8s</dd></div>
+        <div><dt>LISTINGS ON-CHAIN</dt><dd id="hstat-listings">—</dd></div>
+        <div><dt>ACTIVE</dt><dd id="hstat-active">—</dd></div>
+        <div><dt>RELAYS ONLINE</dt><dd id="hstat-online">—</dd></div>
+        <div><dt>NETWORK</dt><dd class="hero-net" id="hstat-net">—</dd></div>
       </dl>
-      <p class="mock-note">mock metrics — prototype render</p>
+      <p class="mock-note">live values — read from the Registry contract; relays probed via /health</p>
     </div>
 
     <div class="hero-term rv" style="--d:.2s">
@@ -57,13 +61,13 @@
 <pre class="term-body"><code><span class="t-p">$</span> tokenshare deposit --amount 0.50
   <span class="t-d">tx 0x9f2e…a1c4 confirmed · balance</span> <span class="t-n">500000</span>
 <span class="t-p">$</span> tokenshare lock --seller 0x7A3f…9c2E --max 0.05
-  <span class="t-d">paymentId 0x4c1d…e7 · locked</span> <span class="t-n">50000</span> <span class="t-d">· ttl 600s</span>
-<span class="t-p">$</span> tokenshare call "summarize block 0x1f3a…"
-  <span class="t-d">relay:</span> isValid(0x4c1d…e7) <span class="t-g">→ true</span> <span class="t-d">· forwarding</span>
+  <span class="t-d">paymentId 42 · locked</span> <span class="t-n">50000</span> <span class="t-d">· ttl 600s</span>
+<span class="t-p">$</span> tokenshare call "summarize block 0x1f3a…" --model kimi-k2.6
+  <span class="t-d">relay:</span> isValid(42) <span class="t-g">→ true</span> <span class="t-d">· forwarding to api.moonshot.cn</span>
   <span class="t-d">POST /v1/chat/completions</span> <span class="t-g">→ 200 OK</span> <span class="t-d">· 1.24s</span>
   <span class="t-d">usage  cached_in</span> <span class="t-n">12000</span> <span class="t-d">· in</span> <span class="t-n">26400</span> <span class="t-d">· out</span> <span class="t-n">2140</span>
   <span class="t-d">settle actual</span> <span class="t-n">45552</span> <span class="t-d">· diff</span> <span class="t-n">4448</span> <span class="t-d">→ buyer balance</span>
-  <span class="t-d">receipt EIP-712</span> <span class="t-g">✓ verified</span> <span class="t-d">against Registry</span></code></pre>
+  <span class="t-d">receipt EIP-712</span> <span class="t-g">✓ verified</span> <span class="t-d">· upstream api.moonshot.cn · kimi-k2.6</span></code></pre>
       </div>
       <p class="term-cap">amounts are USDC native units (6 decimals)</p>
     </div>
@@ -75,11 +79,19 @@
   <div class="wrap">
     <header class="sec-head rv">
       <h2><span class="sec-num">01</span><span class="sec-rule"></span>MARKET</h2>
-      <p class="sec-sub">Registry.getListing() — every seller listing lives on-chain: endpoint, models, three-tier pricing, active flag.</p>
-      <p class="ticker" id="ticker" aria-live="off"><span class="ticker-label">LAST SETTLE</span><span id="ticker-text"></span></p>
+      <p class="sec-sub">Registry.getListing() — every seller listing lives on-chain: endpoint, models, three-tier pricing, active flag. Relay dots probe each listing's <code class="inl">/health</code> live from your browser.</p>
+      <div class="mkt-bar">
+        <dl class="mkt-stats">
+          <div><dt>LISTINGS</dt><dd id="stat-listings">—</dd></div>
+          <div><dt>ACTIVE</dt><dd id="stat-active">—</dd></div>
+          <div><dt>RELAYS ONLINE</dt><dd id="stat-online">—</dd></div>
+          <div><dt>CHAIN</dt><dd id="stat-net">—</dd></div>
+        </dl>
+        <button class="btn btn-sm btn-ghost" id="mkt-refresh" type="button">[ REFRESH ]</button>
+      </div>
     </header>
-    <div class="listings" id="listings"><!-- rendered by app.js --><noscript><p class="mock-note">listings render via JavaScript — enable JS to view mock Registry state</p></noscript></div>
-    <p class="mock-note rv">mock data — prototype render of on-chain Registry state</p>
+    <div class="mkt-notice" id="mkt-notice" hidden></div>
+    <div class="listings" id="listings"><noscript><p class="mock-note">listings render via JavaScript — enable JS to read on-chain Registry state</p></noscript></div>
   </div>
 </section>
 
@@ -136,10 +148,10 @@
 <span class="t-p">$</span> cast send $ESCROW <span class="t-s">"deposit(uint256)"</span> 500000 --rpc $MONAD_RPC
 <span class="t-p">$</span> cast send $ESCROW <span class="t-s">"lock(address,uint256,uint256)"</span> $SELLER 50000 600
 <span class="t-d"># relay: Escrow.isValid(paymentId, seller=self, minAmount=est) — false → 402, no forward</span>
-<span class="t-d"># relay: forward with seller's own OPENAI_API_KEY · stream usage from final chunk</span>
+<span class="t-d"># relay: forward to api.moonshot.cn with seller's own official-plan key · usage from response</span>
 <span class="t-d"># pricing: 12000×cached + 26400×in + 2140×out =</span> <span class="t-n">45552</span> <span class="t-d">units = 0.045552 USDC</span>
 <span class="t-p">$</span> cast send $ESCROW <span class="t-s">"settle(uint256,uint256)"</span> $PID 45552 <span class="t-d"># seller only</span>
-<span class="t-d"># buyer diff</span> <span class="t-n">4448</span> <span class="t-d">→ balances[buyer] · X-Receipt: EIP-712 {paymentId, usage, actual, seller}</span></code></pre>
+<span class="t-d"># buyer diff</span> <span class="t-n">4448</span> <span class="t-d">→ balances[buyer] · X-Receipt: EIP-712 {paymentId, usage, actual, seller, upstreamHost, model}</span></code></pre>
     </div>
   </div>
 </section>
@@ -238,7 +250,7 @@
       <article class="card feat rv">
         <svg class="fico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="4" y="10" width="16" height="10"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/><circle cx="12" cy="15" r="1.5"/></svg>
         <h3>NO CUSTODY</h3>
-        <p>API keys live in the seller relay's environment only. Contracts never see a key, a prompt, or a completion. The escrow holds USDC — nothing else.</p>
+        <p>Official-plan keys live in the seller relay's environment only. Contracts never see a key, a prompt, or a completion. The escrow holds USDC — nothing else.</p>
       </article>
       <article class="card feat rv" style="--d:.05s">
         <svg class="fico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg>
@@ -246,14 +258,14 @@
         <p>Every request is gated by an on-chain <code class="inl">isValid(paymentId)</code> check. Unpaid calls get a 402 and cost the seller nothing. Payment proof comes first, inference second.</p>
       </article>
       <article class="card feat rv" style="--d:.1s">
-        <svg class="fico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 3v18M5 8l7-5 7 5M5 16l7 5 7-5"/></svg>
-        <h3>IMMUTABLE BY DEFAULT</h3>
-        <p>No proxies, no admin keys, no upgrade path. Checks-effects-interactions on every balance move, reentrancy-guarded, bytecode identical on both chains.</p>
+        <svg class="fico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>
+        <h3>OFFICIAL ENDPOINTS ONLY</h3>
+        <p>The relay boots only against the provider's official host allowlist (<code class="inl">api.moonshot.cn</code>/<code class="inl">.ai</code>, <code class="inl">api.openai.com</code>) and rejects models whose prefix doesn't match the host — no lookalike endpoints, no poisoned models. Every receipt records <code class="inl">upstreamHost</code> + <code class="inl">model</code>.</p>
       </article>
       <article class="card feat rv" style="--d:.15s">
         <svg class="fico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="7" cy="7" r="3.2"/><circle cx="17" cy="17" r="3.2"/><path d="M9.5 9.5l5 5"/></svg>
-        <h3>TWO CHAINS, ONE BYTECODE</h3>
-        <p>Chain-agnostic by config. Developed on <span class="chip chip-base">BASE SEPOLIA · 84532</span> delivered on <span class="chip chip-monad">MONAD TESTNET · 10143</span> — zero contract changes between them.</p>
+        <h3>ONE BYTECODE, NO KEYS</h3>
+        <p>No proxies, no admin keys, no upgrade path. Chain-agnostic by config, delivered on <span class="chip chip-monad">MONAD TESTNET · 10143</span> with immutable contracts — what you read is what you get.</p>
       </article>
     </div>
   </div>
@@ -267,21 +279,24 @@
     <div class="foot-grid">
       <div>
         <p class="foot-brand">TOKENSHARE</p>
-        <p class="foot-line">Wholesale API supply for x402 / agentic payment rails.</p>
+        <p class="foot-line">Wholesale official-plan API supply for x402 / agentic payment rails.</p>
       </div>
       <div>
         <p class="foot-head">STACK</p>
-        <p class="foot-line">Solidity ^0.8.24 · Foundry<br>FastAPI · web3.py · Typer</p>
+        <p class="foot-line">Solidity ^0.8.24 · Foundry<br>FastAPI · web3.py · Typer<br>Zero-framework static web</p>
       </div>
       <div>
         <p class="foot-head">CONTEXT</p>
-        <p class="foot-line">Built for the Monad Metropolis hackathon.<br>Dev on Base Sepolia, delivery on Monad testnet — same bytecode.</p>
+        <p class="foot-line">Built for the Monad Metropolis hackathon — Track: Trust, Identity &amp; AI Infrastructure.<br>Listings on this page are read live from the Registry on Monad testnet.</p>
       </div>
     </div>
-    <p class="foot-fine">No custody. No upgrade keys. No trusted third party. — This page is a static prototype; all listings and metrics are mock data.</p>
+    <p class="foot-fine">No custody. No upgrade keys. No trusted third party. — Prototype on testnet; handles no real funds.</p>
   </div>
 </footer>
 
+<script src="vendor/ethers.umd.min.js"></script>
+<script src="config.js"></script>
+<script src="common.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

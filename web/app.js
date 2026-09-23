@@ -1,185 +1,214 @@
-/* TOKENSHARE — market prototype
-   static demo logic: mock listings, settle ticker, scroll reveal,
-   state-machine hover tracing. no network, no wallet, no chain. */
+/* TOKENSHARE — market page.
+   Live listings from the on-chain Registry (config.js sellers
+   array → getListing each) + relay /health probes. Read-only:
+   a JsonRpcProvider is enough; no wallet, no keys. */
 "use strict";
+(() => {
+  const T = window.TS;
+  const cfg = T.cfg;
 
-/* flag: JS active — gates the hidden start state of .rv reveals in CSS.
-   without JS, .rv elements never hide and the page renders fully visible. */
-document.documentElement.classList.add("js");
+  /* flag: JS active — gates the hidden start state of .rv reveals in CSS.
+     without JS, .rv elements never hide and the page renders fully visible. */
+  document.documentElement.classList.add("js");
 
-/* ── mock Registry state ────────────────────────────────────
-   prices: USDC per 1M tokens · units: 6-decimal native integer */
-const LISTINGS = [
-  {
-    operator: "0x7A3f…9c2E",
-    endpoint: "https://relay.sentient-grid.dev/v1",
-    chain: "base",
-    models: ["gpt-4o", "gpt-4o-mini"],
-    cached: 0.30, input: 1.20, output: 4.80,
-    active: true, latencyMs: 240, calls24h: 1204,
-  },
-  {
-    operator: "0xB91c…04FA",
-    endpoint: "https://gw.northstack.io/v1",
-    chain: "monad",
-    models: ["gpt-4.1", "gpt-4.1-mini"],
-    cached: 0.40, input: 1.60, output: 6.40,
-    active: true, latencyMs: 310, calls24h: 862,
-  },
-  {
-    operator: "0x4De8…77b1",
-    endpoint: "https://edge-03.loworbit.net/v1",
-    chain: "monad",
-    models: ["gpt-4o-mini", "o4-mini"],
-    cached: 0.08, input: 0.35, output: 1.40,
-    active: true, latencyMs: 195, calls24h: 2317,
-  },
-  {
-    operator: "0xE0a2…3D99",
-    endpoint: "https://monad-relay.pinnacle.sh/v1",
-    chain: "monad",
-    models: ["gpt-4o-mini"],
-    cached: 0.02, input: 0.10, output: 0.40,
-    active: true, latencyMs: 410, calls24h: 5908,
-  },
-  {
-    operator: "0x88bB…2f07",
-    endpoint: "https://relay.dormant-capital.xyz/v1",
-    chain: "base",
-    models: ["gpt-3.5-turbo"],
-    cached: 0.05, input: 0.20, output: 0.80,
-    active: false, latencyMs: null, calls24h: 0,
-  },
-];
-
-/* recent fake settlements for the ticker */
-const SETTLES = [
-  { amt: "0.045552", model: "gpt-4o",      ago: 8  },
-  { amt: "0.002180", model: "gpt-4o-mini", ago: 23 },
-  { amt: "0.011904", model: "o4-mini",     ago: 41 },
-  { amt: "0.128760", model: "gpt-4.1",     ago: 66 },
-  { amt: "0.000312", model: "gpt-4o-mini", ago: 89 },
-];
-
-/* ── render listings ─────────────────────────────────────── */
-const CHAIN = {
-  base:  { label: "BASE SEPOLIA",  cls: "chip-base"  },
-  monad: { label: "MONAD TESTNET", cls: "chip-monad" },
-};
-
-function priceCell(tier, usd) {
-  const units = Math.round(usd * 1e6);
-  return (
-    `<div class="ls-price">` +
-    `<span class="tier">${tier}</span>` +
-    `<span class="usd">$${usd.toFixed(2)}<b> /1M</b></span>` +
-    `<span class="units">${units.toLocaleString("en-US")} units</span>` +
-    `</div>`
-  );
-}
-
-function listingCard(l) {
-  const chain = CHAIN[l.chain];
-  const badge = l.active
-    ? `<span class="badge">ACTIVE</span>`
-    : `<span class="badge off">INACTIVE</span>`;
-  const meta = l.active
-    ? `<span>~${l.latencyMs}ms · ${l.calls24h.toLocaleString("en-US")} calls/24h</span>`
-    : `<span>deactivated by operator</span>`;
-
-  return (
-    `<article class="card listing rv${l.active ? "" : " inactive"}">` +
-      `<div class="ls-top"><span class="ls-addr">${l.operator}</span>${badge}</div>` +
-      `<p class="ls-endpoint" title="${l.endpoint}">${l.endpoint}</p>` +
-      `<div class="ls-models">${l.models.map((m) => `<span class="mtag">${m}</span>`).join("")}</div>` +
-      `<div class="ls-prices">` +
-        priceCell("CACHED IN", l.cached) +
-        priceCell("INPUT", l.input) +
-        priceCell("OUTPUT", l.output) +
-      `</div>` +
-      `<div class="ls-meta">${meta}<span class="chip ${chain.cls}">${chain.label}</span></div>` +
-    `</article>`
-  );
-}
-
-const listingsEl = document.getElementById("listings");
-if (listingsEl) {
-  listingsEl.innerHTML = LISTINGS.map(listingCard).join("");
-}
-
-/* ── settle ticker ───────────────────────────────────────── */
-const tickerText = document.getElementById("ticker-text");
-if (tickerText) {
-  let i = 0;
-  const renderTick = () => {
-    const s = SETTLES[i % SETTLES.length];
-    const ago = s.ago + Math.floor((Date.now() / 1000) % 3);
-    tickerText.textContent = `${s.amt} USDC · ${s.model} · ${ago}s ago`;
-    i += 1;
-  };
-  renderTick();
-  setInterval(renderTick, 3000);
-}
-
-/* ── scroll reveal ───────────────────────────────────────── */
-const revealEls = document.querySelectorAll(".rv");
-if ("IntersectionObserver" in window) {
-  const io = new IntersectionObserver(
-    (entries) => {
-      for (const e of entries) {
-        if (e.isIntersecting) {
-          e.target.classList.add("in");
-          io.unobserve(e.target);
+  /* ── scroll reveal ───────────────────────────────────────── */
+  const revealEls = document.querySelectorAll(".rv");
+  if ("IntersectionObserver" in window) {
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); }
         }
-      }
-    },
-    { threshold: 0.12 }
-  );
-  revealEls.forEach((el) => io.observe(el));
-} else {
-  revealEls.forEach((el) => el.classList.add("in"));
-}
-
-/* ── mobile nav toggle ───────────────────────────────────── */
-const navToggle = document.querySelector(".nav-toggle");
-const topnav = document.getElementById("topnav");
-if (navToggle && topnav) {
-  const setNav = (open) => {
-    topnav.classList.toggle("open", open);
-    navToggle.setAttribute("aria-expanded", String(open));
-    navToggle.textContent = open ? "[ CLOSE ]" : "[ MENU ]";
-  };
-  navToggle.addEventListener("click", () =>
-    setNav(!topnav.classList.contains("open"))
-  );
-  topnav.addEventListener("click", (e) => {
-    if (e.target.closest("a")) setNav(false);
-  });
-}
-
-/* ── state machine hover tracing ─────────────────────────── */
-const sm = document.getElementById("smachine");
-if (sm) {
-  const nodes = sm.querySelectorAll(".sm-node");
-  const edges = sm.querySelectorAll(".edge");
-
-  const focus = (name) => {
-    sm.classList.add("focus");
-    nodes.forEach((n) => n.classList.toggle("on", n.dataset.node === name));
-    edges.forEach((e) =>
-      e.classList.toggle("on", (e.dataset.touch || "").split(" ").includes(name))
+      },
+      { threshold: 0.12 }
     );
-  };
-  const clear = () => {
-    sm.classList.remove("focus");
-    nodes.forEach((n) => n.classList.remove("on"));
-    edges.forEach((e) => e.classList.remove("on"));
+    revealEls.forEach((el) => io.observe(el));
+  } else {
+    revealEls.forEach((el) => el.classList.add("in"));
+  }
+
+  /* ── mobile nav toggle ───────────────────────────────────── */
+  const navToggle = document.querySelector(".nav-toggle");
+  const topnav = document.getElementById("topnav");
+  if (navToggle && topnav) {
+    const setNav = (open) => {
+      topnav.classList.toggle("open", open);
+      navToggle.setAttribute("aria-expanded", String(open));
+      navToggle.textContent = open ? "[ CLOSE ]" : "[ MENU ]";
+    };
+    navToggle.addEventListener("click", () => setNav(!topnav.classList.contains("open")));
+    topnav.addEventListener("click", (e) => { if (e.target.closest("a")) setNav(false); });
+  }
+
+  /* ── state machine hover tracing ─────────────────────────── */
+  const sm = document.getElementById("smachine");
+  if (sm) {
+    const nodes = sm.querySelectorAll(".sm-node");
+    const edges = sm.querySelectorAll(".edge");
+    const focus = (name) => {
+      sm.classList.add("focus");
+      nodes.forEach((n) => n.classList.toggle("on", n.dataset.node === name));
+      edges.forEach((e) => e.classList.toggle("on", (e.dataset.touch || "").split(" ").includes(name)));
+    };
+    const clear = () => {
+      sm.classList.remove("focus");
+      nodes.forEach((n) => n.classList.remove("on"));
+      edges.forEach((e) => e.classList.remove("on"));
+    };
+    nodes.forEach((n) => {
+      n.addEventListener("mouseenter", () => focus(n.dataset.node));
+      n.addEventListener("mouseleave", clear);
+      n.addEventListener("focus", () => focus(n.dataset.node));
+      n.addEventListener("blur", clear);
+    });
+  }
+
+  /* ── live market ─────────────────────────────────────────── */
+  const listingsEl = document.getElementById("listings");
+  const noticeEl = document.getElementById("mkt-notice");
+  const refreshBtn = document.getElementById("mkt-refresh");
+  const statListings = document.getElementById("stat-listings");
+  const statActive = document.getElementById("stat-active");
+  const statOnline = document.getElementById("stat-online");
+  const statNet = document.getElementById("stat-net");
+
+  const netLabel = `${(cfg.chainName || "chain").toUpperCase()} · ${cfg.chainId}`;
+  if (statNet) statNet.textContent = netLabel;
+  const hstatNet = document.getElementById("hstat-net");
+  if (hstatNet) hstatNet.textContent = netLabel;
+
+  const heroStats = {
+    listings: document.getElementById("hstat-listings"),
+    active: document.getElementById("hstat-active"),
+    online: document.getElementById("hstat-online"),
   };
 
-  nodes.forEach((n) => {
-    n.addEventListener("mouseenter", () => focus(n.dataset.node));
-    n.addEventListener("mouseleave", clear);
-    n.addEventListener("focus", () => focus(n.dataset.node));
-    n.addEventListener("blur", clear);
-  });
-}
+  function notice(html) {
+    if (!noticeEl) return;
+    noticeEl.hidden = !html;
+    noticeEl.innerHTML = html || "";
+  }
+
+  function priceCell(tier, native) {
+    return (
+      `<div class="ls-price">` +
+      `<span class="tier">${tier}</span>` +
+      `<span class="usd">$${T.fmtUsdc(native)}<b> /1M</b></span>` +
+      `<span class="units">${T.fmtInt(native)} units · 6dp</span>` +
+      `</div>`
+    );
+  }
+
+  function listingCard(l) {
+    const badge = l.active
+      ? `<span class="badge">ACTIVE</span>`
+      : `<span class="badge off">INACTIVE</span>`;
+    const models = l.models.length
+      ? l.models.map((m) => `<span class="mtag">${T.esc(m)}</span>`).join("")
+      : `<span class="mtag">—</span>`;
+    return (
+      `<article class="card listing rv in${l.active ? "" : " inactive"}" data-endpoint="${T.esc(l.endpoint)}">` +
+        `<div class="ls-top">` +
+          `<a class="ls-addr" href="${T.addrLink(l.operator)}" target="_blank" rel="noopener" title="${T.esc(l.operator)}">${T.truncAddr(l.operator)}</a>` +
+          `<span class="ls-health" title="relay /health probe pending"><span class="hdot"></span><span class="ls-health-lbl">probing</span></span>` +
+          badge +
+        `</div>` +
+        `<p class="ls-endpoint" title="${T.esc(l.endpoint)}">${T.esc(T.hostOf(l.endpoint))}</p>` +
+        `<div class="ls-models">${models}</div>` +
+        `<div class="ls-prices">` +
+          priceCell("CACHED IN", l.priceCachedIn) +
+          priceCell("INPUT", l.priceInput) +
+          priceCell("OUTPUT", l.priceOutput) +
+        `</div>` +
+        `<div class="ls-meta">` +
+          `<span>operator <a href="${T.addrLink(l.operator)}" target="_blank" rel="noopener" class="ls-link">explorer ↗</a></span>` +
+          `<span class="chip chip-monad">${T.esc((cfg.chainName || "MONAD").toUpperCase())} · ${cfg.chainId}</span>` +
+        `</div>` +
+      `</article>`
+    );
+  }
+
+  async function probeAll(cards) {
+    let online = 0;
+    await Promise.all(cards.map(async ({ el, endpoint }) => {
+      const slot = el.querySelector(".ls-health");
+      const r = await T.probeHealth(endpoint);
+      const dot = slot.querySelector(".hdot");
+      const lbl = slot.querySelector(".ls-health-lbl");
+      if (r.ok) {
+        online += 1;
+        dot.classList.add("ok");
+        lbl.textContent = `${r.ms}ms`;
+        slot.title = `relay /health OK · ${r.ms}ms`;
+      } else {
+        dot.classList.add("off");
+        lbl.textContent = "offline";
+        slot.title = "relay unreachable — or CORS not enabled yet (等待 relay CORS 配置)";
+      }
+    }));
+    return online;
+  }
+
+  async function loadMarket() {
+    if (!listingsEl) return;
+
+    if (!T.cfgReady()) {
+      notice(
+        `<b>config.js 未配置</b> — 部署后从 <code class="inl">contracts/deployed.json</code> 填入 ` +
+        `<code class="inl">escrowAddr / registryAddr / sellers</code>，市场页即读真链。`
+      );
+      listingsEl.innerHTML = "";
+      return;
+    }
+    if (!cfg.sellers || cfg.sellers.length === 0) {
+      notice(`<b>sellers 数组为空</b> — 在 <code class="inl">web/config.js</code> 登记 seller operator 地址后展示 listings。`);
+      listingsEl.innerHTML = "";
+      return;
+    }
+
+    notice("");
+    listingsEl.innerHTML =
+      `<div class="ls-loading"><span class="txl-dot is-pending"></span> reading Registry.getListing on-chain …</div>`;
+
+    let listings;
+    try {
+      listings = await T.fetchListings(T.readProvider());
+    } catch (e) {
+      listingsEl.innerHTML = "";
+      notice(
+        `<b>RPC 不可达</b> — ${T.esc(cfg.rpcUrl)} 读取失败（网络或 RPC CORS）。` +
+        `<span class="dim">${T.esc(e.shortMessage || e.message || "")}</span>`
+      );
+      return;
+    }
+
+    const visible = listings.filter((l) => l.registered && !l.error);
+    if (visible.length === 0) {
+      listingsEl.innerHTML = "";
+      notice(`配置的 ${listings.length} 个 seller 均未在 Registry 登记（或读取失败）。`);
+      return;
+    }
+
+    listingsEl.innerHTML = visible.map(listingCard).join("");
+    const cards = visible.map((l) => ({
+      el: [...listingsEl.children].find((c) => c.dataset.endpoint === l.endpoint),
+      endpoint: l.endpoint,
+    })).filter((c) => c.el);
+
+    /* stats */
+    const active = visible.filter((l) => l.active).length;
+    if (statListings) statListings.textContent = String(visible.length);
+    if (statActive) statActive.textContent = String(active);
+    if (heroStats.listings) heroStats.listings.textContent = String(visible.length);
+    if (heroStats.active) heroStats.active.textContent = String(active);
+    if (statOnline) statOnline.textContent = "…";
+    const online = await probeAll(cards);
+    if (statOnline) statOnline.textContent = `${online}/${cards.length}`;
+    if (heroStats.online) heroStats.online.textContent = `${online}/${cards.length}`;
+  }
+
+  if (refreshBtn) refreshBtn.addEventListener("click", loadMarket);
+  loadMarket();
+  /* light auto-refresh keeps the demo table alive */
+  setInterval(loadMarket, 30000);
+})();
