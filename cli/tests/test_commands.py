@@ -179,6 +179,51 @@ def test_lock_rejects_zero_max(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# default lock sizing formula (R2)
+# ---------------------------------------------------------------------------
+
+
+def test_default_lock_amount_known_prices(monkeypatch):
+    """priceInput=2e6, priceOutput=3e6, caps 200000/32000 ->
+    total_native = 2e6*200000 + 3e6*32000 = 496_000_000_000
+    estimate = total_native // 1e6 = 496_000 (matches relay minAmount floor)
+    ceil to whole USDC = 1_000_000 (also the 1 USDC floor)."""
+    from tokenshare_cli.app import _default_lock_amount
+
+    monkeypatch.delenv("PROMPT_TOKEN_CAP", raising=False)
+    monkeypatch.delenv("COMPLETION_TOKEN_CAP", raising=False)
+    listing = {"price_input": 2_000_000, "price_output": 3_000_000}
+    assert _default_lock_amount(listing) == 1_000_000
+
+
+def test_default_lock_amount_small_prices_hits_usdc_floor(monkeypatch):
+    """priceInput=1000, priceOutput=1000 (the FakeChain default listing) ->
+    total_native = 1000*200000 + 1000*32000 = 232_000_000
+    estimate = 232 (USDC-native, matches relay minAmount)
+    ceil to whole USDC = 1_000_000 (below the 1 USDC floor -> exactly 1 USDC)."""
+    from tokenshare_cli.app import _default_lock_amount
+
+    monkeypatch.delenv("PROMPT_TOKEN_CAP", raising=False)
+    monkeypatch.delenv("COMPLETION_TOKEN_CAP", raising=False)
+    listing = {"price_input": 1000, "price_output": 1000}
+    assert _default_lock_amount(listing) == 1_000_000
+
+
+def test_default_lock_amount_large_prices_ceil_to_whole_usdc(monkeypatch):
+    """Big-price scenario: estimate exceeds 1e6 -> rounded UP to whole USDC.
+    priceInput=9_000_000, priceOutput=9_999_999, caps 200000/32000 ->
+    total_native = 9e6*200000 + 9999999*32000 = 2_119_999_968_000
+    estimate = 2_119_999  (matches relay minAmount)
+    ceil to whole USDC = 3_000_000."""
+    from tokenshare_cli.app import _default_lock_amount
+
+    monkeypatch.delenv("PROMPT_TOKEN_CAP", raising=False)
+    monkeypatch.delenv("COMPLETION_TOKEN_CAP", raising=False)
+    listing = {"price_input": 9_000_000, "price_output": 9_999_999}
+    assert _default_lock_amount(listing) == 3_000_000
+
+
+# ---------------------------------------------------------------------------
 # call — full flow with a mocked relay response
 # ---------------------------------------------------------------------------
 
@@ -228,8 +273,8 @@ def test_call_success_flow(monkeypatch, tmp_path):
     # lock happened with pricing-derived default maxAmount
     lock_call = [c for c in fake.calls if c[0] == "lock"][0]
     assert lock_call[1] == SELLER
-    # default max = ceil((1000*200000 + 1000*32000)/1e6) = 232 (232_000_000)
-    assert lock_call[2] == 232_000_000
+    # default max = ceil((1000*200000 + 1000*32000)/1e6 / 1e6) * 1e6 = 1 USDC floor
+    assert lock_call[2] == 1_000_000
     assert lock_call[3] == 600
 
     # paymentId printed and passed to HTTP

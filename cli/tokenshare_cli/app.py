@@ -344,17 +344,19 @@ def _default_lock_amount(listing: dict) -> int:
     """Size the default lock maxAmount from Registry prices with the same
     token caps the relay uses by default (PROMPT_TOKEN_CAP / COMPLETION_TOKEN_CAP).
 
-    Relay minAmount = (priceInput*P + priceOutput*C) // 1e6  (floor, USDC 6dp).
-    The CLI locks the same estimate rounded UP to whole USDC-native units so
-    maxAmount >= relay minAmount always holds.
+    Relay minAmount = (priceInput*P + priceOutput*C) // 1e6  (floor to whole
+    USDC-native units, i.e. the USDC cost of the estimate).
+    The CLI locks that same estimate rounded UP to whole USDC (with a 1 USDC
+    floor) so maxAmount >= relay minAmount always holds.
     """
     prompt_cap = int(os.environ.get("PROMPT_TOKEN_CAP", PROMPT_TOKEN_CAP_DEFAULT))
     completion_cap = int(os.environ.get("COMPLETION_TOKEN_CAP", COMPLETION_TOKEN_CAP_DEFAULT))
     total_native = (
         listing["price_input"] * prompt_cap + listing["price_output"] * completion_cap
     )
-    ceil_native_usdc = ((total_native + 999_999) // 1_000_000) * 1_000_000
-    return max(ceil_native_usdc, 1)
+    estimate = total_native // 1_000_000  # = relay minAmount (USDC-native)
+    amount = max(((estimate + 999_999) // 1_000_000) * 1_000_000, 1_000_000)
+    return amount
 
 
 def _chat_body(prompt: str, model: str, stream: bool) -> bytes:

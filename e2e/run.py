@@ -96,8 +96,8 @@ LISTING_PRICES = {"cached": 1_000_000, "input": 2_000_000, "output": 3_000_000}
 PROMPT_TOKEN_CAP = 200_000
 COMPLETION_TOKEN_CAP = 32_000
 # Buyer deposits 500 USDC (mock mint on the fork; faucet-funded on real chains,
-# override with E2E_DEPOSIT_USDC when the funded balance is smaller).
-BUYER_DEPOSIT_USDC = "500"
+# where the amount can be lowered with the E2E_DEPOSIT_USDC env — whole USDC).
+BUYER_DEPOSIT_USDC = "500"  # default; overridden by env E2E_DEPOSIT_USDC
 # Explicit lock maxAmount for the CLI `call` (human USDC). The CLI's DEFAULT
 # lock size is (listing price x token cap) rounded up to whole USDC, which with
 # these prices is far above any sane deposit — so the e2e passes --max
@@ -387,11 +387,17 @@ def send_tx(w3: Any, fn: Any, key: str, gas: int = 400_000) -> str:
 
 
 def deploy_contracts(network: str, rpc_url: str, deployer_addr: str,
-                     deployer_key: str) -> dict[str, Any]:
-    step("[2/8] Deploying contracts via forge script (USDC_ADDR unset → MockUSDC)")
+                     deployer_key: str, is_fork: bool) -> dict[str, Any]:
+    step("[2/8] Deploying contracts via forge script "
+         "(USDC_ADDR unset → MockUSDC)" if is_fork else
+         "[2/8] Deploying contracts via forge script (official USDC from USDC_ADDR env)")
     forge = resolve_tool("forge")
     env = foundry_env(dict(os.environ))
-    env.pop("USDC_ADDR", None)  # fork/local path always deploys MockUSDC
+    if is_fork:
+        # Fork/local path always deploys MockUSDC: anvil accounts cannot hold
+        # real testnet USDC. Real-chain deploys keep USDC_ADDR (Gate G m1) —
+        # official Circle USDC is used there, never a mock with a mint.
+        env.pop("USDC_ADDR", None)
     cmd = [
         forge, "script", "script/Deploy.s.sol",
         "--sig", "run(string)", network,
@@ -439,7 +445,7 @@ def deploy_contracts(network: str, rpc_url: str, deployer_addr: str,
 
 def prepare_contracts(rpc_url: str, relay_port: int, deployed: dict[str, Any],
                       seller_addr: str, seller_key: str, buyer_addr: str,
-                      mint_key: str | None) -> None:
+                      mint_key: str | None, deposit_usdc: str) -> None:
     step("[3/8] Contract prep via direct web3: mint mock USDC + register seller listing")
     w3 = w3_at(rpc_url)
     checksum = w3.to_checksum_address
@@ -453,7 +459,7 @@ def prepare_contracts(rpc_url: str, relay_port: int, deployed: dict[str, Any],
         if mint_key is None:
             fail_all("usdcIsMock=true but no deployer key available for minting")
         usdc = w3.eth.contract(address=checksum(deployed["usdc"]), abi=MOCK_MINT_ABI)
-        units_needed = int(BUYER_DEPOSIT_USDC) * 10**6
+        units_needed = int(deposit_usdc) * 10**6
         if int(usdc.functions.balanceOf(checksum(buyer_addr)).call()) < units_needed:
             amount = units_needed * 100  # 100x headroom for locks
             send_tx(w3, usdc.functions.mint(checksum(buyer_addr), amount), mint_key)
@@ -732,13 +738,13 @@ def seller_key_addr(seller_key: str) -> str:
 
 def buyer_flow(deployed: dict[str, Any], rpc_url: str, chain_id: int,
                base_env: dict[str, str], buyer_key: str, buyer_addr: str,
-               seller_addr: str) -> int:
+               seller_addr: str, deposit_usdc: str) -> int:
     step("[6/8] Buyer flow via CLI subprocess: deposit -> lock -> call -> refund (expired)")
     buyer_env = cli_env(base_env, deployed, rpc_url, chain_id, buyer_key, seller_addr)
     disputes_file = E2E_DIR / ".disputes.json"
 
     deposit_out = run_cli(["--disputes-file", str(disputes_file), "deposit",
-                           "--amount", BUYER_DEPOSIT_USDC], buyer_env)
+                           "--amount", deposit_usdc], buyer_env)
     if "deposited:" not in deposit_out:
         fail_all(f"CLI deposit output missing 'deposited:' line:\n{deposit_out}")
 
@@ -792,7 +798,10 @@ def buyer_flow(deployed: dict[str, Any], rpc_url: str, chain_id: int,
     return settle_pid
 
 
-def run(network: str) -> None:
+def run(network: str) -> str | None:
+    """Run the full e2e pipeline. Returns None when the flow really completed;
+    returns a short skip reason for config-not-ready cases (main() prints
+    `E2E SKIPPED: <reason>` and exits 0 — NEVER `E2E PASSED`)."""
     cfg = NETWORKS[network]
     base_env = dict(os.environ)
 
@@ -807,7 +816,7 @@ def run(network: str) -> None:
         buyer_addr, buyer_key = anvil_account(1)
         print("using anvil public test accounts (NO real assets): "
               f"deployer={deployer_addr} seller={seller_addr} buyer={buyer_addr}")
-        deployed = deploy_contracts(network, rpc_url, deployer_addr, deployer_key)
+        deployed = deploy_contracts(network, rpc_url, deployer_addr, deployer_key, is_fork=True)
     else:
         # ----- real-chain path (M5b): keys + RPC from env ---------------------
         rpc_url = base_env.get(cfg["rpc_env"], cfg["default_rpc"])
@@ -825,9 +834,12 @@ def run(network: str) -> None:
                 f"--sig run(string) {network} --rpc-url {rpc_url} --broadcast "
                 "(from contracts/)\n"
                 "  4. export RELAY_PUBLIC_ENDPOINT=<public URL of your relay> and rerun\n"
+                "  5. optional: lower the buyer deposit to your funded balance with\n"
+                "     export E2E_DEPOSIT_USDC=<whole USDC> (default 500)\n"
                 "Config is ready — nothing else changes (same code path)."
             )
-            return
+            return (f"{network} needs SELLER_PRIVATE_KEY + BUYER_PRIVATE_KEY in env "
+                    "(M5b: fund via faucet.monad.xyz + faucet.circle.com, deploy, then rerun)")
         from eth_account import Account as _Account
 
         seller_addr = _Account.from_key(seller_key).address
@@ -852,7 +864,8 @@ def run(network: str) -> None:
                     f"forge script script/Deploy.s.sol --sig run(string) {network} "
                     f"--rpc-url {rpc_url} --broadcast --private-key <SELLER key>"
                 )
-                return
+                return ("no ESCROW_ADDR/REGISTRY_ADDR in env and contracts/deployed.json "
+                        f"is missing — deploy against {network} first")
             if deployed.get("network") != network:
                 print(
                     f"[skip] {network}: contracts/deployed.json holds network="
@@ -861,7 +874,9 @@ def run(network: str) -> None:
                     f"script/Deploy.s.sol --sig run(string) {network} --rpc-url {rpc_url} "
                     "--broadcast --private-key <SELLER key>"
                 )
-                return
+                return ("contracts/deployed.json holds network="
+                        f"{deployed.get('network')!r}, not {network} — re-run the deploy "
+                        "against this network")
         # Deploy is skipped when an artifact for this network already exists
         # (M5b pre-deploy); otherwise deploy now with the seller key.
         try:
@@ -872,7 +887,15 @@ def run(network: str) -> None:
             print(f"[2/8] contracts already deployed for {network}: {existing['escrow']}")
             deployed = existing
         else:
-            deployed = deploy_contracts(network, rpc_url, seller_addr, deployer_key)
+            if "USDC_ADDR" not in os.environ:
+                print("WARNING: USDC_ADDR unset for a REAL network — Deploy.s.sol will "
+                      "deploy a MockUSDC there. For M5b set USDC_ADDR="
+                      f"{cfg['usdc_official']} (official Circle USDC) in env.")
+            deployed = deploy_contracts(network, rpc_url, seller_addr, deployer_key, is_fork=False)
+
+    # Deposit amount: M5b faucet-funded balances may be small — override with
+    # E2E_DEPOSIT_USDC (whole USDC, default 500).
+    deposit_usdc = base_env.get("E2E_DEPOSIT_USDC", BUYER_DEPOSIT_USDC)
 
     # Deployed chain must match the configured chain (fork or real).
     remote_chain = rpc_chain_id(rpc_url)
@@ -883,12 +906,14 @@ def run(network: str) -> None:
     # Ports: relay prefers 8787 (PIN default), mock gets a random free port.
     relay_port = pick_free_port(int(base_env.get("RELAY_PORT", "8787")))
     prepare_contracts(rpc_url, relay_port, deployed, seller_addr, seller_key,
-                      buyer_addr, mint_key=deployer_key if cfg["anvil"] else None)
+                      buyer_addr, mint_key=deployer_key if cfg["anvil"] else None,
+                      deposit_usdc=deposit_usdc)
     mock_port = start_mock(base_env)
     start_relay(base_env, deployed, rpc_url, int(deployed.get("chainId") or cfg["chain_id"]),
                 relay_port, mock_port, seller_key)
     buyer_flow(deployed, rpc_url, int(deployed.get("chainId") or cfg["chain_id"]),
-               base_env, buyer_key, buyer_addr, seller_addr)
+               base_env, buyer_key, buyer_addr, seller_addr, deposit_usdc)
+    return None
 
 
 def main() -> None:
@@ -898,7 +923,7 @@ def main() -> None:
 
     step(f"TokenShare E2E — network={args.network} repo={REPO_ROOT}")
     try:
-        run(args.network)
+        skip_reason = run(args.network)
     except SystemExit:
         raise
     except KeyboardInterrupt:
@@ -911,6 +936,11 @@ def main() -> None:
         cleanup()
         fail(f"unexpected error: {exc}")
     cleanup()
+    if skip_reason is not None:
+        # Config-not-ready (e.g. real-chain keys missing) — a skip must NEVER
+        # masquerade as a passed acceptance run (Gate G R1).
+        print(f"\nE2E SKIPPED: {skip_reason}", flush=True)
+        return
     print("\nE2E PASSED", flush=True)
 
 

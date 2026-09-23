@@ -29,7 +29,7 @@ ENV_PORT = "PORT"
 ENV_PROMPT_TOKEN_CAP = "PROMPT_TOKEN_CAP"
 ENV_COMPLETION_TOKEN_CAP = "COMPLETION_TOKEN_CAP"
 
-DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com"
 DEFAULT_FORWARD_MARGIN_S = 120
 DEFAULT_PORT = 8787
 DEFAULT_PROMPT_TOKEN_CAP = 200_000
@@ -87,6 +87,23 @@ class Config:
         return Account.from_key(self.seller_key).address
 
 
+def _normalize_openai_base_url(raw: str) -> str:
+    """Normalize the OpenAI base URL to a host-root form.
+
+    `main.py` forwards with absolute paths (`/v1/chat/completions`), so the
+    base_url must be the host root — otherwise httpx merges the path and
+    produces `.../v1/v1/chat/completions` (upstream 404). Accept SDK-style
+    user input (`.../v1`, `.../v1/`) by stripping the trailing `/v1`.
+    """
+    url = raw.strip()
+    if not url:
+        return DEFAULT_OPENAI_BASE_URL
+    url = url.rstrip("/")
+    if url.endswith("/v1"):
+        url = url[: -len("/v1")]
+    return url or DEFAULT_OPENAI_BASE_URL
+
+
 def load_config() -> Config:
     """Assemble configuration from the environment. Raise ConfigError on any
     missing required variable — callers must let the process exit non-zero."""
@@ -119,8 +136,9 @@ def load_config() -> Config:
         registry_addr=_require(ENV_REGISTRY_ADDR),
         usdc_addr=_require(ENV_USDC_ADDR),
         openai_api_key=_require(ENV_OPENAI_API_KEY),
-        openai_base_url=os.environ.get(ENV_OPENAI_BASE_URL, DEFAULT_OPENAI_BASE_URL).strip()
-        or DEFAULT_OPENAI_BASE_URL,
+        openai_base_url=_normalize_openai_base_url(
+            os.environ.get(ENV_OPENAI_BASE_URL, DEFAULT_OPENAI_BASE_URL)
+        ),
         forward_margin_s=_optional_int(ENV_FORWARD_MARGIN_S, DEFAULT_FORWARD_MARGIN_S),
         port=_optional_int(ENV_PORT, DEFAULT_PORT, minimum=1),
         prompt_token_cap=_optional_int(ENV_PROMPT_TOKEN_CAP, DEFAULT_PROMPT_TOKEN_CAP),

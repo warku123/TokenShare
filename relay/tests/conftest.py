@@ -142,6 +142,7 @@ class MockOpenAIHandler(BaseHTTPRequestHandler):
             body = {}
         with server.behavior_lock:
             server.received.append(body)
+            server.received_paths.append(self.path)
             mode = server.mode
 
         usage = dict(server.usage)
@@ -194,6 +195,7 @@ class MockOpenAIServer(ThreadingHTTPServer):
         super().__init__(*args, **kwargs)
         self.behavior_lock = threading.Lock()
         self.received: list[dict[str, Any]] = []
+        self.received_paths: list[str] = []
         self.mode = "ok"
         self.usage: dict[str, Any] = dict(USAGE)
         self.slow_seconds = 0.5
@@ -219,6 +221,7 @@ def reset_upstream(mock_openai: MockOpenAIServer) -> None:
     """Fresh upstream behavior per test (mode/received/usage)."""
     mock_openai.mode = "ok"
     mock_openai.received.clear()
+    mock_openai.received_paths.clear()
     mock_openai.usage = dict(USAGE)
     mock_openai.slow_seconds = 0.5
 
