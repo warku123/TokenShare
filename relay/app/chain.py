@@ -19,6 +19,8 @@ from web3 import Web3
 from web3.contract import Contract
 from web3.types import TxReceipt
 
+from .config import ConfigError
+
 # Foundry artifact locations relative to the repo root (relay/app/chain.py).
 _REPO_ROOT: Path = Path(__file__).resolve().parents[2]
 _ESCROW_ABI_PATH: Path = _REPO_ROOT / "contracts" / "out" / "Escrow.sol" / "Escrow.json"
@@ -49,10 +51,21 @@ class ChainClient:
         escrow_addr: str,
         registry_addr: str,
         seller_key: str,
+        chain_id: int,
     ) -> None:
         self._w3 = Web3(Web3.HTTPProvider(rpc_url))
         if not self._w3.is_connected():
             raise RuntimeError(f"RPC at {rpc_url!r} is not reachable")
+
+        # Guard against a receipt-domain / settle-chain mismatch: the RPC node
+        # must be the configured chain (receipt EIP-712 domain and settle tx
+        # are only valid on the configured chainId).
+        remote_chain_id = self._w3.eth.chain_id
+        if remote_chain_id != chain_id:
+            raise ConfigError(
+                f"RPC reports chainId {remote_chain_id} but config says "
+                f"{chain_id} — refusing to start (chain mismatch)"
+            )
 
         self.escrow: Contract = self._w3.eth.contract(
             address=Web3.to_checksum_address(escrow_addr),

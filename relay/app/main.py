@@ -2,8 +2,9 @@
 
 Request pipeline (BUILD_SPEC §6.2, PIN-verbatim semantics):
 
-    1. headers X-Payment-Id + X-Signature → EIP-191 recover; signer must be
-       payment.buyer (401 missing/bad signature, 402 not the buyer)
+    1. headers X-Payment-Id + X-Signature → EIP-191 recover (pure CPU, no
+       chain reads; 401 missing/bad signature); then one get_payment read and
+       the signer-is-buyer check (402 not the buyer)
     2. Registry listing active check + model allow-list (400)
     3. TTL margin guard: expiresAt - now < FORWARD_MARGIN_S (409)
     4. Escrow.isValid(paymentId, seller=self, minAmount=estimate) (402) —
@@ -44,6 +45,10 @@ logger = logging.getLogger("tokenshare.relay")
 
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 
+# Per-request timeout for NON-STREAM forwarding only. Streaming SSE requests
+# never set a short read timeout (long-lived responses).
+UPSTREAM_TIMEOUT_NON_STREAM = httpx.Timeout(10.0, read=120.0)
+
 # Escrow.State enum values (contracts/src/Escrow.sol).
 STATE_LOCKED = 1
 
@@ -58,10 +63,12 @@ class RelayState:
             escrow_addr=config.escrow_addr,
             registry_addr=config.registry_addr,
             seller_key=config.seller_key,
+            chain_id=config.chain_id,
         )
         self.receipts = ReceiptStore()
-        # httpx client for OpenAI forwarding. No read timeout — streaming
-        # responses can be long-lived.
+        # httpx client for OpenAI forwarding. Client-level timeout stays open
+        # (streaming responses are long-lived); non-stream requests apply a
+        # bounded per-request timeout (UPSTREAM_TIMEOUT_NON_STREAM).
         self.http = httpx.AsyncClient(
             base_url=config.openai_base_url,
             headers={"Authorization": f"Bearer {config.openai_api_key}"},
@@ -131,15 +138,25 @@ def get_receipt(payment_id: int) -> dict[str, Any]:
 # ------------------------------------------------------------ signature check
 
 
+def _parse_payment_id(raw: str | None) -> int:
+    """PIN: paymentId is a decimal string. isascii+isdigit rejects unicode
+    digit lookalikes that int() would otherwise silently accept."""
+    value = (raw or "").strip()
+    if not value.isascii() or not value.isdigit():
+        raise HTTPException(status_code=401, detail="missing/invalid X-Payment-Id")
+    return int(value)
+
+
 def _verify_request_signature(
-    st: RelayState, request: Request, raw_body: bytes, payment_id_str: str
+    request: Request, raw_body: bytes, payment_id_str: str
 ) -> str:
     """PIN (verbatim): msg = f"{METHOD}|{path}|{sha256(raw_body_bytes).hexdigest()}
     |{paymentId}" with METHOD upper, path=/v1/chat/completions, 64-hex digest
     without 0x, decimal paymentId. EIP-191 via encode_defunct(text=msg).
 
-    Returns the recovered signer. 401 on missing/invalid signature; 402 when
-    the signer is not the payment's buyer (unpaid/spoofed → zero-cost reject)."""
+    Pure CPU recover — no chain reads (401 is decided before any RPC).
+    Returns the recovered signer; 401 on missing/invalid signature. The
+    signer-is-buyer check happens after the single get_payment read."""
     signature = request.headers.get("X-Signature")
     if not signature:
         raise HTTPException(status_code=401, detail="missing X-Signature")
@@ -149,14 +166,9 @@ def _verify_request_signature(
         f"|{hashlib.sha256(raw_body).hexdigest()}|{payment_id_str}"
     )
     try:
-        recovered = Account.recover_message(encode_defunct(text=msg), signature=signature)
+        return Account.recover_message(encode_defunct(text=msg), signature=signature)
     except Exception as exc:
         raise HTTPException(status_code=401, detail="invalid signature") from exc
-
-    payment = st.chain.get_payment(int(payment_id_str))
-    if recovered.lower() != str(payment["buyer"]).lower():
-        raise HTTPException(status_code=402, detail="signer is not payment buyer")
-    return recovered
 
 
 # ------------------------------------------------------- upstream forwarding
@@ -184,9 +196,10 @@ def _inject_stream_options(body: dict[str, Any]) -> dict[str, Any]:
     return body
 
 
-def _load_listing(st: RelayState) -> dict[str, Any]:
-    """Seller's own Registry listing; 400 when unregistered or inactive."""
-    listing = st.chain.get_listing(st.chain.seller_address)
+async def _load_listing(st: RelayState) -> dict[str, Any]:
+    """Seller's own Registry listing (chain read in a worker thread); 400 when
+    unregistered or inactive."""
+    listing = await asyncio.to_thread(st.chain.get_listing, st.chain.seller_address)
     if listing is None or not listing["active"]:
         raise HTTPException(status_code=400, detail="listing inactive or unregistered")
     return listing
@@ -290,20 +303,34 @@ async def _forward_stream(
                     yield _relay_sse_event(event, usage_holder)
             if buffer.strip():  # flush a trailing event without final blank line
                 yield _relay_sse_event(buffer, usage_holder)
+        except (asyncio.CancelledError, GeneratorExit):
+            # Client disconnected mid-stream → no settle (buyer can refund
+            # after ttl). Re-raise so the server can clean up properly.
+            logger.warning(
+                "stream client disconnected mid-flight; not settling paymentId=%s",
+                payment_id,
+            )
+            raise
         finally:
             await resp.aclose()
 
         # Stream fully drained → price from the last usage chunk and settle.
         usage = usage_holder["usage"]
-        if usage is not None:
-            settled, actual = await _try_settle(st, payment_id, usage, prices, max_amount)
-            if settled:
-                st.receipts.put(payment_id, _build_receipt(st, payment_id, usage, actual))
-            else:
-                logger.info(
-                    "stream settle-failed paymentId=%s (buyer may refund after ttl)",
-                    payment_id,
-                )
+        if usage is None:
+            logger.warning(
+                "stream drained without usage chunk; not settling paymentId=%s "
+                "(buyer may refund after ttl)",
+                payment_id,
+            )
+            return
+        settled, actual = await _try_settle(st, payment_id, usage, prices, max_amount)
+        if settled:
+            st.receipts.put(payment_id, _build_receipt(st, payment_id, usage, actual))
+        else:
+            logger.info(
+                "stream settle-failed paymentId=%s (buyer may refund after ttl)",
+                payment_id,
+            )
 
     return StreamingResponse(
         sse_iterator(),
@@ -342,21 +369,22 @@ async def chat_completions(request: Request) -> Any:
     raw_body = await request.body()
 
     # 1a. Payment id header (decimal string per PIN).
-    payment_id_str = request.headers.get("X-Payment-Id")
-    if not payment_id_str or not payment_id_str.strip().isdigit():
-        raise HTTPException(status_code=401, detail="missing/invalid X-Payment-Id")
-    payment_id = int(payment_id_str.strip())
-    payment_id_str = payment_id_str.strip()
+    payment_id = _parse_payment_id(request.headers.get("X-Payment-Id"))
+    payment_id_str = str(payment_id)
 
-    # 1b. EIP-191 signature; recovered signer must be payment.buyer (401/402).
-    _verify_request_signature(st, request, raw_body, payment_id_str)
+    # 1b. EIP-191 signature recover — pure CPU, no chain read (401 first).
+    recovered = _verify_request_signature(request, raw_body, payment_id_str)
 
-    # Fetch the payment once for the checks below.
+    # Single get_payment read (one RPC roundtrip, in a worker thread).
     payment = await asyncio.to_thread(st.chain.get_payment, payment_id)
 
-    # 2. Listing must be active; model must be listed (400s) — cheap checks
-    #    before any escrow read.
-    listing = _load_listing(st)
+    # 1c. Recovered signer must be the payment's buyer (402, zero-cost reject).
+    if recovered.lower() != str(payment["buyer"]).lower():
+        raise HTTPException(status_code=402, detail="signer is not payment buyer")
+
+    # 2. Listing must be active; model must be listed (400s) — chain read in
+    #    a worker thread.
+    listing = await _load_listing(st)
     prices = Prices(
         price_cached_in=listing["priceCachedIn"],
         price_input=listing["priceInput"],
@@ -389,7 +417,11 @@ async def chat_completions(request: Request) -> Any:
         return await _forward_stream(st, body, payment_id, prices, int(payment["maxAmount"]))
 
     try:
-        upstream = await st.http.post(CHAT_COMPLETIONS_PATH, json=body)
+        upstream = await st.http.post(
+            CHAT_COMPLETIONS_PATH,
+            json=body,
+            timeout=UPSTREAM_TIMEOUT_NON_STREAM,
+        )
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"upstream error: {exc}") from exc
 
