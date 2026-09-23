@@ -3,3 +3,6 @@
 contracts/out/
 contracts/cache/
 contracts/broadcast/
+__pycache__/
+*.pyc
+.DS_Store
