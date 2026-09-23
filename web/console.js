@@ -220,7 +220,7 @@
   }
 
   /* — models multi-select (presets + custom) — */
-  const PRESET_MODELS = ["kimi-k2.6", "kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k3"];
+  const PRESET_MODELS = ["kimi-for-coding", "kimi-for-coding-highspeed", "k3", "k3-256k"];
   const chosenCustom = new Set();
 
   function selectedModels() {
