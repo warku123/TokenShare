@@ -28,13 +28,13 @@ Monad testnet (chainId 10143) · Escrow/Registry/USDC 已部署（见 `web/confi
 
 ## 市场子页 market.html（Registered 事件发现 + 分页/筛选/搜索/排序）
 
-- [ ] **事件扫描**：进度条推进（window i/N + 块区间），完成后 meta 行显 operator 数 + 扫描块区间；listing 卡=发现结果（不依赖 config sellers）；同一 operator 多次 register 取最新事件，active 状态以 getListing 为准
-- [ ] **会话缓存/增量扫描**：同会话二次进入或 REFRESH → 只扫上次 head 之后的增量（秒级返回，scan 行标注 incremental/cached）；active/价格每次经 getListing 新鲜读取；Registry 重部署（registryAddr/registryFromBlock 变化）缓存键自动失效转全量
-- [ ] **扫描深度上限**：默认只扫最近 `scanDepthBlocks`（config.js，现 50000）块；未扫到部署块时 `[ LOAD EARLIER ]` 可见可点，每点扩展一个深度块并合并新 operator（已知的跳过）；扫到 `registryFromBlock`（部署块）后按钮隐藏、meta 标注 full history
-- [ ] **扫描降级**：RPC 不可达/限流打满重试 → 琥珀条降级为 config.js sellers（现行为），meta 标注 EVENT SCAN FAILED + 原因；页面不崩
+- [ ] **事件扫描（人话文案）**：进行中=「discovering sellers on-chain …」+ 微缩 step i/N（技术细节 hover 扫描条 tooltip 看块区间/窗口说明）；完成=「✓ N sellers found on-chain」绿态；meta 行显 seller 数 + 块区间（暗色小字）；listing 卡=发现结果（不依赖 config sellers）；同一 operator 多次 register 取最新事件，active 状态以 getListing 为准
+- [ ] **会话缓存/增量扫描**：同会话二次进入或 REFRESH → 只扫上次 head 之后的增量（秒级返回，scan 行标注 checking for new sellers / up to date）；active/价格每次经 getListing 新鲜读取；Registry 重部署（registryAddr/registryFromBlock 变化）缓存键自动失效转全量
+- [ ] **扫描深度上限**：默认只扫最近 `scanDepthBlocks`（config.js，现 50000）块；未扫到部署块时 `[ LOOK FURTHER BACK ]` 可见可点，每点扩展一个深度块并合并新 operator（已知的跳过），scan 行「looking further back in history …」；扫到 `registryFromBlock`（部署块）后按钮隐藏、meta 标注 complete history
+- [ ] **扫描降级**：RPC 不可达/限流打满重试 → 红条「couldn't read the chain — showing configured sellers instead」+ meta 标注 on-chain discovery unavailable + 原因，降级为 config.js sellers（现行为）；页面不崩
 - [ ] **分页**：>12 listing 时 12/页，PREV/NEXT 边界禁用，SHOWING a–b OF n · PAGE x/y 与实际一致；换页仅探测当前页卡片
 - [ ] **模型筛选**：filter chips = 已加载 listings 的 models 并集（含计数徽标），ALL 默认选中；点选过滤列表并重置到第 1 页；筛选后无结果给 RESET 提示
-- [ ] **搜索**：operator 地址子串（大小写不敏感）或模型名子串命中；无命中空态+RESET；输入 200ms 防抖
+- [ ] **搜索**：operator 地址子串（大小写不敏感）或模型名子串命中；无命中空态+RESET；输入 200ms 防抖；搜索框/排序下拉为暗色主题控件（mono 字体、`--bg-2` 底、细边框、绿焦点环、无原生圆角/取消按钮），与 console 表单一致
 - [ ] **排序**：NEWEST REGISTERED（默认，按事件块高）· 首模型 INPUT 价 ↑/↓（无价 listing 排尾/首）· OPERATOR A→Z/Z→A · 模型数 ↑/↓，切换后立即重排
 - [ ] 卡片行为同首页：模型 chip 选择器/每模型价/健康点/TEE 徽标/复制地址全部生效
 - [ ] `config.js` 键核对：`registryFromBlock`（Registry v2 部署块）与 `scanDepthBlocks` 存在且仅增未改既有键

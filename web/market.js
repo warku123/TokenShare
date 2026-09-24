@@ -57,11 +57,19 @@
   };
 
   /* ── scan → enrich ───────────────────────────────────────── */
-  function setScan(pct, text) {
+  /* setScan(pct, label, detail, title): label is the human line ("discovering
+     sellers on-chain …"); detail is the faint technical suffix (windows);
+     title carries the full engineering context on the strip's tooltip. */
+  function setScan(pct, label, detail, title) {
     scanBar.hidden = false;
     scanBar.className = "scan-bar";
+    scanBar.title = title || "";
     if (scanFill) scanFill.style.width = `${Math.min(100, Math.max(0, pct))}%`;
-    if (scanText) scanText.innerHTML = text;
+    if (scanText) {
+      scanText.innerHTML =
+        `<span class="scan-lbl">${label}</span>` +
+        (detail ? `<span class="scan-detail">${detail}</span>` : "");
+    }
   }
 
   async function enrich(operators) {
@@ -108,7 +116,7 @@
     state.busy = true;
     refreshBtn.disabled = true;
     scanMore.hidden = true;
-    setScan(0, `connecting ${T.esc(cfg.rpcUrl)} …`);
+    setScan(0, "connecting to the chain …", "", `${T.esc(cfg.rpcUrl)} · chainId ${cfg.chainId}`);
 
     let listings = [];
     try {
@@ -120,25 +128,32 @@
       if (cache && cache.to === head) {
         /* nothing new on-chain — reuse the session's operator set */
         operators = cache.operators; from = cache.from; to = cache.to;
-        setScan(100, `discovery cached for head ${T.fmtInt(head)} — refreshing listings via getListing …`);
+        setScan(100, "✓ sellers already discovered — refreshing live prices …",
+          "this visit scans nothing new", `session cache hit at head ${T.fmtInt(head)}`);
       } else if (cache && cache.to < head && head - cache.to <= depth) {
         /* incremental: scan only the blocks since the cached pass */
         const res = await T.discoverRange({
           fromBlock: cache.to + 1,
           onProgress: (done, total, r) =>
             setScan((done / total) * 100,
-              `incremental scan · window ${done}/${total} · blocks ${T.fmtInt(r.from)} → ${T.fmtInt(r.to)}`),
+              "checking for newly registered sellers …",
+              `step ${done}/${total}`,
+              `incremental Registered-event scan · ${T.fmtInt(r.from)} → ${T.fmtInt(r.to)} · 90-block windows`),
         });
         operators = mergeOps(cache.operators, res.operators);
         from = Math.min(cache.from, res.from); to = res.to;
         writeDiscoveryCache({ from, to, operators });
-        setScan(100, `+${res.operators.length} new event(s) since ${T.fmtInt(cache.to)} — merged`);
+        setScan(100, "✓ up to date",
+          res.operators.length ? `+${res.operators.length} new since block ${T.fmtInt(cache.to)}` : "no new sellers since your last visit",
+          `incremental scan covered ${T.fmtInt(cache.to + 1)} → ${T.fmtInt(to)}`);
       } else {
         /* cold start (or cache too stale): bounded depth scan */
         const res = await T.discoverRange({
           onProgress: (done, total, r) =>
             setScan((done / total) * 100,
-              `scanning Registered events · window ${done}/${total} · blocks ${T.fmtInt(r.from)} → ${T.fmtInt(r.to)}`),
+              "discovering sellers on-chain …",
+              `step ${done}/${total}`,
+              `Registry.Registered event scan · blocks ${T.fmtInt(r.from)} → ${T.fmtInt(r.to)} · 90-block windows (Monad caps eth_getLogs at 100)`),
         });
         operators = res.operators; from = res.from; to = res.to;
         writeDiscoveryCache({ from, to, operators });
@@ -149,15 +164,20 @@
       state.source = "events";
       state.degraded = null;
       listings = await enrich(operators);
+      const n = operators.length;
+      setScan(100, `✓ ${n} seller${n === 1 ? "" : "s"} found on-chain`,
+        n ? "click a model chip to see its prices" : "none registered in the scanned range",
+        `scanned blocks ${T.fmtInt(from)} → ${T.fmtInt(to)} · enriched via getListing`);
       scanBar.className = "scan-bar is-ok";
       if (scanFill) scanFill.style.width = "100%";
-      if (scanText) scanText.innerHTML = `scan complete — ${operators.length} operator(s) · enriched via getListing`;
     } catch (e) {
       /* event scan failed (RPC down / limit churn) → config.js sellers */
       state.source = "config";
       state.degraded = (e && (e.shortMessage || e.message)) || "unknown";
       state.scannedFrom = state.scannedTo = null;
-      scanBar.hidden = true;
+      setScan(0, "couldn't read the chain — showing configured sellers instead",
+        "", T.esc(state.degraded));
+      scanBar.className = "scan-bar is-bad";
       try {
         listings = (await T.fetchListings(T.readProvider()))
           .filter((l) => l.registered && !l.error);
@@ -177,13 +197,16 @@
     if (Number(cfg.registryFromBlock) >= state.scannedFrom) return; // already at floor
     state.busy = true;
     scanMore.disabled = true;
-    setScan(0, "extending scan backwards …");
+    setScan(0, "looking further back in history …", "",
+      `extending the Registered-event scan downwards from block ${state.scannedFrom}`);
     try {
       const res = await T.discoverRange({
         fromBlock: state.scannedFrom - 1,
         onProgress: (done, total, r) =>
           setScan((done / total) * 100,
-            `scanning earlier blocks · window ${done}/${total} · blocks ${T.fmtInt(r.from)} → ${T.fmtInt(r.to)}`),
+            "looking further back in history …",
+            `step ${done}/${total}`,
+            `blocks ${T.fmtInt(r.from)} → ${T.fmtInt(r.to)} · 90-block windows`),
       });
       const known = new Set(state.listings.map((l) => l.operator.toLowerCase()));
       const fresh = res.operators.filter((o) => !known.has(o.operator.toLowerCase()));
@@ -194,10 +217,15 @@
       cache.operators = mergeOps(res.operators, cache.operators);
       cache.from = res.from;
       writeDiscoveryCache(cache);
-      setScan(100, `+${fresh.length} earlier operator(s) merged`);
+      setScan(100, fresh.length
+        ? `✓ ${fresh.length} more seller${fresh.length === 1 ? "" : "s"} found`
+        : "✓ no additional sellers in that range",
+        "earlier history merged",
+        `scanned ${T.fmtInt(res.from)} → ${T.fmtInt(res.to)}`);
       scanBar.className = "scan-bar is-ok";
     } catch (e) {
-      setScan(0, `earlier scan failed — ${T.esc((e && (e.shortMessage || e.message)) || "unknown")}`);
+      setScan(0, "couldn't read the chain",
+        "", T.esc((e && (e.shortMessage || e.message)) || "unknown"));
       scanBar.className = "scan-bar is-bad";
     }
     scanMore.disabled = false;
@@ -210,21 +238,21 @@
     if (!scanMeta) return;
     if (state.source === "config") {
       scanMeta.innerHTML =
-        `<span class="bad">EVENT SCAN FAILED</span> ${T.esc(state.degraded || "")} — ` +
-        `降级为 <code class="inl">config.js sellers</code>（${state.listings.length} 个）。`;
+        `<span class="bad">on-chain discovery unavailable</span> — ${T.esc(state.degraded || "")}. ` +
+        `显示 <code class="inl">config.js</code> 里手工登记的 ${state.listings.length} 个 seller。`;
       scanMore.hidden = true;
       return;
     }
     const atFloor = state.scannedFrom != null && Number(cfg.registryFromBlock) >= state.scannedFrom;
+    const n = state.listings.length;
     scanMeta.innerHTML =
-      `<b>${state.listings.length}</b> operator(s) · Registered events scanned ` +
-      `<span class="mono">${state.scannedFrom != null ? T.fmtInt(state.scannedFrom) : "—"} → ${state.scannedTo != null ? T.fmtInt(state.scannedTo) : "—"}</span>` +
+      `<b>${n}</b> seller${n === 1 ? "" : "s"} · discovered from the Registry's on-chain registration events` +
+      ` <span class="dim mono">blocks ${state.scannedFrom != null ? T.fmtInt(state.scannedFrom) : "—"} → ${state.scannedTo != null ? T.fmtInt(state.scannedTo) : "—"}</span>` +
       (atFloor
-        ? ` <span class="ok">· full history (from deploy block)</span>`
-        : ` · last ${T.fmtInt(Number(cfg.scanDepthBlocks) || 50000)} blocks — `) +
-      (atFloor ? "" : `enriched via getListing`);
+        ? ` <span class="ok">· complete history</span>`
+        : ` <span class="dim">· showing the most recent ${T.fmtInt(Number(cfg.scanDepthBlocks) || 50000)} blocks</span>`);
     scanMore.hidden = atFloor;
-    scanMore.textContent = `[ LOAD EARLIER · −${T.fmtInt(Number(cfg.scanDepthBlocks) || 50000)} BLOCKS ]`;
+    scanMore.textContent = atFloor ? "" : `[ LOOK FURTHER BACK · −${T.fmtInt(Number(cfg.scanDepthBlocks) || 50000)} BLOCKS ]`;
   }
 
   /* ── view pipeline: filter → search → sort → paginate ────── */
@@ -288,8 +316,8 @@
       notice(state.listings.length
         ? `筛选/搜索无匹配 — 当前条件 <code class="inl">${T.esc(state.q || state.modelFilter || "")}</code> 命中 0 条，放宽条件或 <button class="btn btn-sm" id="f-reset" type="button">[ RESET ]</button>。`
         : (state.source === "config"
-          ? `事件扫描失败且 config sellers 无登记 listing — 检查 RPC / registryFromBlock。`
-          : `扫描范围内无 Registered 事件 — 试试 <b>LOAD EARLIER</b>，或核对 <code class="inl">config.js registryFromBlock</code>。`),
+          ? `链上读取失败，且 config.js 手工登记的 sellers 也无 listing — 检查 RPC 后重试。`
+          : `这段链上历史里没有已登记的 seller — 试试 <b>LOOK FURTHER BACK</b> 再往前找，或核对 <code class="inl">config.js registryFromBlock</code>。`),
         "net-warn");
       const rst = $("f-reset");
       if (rst) rst.addEventListener("click", () => {

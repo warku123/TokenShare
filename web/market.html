@@ -27,22 +27,22 @@
   <section class="con-head mkt-head">
     <div>
       <h1 class="con-title">MARKET<span class="cursor" aria-hidden="true"></span></h1>
-      <p class="con-sub">Sellers discovered by scanning <code class="inl">Registry.Registered</code> events
-        (windows of 90 blocks — Monad caps eth_getLogs at 100), each enriched live via
-        <code class="inl">getListing</code>. Pick a model chip to see its tier prices. Read-only — no wallet.</p>
+      <p class="con-sub">Every seller here was <b>discovered directly on-chain</b> — from the Registry
+        contract's own registration records — and is refreshed live with current per-model prices.
+        Pick a model chip to see its tier prices. Read-only, no wallet needed.</p>
     </div>
     <dl class="mkt-stats mkt-stats-side">
       <div><dt>CHAIN</dt><dd id="stat-net">—</dd></div>
     </dl>
   </section>
 
-  <!-- ══ SCAN STATUS ══ -->
-  <div class="scan-bar" id="scan-bar" hidden>
+  <!-- ══ DISCOVERY STATUS (technical detail on hover) ══ -->
+  <div class="scan-bar" id="scan-bar" role="status" aria-live="polite" title="on-chain discovery — Registry.Registered event scan" hidden>
     <div class="scan-track"><div class="scan-fill" id="scan-fill"></div></div>
-    <span class="scan-text" id="scan-text">…</span>
+    <span class="scan-text" id="scan-text"><span class="scan-lbl">connecting …</span></span>
   </div>
   <div class="scan-meta" id="scan-meta"></div>
-  <button class="btn btn-sm btn-ghost" id="scan-more" type="button" hidden>[ LOAD EARLIER ]</button>
+  <button class="btn btn-sm btn-ghost" id="scan-more" type="button" hidden>[ LOOK FURTHER BACK ]</button>
 
   <div class="mkt-notice" id="mkt-notice" hidden></div>
 
