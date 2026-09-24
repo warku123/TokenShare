@@ -190,9 +190,13 @@
 
   /* ═══ shared: listings → selects ══════════════════════════ */
   async function loadListingsIntoSelects() {
-    if (!T.cfgReady() || !(cfg.sellers || []).length) return;
+    if (!T.cfgReady()) return;
     try {
-      state.listings = (await T.fetchListings(T.readProvider())).filter((l) => l.registered);
+      /* L1/M10: on-chain enumeration is the primary source (multi-seller
+         ready); fetchMarketListings falls back to config.js sellers when
+         the enumeration calls are unavailable — never throws */
+      const res = await T.fetchMarketListings(T.readProvider());
+      state.listings = res.listings.filter((l) => l.registered);
     } catch { return; }
     const opts = state.listings.map((l) =>
       `<option value="${T.esc(l.operator)}" ${l.active ? "" : "disabled"}>` +
@@ -828,13 +832,28 @@
   }));
 
   /* — lock — */
+  /* C2 hardening: locks come from localStorage — a tampered/corrupt entry
+     (missing maxAmount, non-numeric fields) must NEVER throw here: this
+     runs inside the boot IIFE, and one throw would kill everything
+     rendered after it (disputes, selects, cards). Per-entry guards:
+     skip hard-failures, degrade unparsable amounts, esc all raw text. */
   function renderSessionLocks() {
     const mine = T.locks.all().filter((l) => !state.address || T.sameAddr(l.buyer || "", state.address) || !l.buyer);
     const list = $("c-payment-list");
     const rlist = $("r-payment-list");
-    const opts = mine.map((l) => `<option value="${l.paymentId}">#${l.paymentId} · ${T.truncAddr(l.seller)} · max $${T.fmtUsdc(l.maxAmount)}</option>`).join("");
-    list.innerHTML = opts;
-    rlist.innerHTML = opts;
+    const opts = [];
+    for (const l of mine) {
+      try {
+        const pid = T.esc(String(l.paymentId ?? "?"));
+        const seller = T.esc(T.truncAddr(String(l.seller || "?")));
+        let max = null;
+        try { max = T.fmtUsdc(l.maxAmount); } catch { max = null; } /* formatUnits throws on garbage */
+        opts.push(`<option value="${pid}">#${pid} · ${seller}${max != null ? ` · max $${max}` : " · max ?"}</option>`);
+      } catch { /* unexpected shape — skip the row entirely */ }
+    }
+    const html = opts.join("");
+    list.innerHTML = html;
+    rlist.innerHTML = html;
   }
 
   $("b-lock-btn").addEventListener("click", () => guard($("b-lock-btn"), async () => {
@@ -932,52 +951,56 @@
     const url = T.joinUrl(l.endpoint, T.RELAY_CHAT_PATH);
     termLine(term, `<span class="t-d">POST</span> ${T.esc(url)}`);
 
-    let res;
-    try {
-      res = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Payment-Id": BigInt(paymentId).toString(10),
-          "X-Signature": sig,
-        },
-        body,
-      });
-    } catch {
-      return termLine(term, `<span class="t-a">✗</span> relay 不可达（网络或 CORS — 等待 relay CORS 配置）`);
+    /* L3: fetchJson wraps the call with a 15s abort — a hung relay can no
+       longer stall the demo indefinitely. Never throws; network/CORS/timeout
+       come back classified. Response headers still read off r.response. */
+    const r = await T.fetchJson(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Payment-Id": BigInt(paymentId).toString(10),
+        "X-Signature": sig,
+      },
+      body,
+    });
+
+    if (r.corsOrNetwork) {
+      return termLine(term,
+        `<span class="t-a">✗</span> relay ${r.error === "timeout" ? "请求超时（15s）— relay 无响应" : "不可达（网络或 CORS — 等待 relay CORS 配置）"}`);
     }
 
-    if (!res.ok) {
-      const copy = T.relayErrorCopy(res.status);
-      let detail = "";
-      try { const j = await res.json(); detail = j.detail || JSON.stringify(j); } catch { /* ignore */ }
-      termLine(term, `<span class="t-a">✗ HTTP ${res.status}</span> ${T.esc(copy || "")} ${T.esc(detail)}`);
+    if (!r.ok) {
+      const copy = T.relayErrorCopy(r.status);
+      const detail = r.body ? (r.body.detail || JSON.stringify(r.body)) : "";
+      termLine(term, `<span class="t-a">✗ HTTP ${r.status}</span> ${T.esc(copy || "")} ${T.esc(detail)}`);
       return;
     }
 
-    let data;
-    try { data = await res.json(); }
-    catch { return termLine(term, `<span class="t-a">✗</span> relay returned non-JSON`); }
+    const data = r.body;
+    if (!data) return termLine(term, `<span class="t-a">✗</span> relay returned non-JSON`);
 
     const reply = data && data.choices && data.choices[0] && data.choices[0].message
       ? data.choices[0].message.content : "(no content)";
     const u = data.usage || {};
     const cached = (u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens) ?? u.cached_tokens ?? 0;
-    const settle = res.headers.get("X-Settle-Status");
+    const settle = r.response.headers.get("X-Settle-Status");
 
     termLine(term, `<span class="t-g">✓ 200 OK</span>`);
     const replyEl = document.createElement("div");
     replyEl.className = "call-reply";
     replyEl.textContent = reply;
     term.appendChild(replyEl);
+    /* C1 hardening: usage fields are ATTACKER-CONTROLLED (relay response) —
+       a malicious relay may return strings; esc keeps numbers visually
+       identical and defuses markup */
     termLine(
       term,
-      `<span class="t-d">usage</span> cached <span class="t-n">${cached}</span> · in <span class="t-n">${u.prompt_tokens ?? "?"}</span> · out <span class="t-n">${u.completion_tokens ?? "?"}</span>` +
+      `<span class="t-d">usage</span> cached <span class="t-n">${T.esc(cached)}</span> · in <span class="t-n">${T.esc(u.prompt_tokens ?? "?")}</span> · out <span class="t-n">${T.esc(u.completion_tokens ?? "?")}</span>` +
       (settle ? ` · <span class="t-d">settle</span> <span class="${settle === "settled" ? "t-g" : "t-a"}">${T.esc(settle)}</span>` : "")
     );
 
     /* EIP-712 receipt verification */
-    const receiptHeader = res.headers.get("X-Receipt");
+    const receiptHeader = r.response.headers.get("X-Receipt");
     rcptPanel.hidden = false;
     if (!receiptHeader) {
       rcptPanel.classList.add("warn");

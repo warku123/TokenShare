@@ -56,9 +56,12 @@ Monad testnet (chainId 10143) · Escrow/Registry/USDC 已部署（见 `web/confi
 
 - [ ] 余额卡：钱包 USDC + Escrow `balances(me)`；WITHDRAW 输入金额→tx 流→余额刷新
 - [ ] DEPOSIT： allowance 不足时 `approve → deposit` 两笔步进；充足时 approve 自动跳过
-- [ ] LOCK：选卖家（下拉=市场同源数据）→ 按模型逐行显示三档价 + 各模型 minAmount 估计（in×200k+out×32k caps)；hint 取最贵模型估计，低于它给黄色提醒但仍可发；成功→大字 paymentId（点击复制）+ 自动带入 CALL DEMO
+- [ ] LOCK：选卖家（下拉=Registry 链上枚举，RPC 失败降级 config sellers，与市场页同源）→ 按模型逐行显示三档价 + 各模型 minAmount 估计（in×200k+out×32k caps)；hint 取最贵模型估计，低于它给黄色提醒但仍可发；成功→大字 paymentId（点击复制）+ 自动带入 CALL DEMO
 - [ ] CALL DEMO:model 下拉=所选卖家 listing models；prompt → `[ SIGN + CALL ]`
   - 终端 trace:EIP-191 msg 明文（`POST|/v1/chat/completions|<64hex>|<paymentId>`)→ MetaMask personal_sign → POST
+  - **恶意 relay usage 注入（rev-4 C1）**：mock relay 返回 `"usage": {"prompt_tokens": "<img onerror=alert(1)>", "cached_tokens": "<script>...", "completion_tokens": {"x":1}}` → trace 中三字段按纯文本转义显示（可见 `<img …>` 原文），无脚本执行、无节点注入、正常数值显示与之前逐字符一致
+  - **relay 挂起超时（rev-4 L3）**：mock relay 收 POST 后 20s 不回 → 15s 后 trace 显「relay 请求超时（15s）」，按钮解锁可重试
+  - **localStorage 篡改（rev-4 C2）**：`tokenshare.locks` 写入畸形条目（缺 `maxAmount`、`"maxAmount": "abc"`、`paymentId` 为对象）→ 刷新 console 页面完整启动（DISPUTES/下拉/卡片全部渲染），畸形行降级显示（max ?）或整行跳过，无 console 报错
   - 200：回复文本 + usage 三档 + X-Settle-Status；收据面板绿「✓ 收据验签通过」+ actualAmount/upstreamHost/model/tokens
   - 验签失败：红条 + 自动记入 DISPUTES(localStorage)
   - 402 → 提示「maxAmount 低于卖家 minAmount 估计，调高金额」;401/409/400/502 各有对应文案；relay 不可达→CORS 提示
