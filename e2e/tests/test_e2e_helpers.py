@@ -291,6 +291,32 @@ def test_registry_abi_is_v2_per_model() -> None:
     assert [o["type"] for o in page["outputs"]] == ["address[]"]
 
 
+def test_registry_abi_is_v4_remove_model() -> None:
+    """Registry v4 (M12) removeModel faces in run.REGISTRY_ABI:
+    removeModel(string) nonpayable, custom error RemoveLastModel(), and the
+    event ModelRemoved(address indexed operator, string model)."""
+    from run import REGISTRY_ABI
+
+    def one(kind: str, name: str) -> dict[str, Any]:
+        return next(
+            e for e in REGISTRY_ABI if e.get("type") == kind and e.get("name") == name
+        )
+
+    remove = one("function", "removeModel")
+    assert [i["type"] for i in remove["inputs"]] == ["string"]
+    assert remove["outputs"] == []
+    assert remove["stateMutability"] == "nonpayable"
+
+    guard = one("error", "RemoveLastModel")
+    assert guard["inputs"] == []
+
+    removed = one("event", "ModelRemoved")
+    assert [(i["type"], i.get("indexed", False)) for i in removed["inputs"]] == [
+        ("address", True),  # operator indexed
+        ("string", False),  # model in the data section
+    ]
+
+
 # ------------------------------- env pins vs reused artifact (rev-3 C1)
 
 

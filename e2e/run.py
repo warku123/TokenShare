@@ -19,6 +19,13 @@ base_sepolia local path = EVERYTHING on this machine:
      tiered prices paired with the mock OpenAI usage (exact non-zero
      settle) plus a second model whose price is moved via updateModelPrice;
      afterwards getPrice(operator, model) is asserted verbatim per model.
+     The FORK path additionally registers two probe models so the Registry
+     v4 (M12) removeModel verification can retire a NON-last entry
+     (swap-and-pop, ModelRemoved log, getPrice revert for the removed model,
+     seller enumeration untouched) and then restore the EXACT pre-probe
+     listing via the M2 deactivate→re-register path — before the relay
+     starts and the buyer flow reads the listing. The real-chain listing
+     stays [served, alt].
      An ACTIVE listing is deactivated first (v2 AlreadyRegistered guard),
      so reruns on a reused deployment re-register cleanly.
   4. e2e/mock_openai.py serves deterministic non-stream JSON + SSE on a free
@@ -122,6 +129,16 @@ LISTING_PRICES = {"cached": 1_000_000, "input": 2_000_000, "output": 3_000_000}
 ALT_MODEL_SUFFIX = "-alt"
 ALT_MODEL_PRICES_INITIAL = {"cached": 500_000, "input": 700_000, "output": 900_000}
 ALT_MODEL_PRICES_UPDATED = {"cached": 1_500_000, "input": 2_500_000, "output": 3_500_000}
+# Registry v4 (M12) removeModel probe models — FORK PATH ONLY (the fork self-
+# manages its deployment, so mutations are safe; the real-chain listing stays
+# exactly [served, alt]). The two extra models exist so removeModel can retire
+# a NON-last entry and exercise swap-and-pop; the buyer never requests them.
+# The probe section removes the alt model (index 1 of 4), asserts the removed
+# face + survivor prices + seller enumeration, then restores the EXACT
+# pre-probe listing via the M2 deactivate→re-register path BEFORE any later
+# flow step (relay start, buyer flow) consumes the listing.
+PROBE_MODEL_SUFFIXES = ("-probe1", "-probe2")
+PROBE_MODEL_PRICES = {"cached": 400_000, "input": 600_000, "output": 800_000}
 # Relay minAmount estimate caps (match relay/CLI defaults; same formula):
 # (2e6*200000 + 3e6*32000)//1e6 = 496,000 native = 0.496 USDC <= lock maxAmount.
 PROMPT_TOKEN_CAP = 200_000
@@ -356,6 +373,10 @@ _PRICE_COMPONENTS = [
 # Registry v3 (M10) adds the on-chain seller directory: sellerCount() +
 # getSellers(start, count) (clamped page: start>=len -> empty, count>500 ->
 # 500, tail-truncated; append-only, deduped across re-registrations).
+# Registry v4 (M12) adds removeModel(model): ONE-model off-listing via
+# swap-and-pop (models[]/prices[] same index), guarded by RemoveLastModel()
+# when only one model remains (ModelNotFound is checked first), emitting
+# ModelRemoved(operator, model). v3 faces and selectors are unchanged.
 REGISTRY_ABI = [
     {
         "type": "function",
@@ -376,6 +397,13 @@ REGISTRY_ABI = [
             {"name": "model", "type": "string"},
             {"name": "price", "type": "tuple", "components": _PRICE_COMPONENTS},
         ],
+        "outputs": [],
+    },
+    {
+        "type": "function",
+        "name": "removeModel",
+        "stateMutability": "nonpayable",
+        "inputs": [{"name": "model", "type": "string"}],
         "outputs": [],
     },
     {
@@ -430,6 +458,22 @@ REGISTRY_ABI = [
         "stateMutability": "view",
         "inputs": [{"name": "operator", "type": "address"}, {"name": "model", "type": "string"}],
         "outputs": [{"name": "price", "type": "tuple", "components": _PRICE_COMPONENTS}],
+    },
+    # v4 removeModel faces: the guard error (one remaining model cannot be
+    # removed) and the removal log — web3 decodes both from these entries.
+    {
+        "type": "error",
+        "name": "RemoveLastModel",
+        "inputs": [],
+    },
+    {
+        "type": "event",
+        "name": "ModelRemoved",
+        "anonymous": False,
+        "inputs": [
+            {"name": "operator", "type": "address", "indexed": True},
+            {"name": "model", "type": "string", "indexed": False},
+        ],
     },
 ]
 
@@ -626,7 +670,7 @@ def deploy_contracts(network: str, rpc_url: str, deployer_addr: str,
 def prepare_contracts(rpc_url: str, relay_port: int, deployed: dict[str, Any],
                       seller_addr: str, seller_key: str, buyer_addr: str,
                       mint_key: str | None, deposit_usdc: str,
-                      served_model: str) -> None:
+                      served_model: str, is_fork: bool) -> None:
     step("[3/8] Contract prep via direct web3: mint mock USDC + register seller listing")
     w3 = w3_at(rpc_url)
     checksum = w3.to_checksum_address
@@ -648,6 +692,13 @@ def prepare_contracts(rpc_url: str, relay_port: int, deployed: dict[str, Any],
 
     endpoint = os.environ.get("RELAY_PUBLIC_ENDPOINT") or f"http://127.0.0.1:{relay_port}"
     alt_model = served_model + ALT_MODEL_SUFFIX
+    # Registry v4 removeModel probe models (fork path only): the real-chain
+    # listing stays exactly [served, alt].
+    probe_models = [served_model + s for s in PROBE_MODEL_SUFFIXES] if is_fork else []
+    models_to_register = [served_model, alt_model] + probe_models
+    prices_to_register = (
+        [LISTING_PRICES, ALT_MODEL_PRICES_INITIAL] + [PROBE_MODEL_PRICES] * len(probe_models)
+    )
     registry = registry_factory(w3, deployed["registry"])
     # Gate J M2: v2 register reverts AlreadyRegistered while a listing is
     # ACTIVE — reruns on a reused deployment (e.g. the monad_testnet artifact)
@@ -659,11 +710,12 @@ def prepare_contracts(rpc_url: str, relay_port: int, deployed: dict[str, Any],
     if listing_active:
         print("listing ACTIVE — deactivate first (v2 AlreadyRegistered guard)")
         send_tx(w3, registry.functions.deactivate(), seller_key)
-    fn = registry_register(w3, deployed["registry"], endpoint, served_model, alt_model)
+    fn = registry_register(w3, deployed["registry"], endpoint,
+                           models_to_register, prices_to_register)
     send_tx(w3, fn, seller_key)
     print(
         f"registered v2 listing: operator={seller_addr} endpoint={endpoint} "
-        f"models=[{served_model}, {alt_model}] (Price[] parallel to models[])"
+        f"models={models_to_register} (Price[] parallel to models[])"
     )
 
     # Registry v2 per-model update: move ONLY the alt model's triple; the
@@ -679,8 +731,10 @@ def prepare_contracts(rpc_url: str, relay_port: int, deployed: dict[str, Any],
     listing_operator, listing_endpoint, models, prices, active = registry.functions.getListing(
         checksum(seller_addr)
     ).call()
-    expected_models = [served_model, alt_model]
-    expected_prices = [LISTING_PRICES, ALT_MODEL_PRICES_UPDATED]
+    expected_models = models_to_register
+    expected_prices = (
+        [LISTING_PRICES, ALT_MODEL_PRICES_UPDATED] + [PROBE_MODEL_PRICES] * len(probe_models)
+    )
     if not active or listing_operator.lower() != checksum(seller_addr).lower():
         fail_all("seller listing not active / operator mismatch after register")
     if list(models) != expected_models:
@@ -709,6 +763,131 @@ def prepare_contracts(rpc_url: str, relay_port: int, deployed: dict[str, Any],
           f"getPrice verbatim for {len(expected_models)} models")
     print(f"seller directory verified: sellerCount=1 getSellers(0,1)=[{seller_addr}]")
 
+    # Registry v4 (M12) removeModel verification — fork path only (the fork
+    # self-manages its deployment). Restores the complete listing BEFORE the
+    # relay starts and the buyer flow reads it.
+    if is_fork:
+        verify_remove_model(
+            w3, registry, seller_addr, seller_key, endpoint,
+            served_model, alt_model, probe_models,
+        )
+
+
+def verify_remove_model(w3: Any, registry: Any, seller_addr: str, seller_key: str,
+                        endpoint: str, served_model: str, alt_model: str,
+                        probe_models: list[str]) -> None:
+    """Registry v4 (M12) removeModel verification (fork path only).
+
+    Sequence: remove a NON-LAST model (alt, index 1 of the 4-model listing —
+    removing the tail entry would only exercise a plain pop) → swap-and-pop
+    must retire exactly that model. Asserts:
+      1. the ModelRemoved log (operator + model decoded from the receipt),
+      2. getPrice of the REMOVED model reverts (web3 ContractLogicError
+         family — the raw ModelNotFound custom-error face),
+      3. every SURVIVOR's getPrice stays verbatim,
+      4. the v3 seller enumeration is untouched (sellerCount still 1).
+    Then RESTORES the exact pre-probe listing via the M2 guard path
+    (deactivate → re-register; alt returns with its UPDATED triple), so every
+    later step (relay start, CLI call, refund) sees the complete listing.
+    """
+    step("[3/8] Registry v4 removeModel verification (fork-only): "
+         "remove non-last model + restore full listing")
+    checksum = w3.to_checksum_address
+    all_models = [served_model, alt_model] + probe_models
+    restored_prices = (
+        [LISTING_PRICES, ALT_MODEL_PRICES_UPDATED] + [PROBE_MODEL_PRICES] * len(probe_models)
+    )
+
+    # --- removal: alt is non-last, so the tail model swap-and-pops into its
+    # slot; exactly one ModelRemoved log must carry (seller, alt).
+    tx_hash = send_tx(w3, registry.functions.removeModel(alt_model), seller_key)
+    receipt = w3.eth.get_transaction_receipt(tx_hash)
+    removed_logs = registry.events.ModelRemoved().process_receipt(receipt)
+    if len(removed_logs) != 1:
+        fail_all(f"ModelRemoved logs {len(removed_logs)} != 1 "
+                 f"for removeModel({alt_model!r})")
+    log_args = removed_logs[0]["args"]
+    if str(log_args["operator"]).lower() != checksum(seller_addr).lower():
+        fail_all(f"ModelRemoved operator {log_args['operator']} != seller {seller_addr}")
+    if log_args["model"] != alt_model:
+        fail_all(f"ModelRemoved model {log_args['model']!r} != {alt_model!r}")
+    print(f"removeModel OK: ModelRemoved(operator={seller_addr}, model={alt_model}) "
+          "decoded from receipt")
+
+    # --- listing shape: exactly the survivors remain (order across the
+    # swap-and-pop is an implementation detail — assert the SET, not indices;
+    # prices[] must stay parallel to models[]).
+    survivors = [served_model] + probe_models
+    _op, _ep, models, prices, active = registry.functions.getListing(
+        checksum(seller_addr)
+    ).call()
+    if not active:
+        fail_all("listing inactive after removeModel (removeModel must not touch active)")
+    if sorted(models) != sorted(survivors):
+        fail_all(f"post-remove models {list(models)} != survivors {survivors}")
+    if len(prices) != len(survivors):
+        fail_all(f"post-remove prices len {len(prices)} != {len(survivors)}")
+
+    # --- survivors keep their exact triples; the removed model is OFF the
+    # price book (getPrice reverts with the ModelNotFound custom error, which
+    # web3 surfaces as a ContractLogicError-family exception — ModelNotFound
+    # is deliberately NOT in this e2e ABI fragment).
+    for model in survivors:
+        expected = PROBE_MODEL_PRICES if model in probe_models else LISTING_PRICES
+        got = decode_price_tuple(registry.functions.getPrice(checksum(seller_addr), model).call())
+        if got != expected:
+            fail_all(f"survivor getPrice({model!r}) = {got} != expected {expected}")
+    from web3.exceptions import ContractLogicError
+
+    selector = w3.keccak(text="ModelNotFound()")[:4].hex()
+    try:
+        registry.functions.getPrice(checksum(seller_addr), alt_model).call()
+    except ContractLogicError as exc:
+        revert_text = f"{type(exc).__name__} {exc} {getattr(exc, 'data', '')}"
+        if selector not in revert_text.replace("0x", "") and "ModelNotFound" not in revert_text:
+            fail_all(f"getPrice({alt_model!r}) reverted with an unexpected face: "
+                     f"{revert_text} (expected ModelNotFound selector {selector})")
+    else:
+        fail_all(f"getPrice({alt_model!r}) did NOT revert after removeModel")
+    print(f"getPrice({alt_model!r}) reverts after removeModel (web3 exception, "
+          "survivor getPrice verbatim)")
+
+    # --- v3 seller enumeration untouched by a per-model removal.
+    seller_count = int(registry.functions.sellerCount().call())
+    first_page = [str(a) for a in registry.functions.getSellers(0, 1).call()]
+    if seller_count != 1:
+        fail_all(f"sellerCount() = {seller_count} != 1 after removeModel (enumeration moved)")
+    if not first_page or first_page[0].lower() != checksum(seller_addr).lower():
+        fail_all(f"getSellers(0, 1) = {first_page} != [{seller_addr}] after removeModel")
+    print("seller enumeration untouched: sellerCount=1 getSellers(0,1)=["
+          f"{seller_addr}]")
+
+    # --- restore: M2 guard semantics (deactivate → re-register). The alt
+    # model returns with its UPDATED triple (updateModelPrice ran before the
+    # probe), so the restored listing is byte-identical to the pre-probe one.
+    send_tx(w3, registry.functions.deactivate(), seller_key)
+    send_tx(
+        w3,
+        registry_register(w3, registry.address, endpoint, all_models, restored_prices),
+        seller_key,
+    )
+    _op, _ep, models, prices, active = registry.functions.getListing(
+        checksum(seller_addr)
+    ).call()
+    if not active or list(models) != all_models:
+        fail_all(f"restored listing models {list(models)} != {all_models} (or inactive)")
+    decoded_prices = [decode_price_tuple(p) for p in prices]
+    if decoded_prices != restored_prices:
+        fail_all(f"restored listing prices {decoded_prices} != expected {restored_prices}")
+    for model, expected in zip(all_models, restored_prices):
+        got = decode_price_tuple(registry.functions.getPrice(checksum(seller_addr), model).call())
+        if got != expected:
+            fail_all(f"restored getPrice({model!r}) = {got} != expected {expected}")
+    if int(registry.functions.sellerCount().call()) != 1:
+        fail_all("sellerCount() != 1 after restore")
+    print(f"listing restored: {len(all_models)} models, all getPrice verbatim, "
+          "sellerCount=1 — downstream steps see the complete listing")
+
 
 def listing_endpoint_safe(endpoint: str) -> str:
     return endpoint or "(empty)"
@@ -734,14 +913,15 @@ def decode_price_tuple(raw: Any) -> dict[str, int]:
     return {"cached": int(cached_in), "input": int(price_input), "output": int(price_output)}
 
 
-def registry_register(w3: Any, addr: str, endpoint: str, served_model: str,
-                      alt_model: str) -> Any:
-    """Registry v2 register: Price[] parallel to models[] — the SERVED model
-    first with LISTING_PRICES, the alt model with its own initial triple."""
+def registry_register(w3: Any, addr: str, endpoint: str, models: list[str],
+                      prices: list[dict[str, int]]) -> Any:
+    """Registry v2 register: Price[] PARALLEL to models[] (M9 per-model
+    pricing). The SERVED model is models[0] with LISTING_PRICES; the fork
+    path additionally carries the v4 removeModel probe models."""
     return registry_factory(w3, addr).functions.register(
         endpoint,
-        [served_model, alt_model],
-        [price_tuple(LISTING_PRICES), price_tuple(ALT_MODEL_PRICES_INITIAL)],
+        list(models),
+        [price_tuple(p) for p in prices],
     )
 
 
@@ -1323,7 +1503,8 @@ def run(network: str) -> str | None:
 
     prepare_contracts(rpc_url, relay_port, deployed, seller_addr, seller_key,
                       buyer_addr, mint_key=deployer_key if cfg["anvil"] else None,
-                      deposit_usdc=deposit_usdc, served_model=served_model)
+                      deposit_usdc=deposit_usdc, served_model=served_model,
+                      is_fork=cfg["anvil"])
     start_relay(base_env, deployed, rpc_url, int(deployed.get("chainId") or cfg["chain_id"]),
                 relay_port, seller_key, upstream_base_url)
     buyer_flow(deployed, rpc_url, int(deployed.get("chainId") or cfg["chain_id"]),
