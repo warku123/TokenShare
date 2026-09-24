@@ -233,10 +233,10 @@ contract Registry {
      * No `active` requirement: an inactive listing may also be cleaned up
      * model by model.
      *
-     * SETTLEMENT SEMANTICS: removal only stops FUTURE service. A payment
-     * already locked against this model is settled by the relay via
-     * `getPrice`, which now reverts with `ModelNotFound` — the settle tx
-     * fails (`settle-failed`, no receipt) and the buyer takes the normal
+     * SETTLEMENT SEMANTICS: removal only stops FUTURE service — the relay
+     * rejects new requests for the removed model with 400 before forwarding
+     * (price snapshot for accepted payments is unaffected). Worst case for a
+     * payment locked against a removed model: the buyer takes the normal
      * refund path after TTL. No escrow state is touched here (Escrow is a
      * separate contract).
      *
