@@ -44,7 +44,7 @@ Env vars required by every chain-touching command (no values are ever hardcoded)
 
 Optional env: SELLER_ADDR (default seller for call), PROMPT_TOKEN_CAP / COMPLETION_TOKEN_CAP (default lock sizing, mirrors relay defaults 200000 / 32000), TX_TIMEOUT_S (tx wait timeout).
 
-Commands: deposit (approve + deposit USDC into Escrow); lock (lock(seller, maxAmount, ttl=600) -> prints paymentId); call (pick seller -> lock NEW paymentId, or reuse via --payment-id -> read Registry listing.endpoint -> POST /v1/chat/completions with EIP-191 X-Payment-Id + X-Signature -> prints reply, X-Settle-Status, and verifies the EIP-712 X-Receipt against the Registry listing operator); balance (wallet USDC + withdrawable Escrow); refund (withdraw an expired lock after its TTL); disputes (list locally recorded receipt-verification disputes); verify-attestation (best-effort off-chain parse of a TEE attestation quote + optional on-chain digest comparison); listings (compare ACTIVE Registry listings — per-model tiered prices + estimated per-call cost, cheapest first; sellers discovered via the Registry v3 on-chain enumeration sellerCount/getSellers).
+Commands: deposit (approve + deposit USDC into Escrow); lock (lock(seller, maxAmount, ttl=600) -> prints paymentId); call (pick seller -> lock NEW paymentId, or reuse via --payment-id -> read Registry listing.endpoint -> POST /v1/chat/completions with EIP-191 X-Payment-Id + X-Signature -> prints reply, X-Settle-Status, and verifies the EIP-712 X-Receipt against the Registry listing operator); balance (wallet USDC + withdrawable Escrow); refund (withdraw an expired lock after its TTL); disputes (list locally recorded receipt-verification disputes); verify-attestation (best-effort off-chain parse of a TEE attestation quote + optional on-chain digest comparison); listings (compare ACTIVE Registry listings — per-model tiered prices + estimated per-call cost, cheapest first; sellers discovered via the Registry v3 on-chain enumeration sellerCount/getSellers); remove-model (OPERATOR-side: remove ONE model + its parallel price row from your own listing via Registry v4 removeModel, signed with the listing-operator key — --key-env, default BUYER_PRIVATE_KEY for the demo single-account setup).
 
 Receipt verification (BUILD_SPEC §6.3): a failed X-Receipt check prints a warning and records the paymentId in the dispute ledger (default ~/.tokenshare/disputes.json; override with --disputes-file, review via the `disputes` command).
 
@@ -546,6 +546,89 @@ def listings_cmd(
             typer.echo(f"  {row['operator']}  ({row['endpoint'] or '(no endpoint)'})")
 
     _run(body)
+
+
+# ---------------------------------------------------------------------------
+# remove-model (M12 Registry v4 — OPERATOR-side, not a buyer operation)
+# ---------------------------------------------------------------------------
+
+# removeModel(model) must be signed by the LISTING OPERATOR (caller ==
+# operator). This CLI's identity model is buyer-centric (BUYER_PRIVATE_KEY is
+# the only PIN key), and in the common demo that SAME account is the
+# seller/operator (SELLER==BUYER), so it is the default signer. When the
+# operator key lives elsewhere, --key-env names any other env var — no new
+# required env, config.py untouched.
+OPERATOR_KEY_ENV_DEFAULT = "BUYER_PRIVATE_KEY"
+
+
+@app.command("remove-model")
+def remove_model_cmd(
+    model: str = typer.Argument(
+        ...,
+        help="Model name to remove from the CALLER'S OWN Registry listing (its parallel price row is removed too).",
+    ),
+    key_env: str = typer.Option(
+        OPERATOR_KEY_ENV_DEFAULT,
+        "--key-env",
+        help="ENV VAR NAME holding the listing-OPERATOR private key (default BUYER_PRIVATE_KEY — the demo single-account setup where seller==buyer; pass e.g. SELLER_PRIVATE_KEY when they differ). The value is never echoed.",
+    ),
+) -> None:
+    """Remove one model (and its price) from your own listing (Registry v4 removeModel).
+
+    Seller/operator-side command: removeModel(model) is signed by the listing
+    operator and removes the model + its parallel prices[] entry via
+    swap-and-pop. On-chain guards: ModelNotFound (model not in the listing)
+    and RemoveLastModel (it is the last remaining model — deactivate() the
+    whole listing instead). Allowed while the listing is inactive. After
+    removal getPrice(operator, model) reverts — in-flight payments
+    settle-fail and buyers refund after the TTL.
+    """
+    def body() -> None:
+        key = (os.environ.get(key_env) or "").strip()
+        if not key:
+            _fail(
+                f"env {key_env} is not set — remove-model signs as the LISTING "
+                "OPERATOR; put the operator private key in that env var "
+                "(value never echoed)"
+            )
+        from eth_account import Account
+
+        try:
+            account = Account.from_key(key)
+        except Exception:
+            _fail(f"env {key_env} is not a valid private key (value withheld)")
+        cfg = load_config()
+        ctx = chain_mod.open_chain(cfg)
+        typer.echo(
+            f"operator: {account.address}  registry: {cfg.registry_addr}  "
+            f"chain_id: {cfg.chain_id}"
+        )
+        try:
+            result = chain_mod.remove_model(ctx.w3, cfg.registry_addr, account, model)
+        except TokenshareError as exc:
+            _explain_remove_model_revert(model, exc)
+        typer.echo(f"model removed: {result['model']}  (operator {result['operator']})")
+        typer.echo(f"tx: {result['tx_hash']}")
+
+    _run(body)
+
+
+def _explain_remove_model_revert(model: str, exc: TokenshareError) -> None:
+    """Translate the two on-chain removeModel guards into actionable hints;
+    any other transaction failure is re-raised for the generic path."""
+    text = str(exc)
+    if "RemoveLastModel" in text:
+        _fail(
+            f"{model!r} is the LAST model of the listing — removeModel refuses "
+            "to empty it; deactivate() the whole listing instead "
+            f"(chain said: {text})"
+        )
+    if "ModelNotFound" in text:
+        _fail(
+            f"model {model!r} is not in your listing — nothing to remove "
+            f"(chain said: {text})"
+        )
+    raise exc
 
 
 # ---------------------------------------------------------------------------

@@ -119,7 +119,8 @@ def _canonical_sig(name: str, params: str) -> str:
 
 def test_registry_abi_has_v3_enumeration():
     """REGISTRY_ABI carries the M10 enumeration surface + the full M9 v2
-    surface (v3 keeps the v2 face 100% — only additions, no changes)."""
+    surface (v3 keeps the v2 face 100% — only additions, no changes), plus
+    the M12 v4 additions (removeModel / ModelRemoved)."""
     from tokenshare_cli.abis import REGISTRY_ABI
 
     by_name = {(e["type"], e["name"]): e for e in REGISTRY_ABI}
@@ -131,8 +132,10 @@ def test_registry_abi_has_v3_enumeration():
         ("function", "deactivate"),
         ("function", "getListing"),
         ("function", "getPrice"),
+        ("function", "removeModel"),
         ("event", "PriceUpdated"),
         ("event", "Deactivated"),
+        ("event", "ModelRemoved"),
     } <= set(by_name)
 
     seller_count = by_name[("function", "sellerCount")]
@@ -144,6 +147,19 @@ def test_registry_abi_has_v3_enumeration():
     assert [i["type"] for i in get_sellers["inputs"]] == ["uint256", "uint256"]
     assert [o["type"] for o in get_sellers["outputs"]] == ["address[]"]
     assert get_sellers["stateMutability"] == "view"
+
+    # M12 v4 shape: removeModel(string) nonpayable; ModelRemoved(address
+    # indexed operator, string model).
+    remove_model_fn = by_name[("function", "removeModel")]
+    assert [i["type"] for i in remove_model_fn["inputs"]] == ["string"]
+    assert remove_model_fn["outputs"] == []
+    assert remove_model_fn["stateMutability"] == "nonpayable"
+
+    model_removed = by_name[("event", "ModelRemoved")]
+    assert model_removed["anonymous"] is False
+    assert [
+        (i["type"], i["indexed"]) for i in model_removed["inputs"]
+    ] == [("address", True), ("string", False)]
 
 
 def test_enumeration_signatures_match_m10_pin():
@@ -183,6 +199,49 @@ def test_enumeration_signatures_match_v3_source_once_landed():
     assert match_page, "getSellers(...) not found in Registry.sol"
     canonical = _canonical_sig("getSellers", match_page.group(1))
     assert canonical == "getSellers(uint256,uint256)"
+
+
+def test_remove_model_signature_matches_m12_pin():
+    """The M12 ABI PIN (.slim/deepwork 「M12」) is authoritative while the
+    contracts lane lands Registry v4 in parallel: removeModel(string) and
+    ModelRemoved(address indexed, string) must match it exactly."""
+    pin_text = PIN_FILE.read_text()
+    match_fn = re.search(r"function\s+removeModel\(([^)]*)\)\s+external", pin_text)
+    assert match_fn, "removeModel(...) not found in the M12 ABI PIN"
+    canonical = _canonical_sig("removeModel", match_fn.group(1))
+
+    from tokenshare_cli.abis import REGISTRY_ABI
+
+    by_name = {(e["type"], e["name"]): e for e in REGISTRY_ABI}
+    remove_model_fn = by_name[("function", "removeModel")]
+    on_chain = (
+        "removeModel(" + ",".join(i["type"] for i in remove_model_fn["inputs"]) + ")"
+    )
+    assert canonical == on_chain == "removeModel(string)"
+
+    match_ev = re.search(r"ModelRemoved\(([^)]*)\)", pin_text)
+    assert match_ev, "event ModelRemoved(...) not found in the M12 ABI PIN"
+    ev_canonical = _canonical_sig("ModelRemoved", match_ev.group(1))
+    model_removed = by_name[("event", "ModelRemoved")]
+    ev_on_chain = (
+        "ModelRemoved(" + ",".join(i["type"] for i in model_removed["inputs"]) + ")"
+    )
+    assert ev_canonical == ev_on_chain == "ModelRemoved(address,string)"
+
+
+def test_remove_model_signature_matches_v4_source_once_landed():
+    """Auto-tightens when the contracts lane lands Registry v4: if
+    Registry.sol contains removeModel, its signature must match ours."""
+    source = (REPO_ROOT / "contracts" / "src" / "Registry.sol").read_text()
+    if "removeModel" not in source:
+        pytest.skip(
+            "contracts/src/Registry.sol has no removeModel yet — the v4 "
+            "contracts lane has not landed"
+        )
+    match_fn = re.search(r"function\s+removeModel\(([^)]*)\)\s+external", source, re.S)
+    assert match_fn, "removeModel(...) not found in Registry.sol"
+    canonical = _canonical_sig("removeModel", match_fn.group(1))
+    assert canonical == "removeModel(string)"
 
 
 # --------------------------------------------------------------------------

@@ -6,7 +6,8 @@ Extracted verbatim from:
   contracts/out/MockUSDC.sol/MockUSDC.json  (standard OZ ERC-20, 6 decimals)
 
 Only the function/event entries the CLI actually calls are embedded (Registry
-v3 = M9 ABI PIN per-model pricing + M10 ABI PIN on-chain enumeration). These
+v3 = M9 ABI PIN per-model pricing + M10 ABI PIN on-chain enumeration; v4 =
+M12 ABI PIN removeModel + ModelRemoved, append-only). These
 are public interfaces — NOT configuration — so embedding them does not violate
 the zero-hardcode rule (no addresses, no chain ids appear here).
 """
@@ -147,6 +148,17 @@ REGISTRY_ABI = [
         "outputs": [],
         "stateMutability": "nonpayable",
     },
+    # Registry v4 (M12 ABI PIN 「M12」 — append-only, v3 face unchanged):
+    # model-level removal from the CALLER'S OWN listing (caller == operator).
+    # models[]/prices[] lose the SAME index (swap-and-pop); RemoveLastModel
+    # guards the last remaining model; ModelNotFound(model) reuses v2's error.
+    {
+        "type": "function",
+        "name": "removeModel",
+        "inputs": [{"name": "model", "type": "string", "internalType": "string"}],
+        "outputs": [],
+        "stateMutability": "nonpayable",
+    },
     {
         "type": "function",
         "name": "deactivate",
@@ -245,6 +257,17 @@ REGISTRY_ABI = [
         "anonymous": False,
         "inputs": [
             {"name": "operator", "type": "address", "indexed": True, "internalType": "address"},
+        ],
+    },
+    # Registry v4 (M12): emitted by removeModel(model) — operator is the
+    # caller (the listing operator), model the removed name.
+    {
+        "type": "event",
+        "name": "ModelRemoved",
+        "anonymous": False,
+        "inputs": [
+            {"name": "operator", "type": "address", "indexed": True, "internalType": "address"},
+            {"name": "model", "type": "string", "indexed": False, "internalType": "string"},
         ],
     },
 ]

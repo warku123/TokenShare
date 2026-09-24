@@ -73,13 +73,37 @@ _GAS_BUFFER = 1.25
 
 def _send(ctx: ChainContext, fn_call: Any, confirm_wait: float | None = None) -> Any:
     """Sign, send and await a transaction; raises on revert."""
+    return _submit_and_confirm(
+        w3=ctx.w3,
+        chain_id=int(ctx.cfg.chain_id),
+        address=ctx.address,
+        account=ctx.account,
+        fn_call=fn_call,
+        confirm_wait=confirm_wait,
+    )
+
+
+def _submit_and_confirm(
+    *,
+    w3: Web3,
+    chain_id: int,
+    address: str,
+    account: LocalAccount,
+    fn_call: Any,
+    confirm_wait: float | None = None,
+) -> Any:
+    """Shared tx plumbing: nonce -> build -> gas estimate (+25% buffer) ->
+    sign -> send -> receipt; raises TokenshareError on revert/failure.
+
+    `_send` is the ChainContext (buyer-key) entry point; `remove_model` calls
+    this directly because it signs with an operator key that is not part of
+    any EnvConfig (M12).
+    """
     if confirm_wait is None:
         try:
             confirm_wait = float(os.environ.get("TX_TIMEOUT_S", _TX_TIMEOUT_S_DEFAULT))
         except ValueError:
             confirm_wait = _TX_TIMEOUT_S_DEFAULT
-    w3 = ctx.w3
-    address = ctx.address
     try:
         nonce = w3.eth.get_transaction_count(address)
         tx = fn_call.build_transaction(
@@ -87,12 +111,12 @@ def _send(ctx: ChainContext, fn_call: Any, confirm_wait: float | None = None) ->
                 "from": address,
                 "nonce": nonce,
                 "gasPrice": w3.eth.gas_price,
-                "chainId": int(ctx.cfg.chain_id),
+                "chainId": int(chain_id),
             }
         )
         est = w3.eth.estimate_gas(tx)
         tx["gas"] = max(int(est * _GAS_BUFFER), int(tx.get("gas", est * _GAS_BUFFER)))
-        signed = ctx.account.sign_transaction(tx)
+        signed = account.sign_transaction(tx)
         raw = getattr(signed, "raw_transaction", None)
         if raw is None:  # eth_account < 0.13 attribute name
             raw = signed.rawTransaction
@@ -252,6 +276,61 @@ def get_sellers(w3: Web3, registry_addr: str, page: int = 100) -> list[str]:
 
 def usdc_allowance(ctx: ChainContext) -> int:
     return int(ctx.usdc.functions.allowance(ctx.address, ctx.cfg.escrow_addr).call())
+
+
+# ---------------------------------------------------------------------------
+# operator-side mutations (M12: signed by the listing OPERATOR, not the buyer)
+# ---------------------------------------------------------------------------
+
+
+def remove_model(
+    w3: Web3,
+    registry_addr: str,
+    sender_key: "str | LocalAccount",
+    model: str,
+    confirm_wait: float | None = None,
+) -> dict:
+    """Registry v4 (M12 ABI PIN) removeModel(model) — remove ONE model, and
+    its parallel prices[] entry (same index, swap-and-pop), from the CALLER'S
+    OWN listing. The caller must be the listing operator; inactive listings
+    are allowed (no active requirement).
+
+    On-chain guards: ModelNotFound(model) for an unlisted model (v2 error,
+    reused); RemoveLastModel() when `model` is the last remaining one —
+    deactivate() the whole listing instead. After removal
+    getPrice(operator, model) reverts, so in-flight payments settle-fail and
+    buyers refund after their TTL.
+
+    Sender: a LocalAccount, or a raw private-key hex string (derived here,
+    never logged). Gas estimation / signing / sending / receipt-status
+    assertion go through the shared _submit_and_confirm plumbing (same 1.25x
+    gas buffer + TX_TIMEOUT_S as every other mutation). The ModelRemoved
+    event is decoded from the receipt; a missing event falls back to the
+    caller-derived identity (defensive, mirrors lock/refund's lenient decode).
+    """
+    registry = w3.eth.contract(address=registry_addr, abi=REGISTRY_ABI)
+    if isinstance(sender_key, str):
+        from eth_account import Account as EthAccount
+
+        account = EthAccount.from_key(sender_key)
+    else:
+        account = sender_key
+
+    receipt = _submit_and_confirm(
+        w3=w3,
+        chain_id=w3.eth.chain_id,
+        address=account.address,
+        account=account,
+        fn_call=registry.functions.removeModel(str(model)),
+        confirm_wait=confirm_wait,
+    )
+    events = registry.events.ModelRemoved().process_receipt(receipt)
+    args = events[0]["args"] if events else {}
+    return {
+        "operator": str(args.get("operator", account.address)),
+        "model": str(args.get("model", model)),
+        "tx_hash": receipt["transactionHash"].hex(),
+    }
 
 
 # ---------------------------------------------------------------------------

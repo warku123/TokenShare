@@ -7,9 +7,13 @@ client functions are monkeypatched.
 """
 
 import json
+import types
 
 import httpx
+import pytest
 
+from eth_account import Account
+from eth_utils import to_checksum_address
 from typer.testing import CliRunner
 
 from tests.conftest import (
@@ -32,7 +36,7 @@ REQUIRED_ENV_VARS = ("BUYER_PRIVATE_KEY", "RPC_URL", "CHAIN_ID", "ESCROW_ADDR", 
 import tokenshare_cli.app as app_mod  # noqa: E402
 import tokenshare_cli.chain as chain_mod  # noqa: E402
 from tokenshare_cli.app import app  # noqa: E402
-from tokenshare_cli.errors import RelayError  # noqa: E402
+from tokenshare_cli.errors import RelayError, TokenshareError  # noqa: E402
 from tokenshare_cli.relay_client import RelayResponse  # noqa: E402
 
 runner = CliRunner()
@@ -52,7 +56,15 @@ def _set_full_env(monkeypatch) -> None:
 class FakeChain:
     """ChainContext stand-in; records invoked chain calls."""
 
-    def __init__(self, monkeypatch, *, listing=None, escrow_balance=10**9, payment=None):
+    def __init__(
+        self,
+        monkeypatch,
+        *,
+        listing=None,
+        escrow_balance=10**9,
+        payment=None,
+        remove_model_error: str | None = None,
+    ):
         self.calls = []
         # Registry v2 shape (M9): models + parallel per-model prices array.
         self.listing = listing or {
@@ -64,6 +76,9 @@ class FakeChain:
         }
         self.escrow_balance = escrow_balance
         self.payment = payment
+        self.remove_model_error = remove_model_error
+        self.remove_model_calls: list[tuple[str, str, str]] = []
+        self.w3 = types.SimpleNamespace()  # app passes ctx.w3 to remove_model
 
         ctx = self
         monkeypatch.setattr(chain_mod, "open_chain", lambda cfg: ctx)
@@ -76,6 +91,7 @@ class FakeChain:
         monkeypatch.setattr(chain_mod, "lock", ctx._lock)
         monkeypatch.setattr(chain_mod, "refund", ctx._refund)
         monkeypatch.setattr(chain_mod, "usdc_allowance", lambda c: 0)
+        monkeypatch.setattr(chain_mod, "remove_model", ctx._remove_model)
 
     @property
     def address(self):
@@ -99,6 +115,22 @@ class FakeChain:
     def _refund(self, c, payment_id):
         self.calls.append(("refund", payment_id))
         return {"payment_id": payment_id, "amount": 1_000_000, "tx_hash": "0xref", "escrow_balance": 9_000_000}
+
+    def _remove_model(self, w3, registry_addr, account, model):
+        """M12 removeModel stand-in. Three paths via remove_model_error:
+        None -> success (ModelRemoved decoded); a string containing
+        ModelNotFound / RemoveLastModel -> the corresponding on-chain guard,
+        raised exactly as chain.remove_model surfaces reverts."""
+        self.remove_model_calls.append(
+            (str(registry_addr), getattr(account, "address", str(account)), str(model))
+        )
+        if self.remove_model_error is not None:
+            raise TokenshareError(self.remove_model_error)
+        return {
+            "operator": getattr(account, "address", self.address),
+            "model": str(model),
+            "tx_hash": "0xremoved",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -578,6 +610,246 @@ def test_refund_flow(monkeypatch):
     assert result.exit_code == 0
     assert ("refund", 42) in fake.calls
     assert "refunded amount: 1000000 native (= 1 USDC)" in all_output(result)
+
+
+# ---------------------------------------------------------------------------
+# remove-model (M12 Registry v4 — operator-side)
+# ---------------------------------------------------------------------------
+
+
+def test_remove_model_success(monkeypatch):
+    """Default identity: BUYER_PRIVATE_KEY signs (demo SELLER==BUYER); the
+    helper receives (w3, REGISTRY_ADDR, operator account, model)."""
+    _set_full_env(monkeypatch)
+    fake = FakeChain(monkeypatch)
+    result = runner.invoke(app, ["remove-model", "gpt-4o-mini"])
+    assert result.exit_code == 0, all_output(result)
+    out = all_output(result)
+    assert "model removed: gpt-4o-mini" in out
+    assert f"operator {addr_of(BUYER_KEY)}" in out
+    assert "tx: 0xremoved" in out
+    assert fake.remove_model_calls == [
+        # load_config checksums REGISTRY_ADDR before it reaches the helper
+        (to_checksum_address(REGISTRY_ADDR), addr_of(BUYER_KEY), "gpt-4o-mini")
+    ]
+
+
+def test_remove_model_key_env_override_signs_as_operator(monkeypatch):
+    """--key-env points at any env var holding the real listing-operator key
+    (seller != buyer setups)."""
+    _set_full_env(monkeypatch)
+    monkeypatch.setenv("SELLER_PRIVATE_KEY", SELLER_KEY)
+    fake = FakeChain(monkeypatch)
+    result = runner.invoke(
+        app, ["remove-model", "gpt-4o-mini", "--key-env", "SELLER_PRIVATE_KEY"]
+    )
+    assert result.exit_code == 0, all_output(result)
+    assert fake.remove_model_calls[0][1] == addr_of(SELLER_KEY)
+
+
+def test_remove_model_model_not_found_hint(monkeypatch):
+    _set_full_env(monkeypatch)
+    FakeChain(
+        monkeypatch,
+        remove_model_error=(
+            "transaction failed: execution reverted "
+            'ModelNotFound("ghost-model")'
+        ),
+    )
+    result = runner.invoke(app, ["remove-model", "ghost-model"])
+    assert result.exit_code == 2
+    out = all_output(result)
+    assert "not in your listing" in out
+    assert "ModelNotFound" in out
+    assert "ghost-model" in out
+
+
+def test_remove_model_last_model_hint(monkeypatch):
+    _set_full_env(monkeypatch)
+    FakeChain(
+        monkeypatch,
+        remove_model_error="transaction failed: execution reverted RemoveLastModel()",
+    )
+    result = runner.invoke(app, ["remove-model", "gpt-4o-mini"])
+    assert result.exit_code == 2
+    out = all_output(result)
+    assert "LAST model" in out
+    assert "deactivate()" in out  # points at the PIN-suggested alternative
+    assert "RemoveLastModel" in out
+
+
+def test_remove_model_generic_tx_failure_passes_through(monkeypatch):
+    _set_full_env(monkeypatch)
+    FakeChain(monkeypatch, remove_model_error="transaction failed: node unreachable")
+    result = runner.invoke(app, ["remove-model", "gpt-4o-mini"])
+    assert result.exit_code == 2
+    assert "node unreachable" in all_output(result)
+
+
+def test_remove_model_missing_key_env(monkeypatch):
+    _set_full_env(monkeypatch)
+    monkeypatch.delenv("SELLER_PRIVATE_KEY", raising=False)
+    fake = FakeChain(monkeypatch)
+    result = runner.invoke(
+        app, ["remove-model", "m1", "--key-env", "SELLER_PRIVATE_KEY"]
+    )
+    assert result.exit_code == 2
+    out = all_output(result)
+    assert "SELLER_PRIVATE_KEY is not set" in out
+    assert fake.remove_model_calls == []  # failed before any chain call
+
+
+def test_remove_model_bad_key_value_withheld(monkeypatch):
+    _set_full_env(monkeypatch)
+    monkeypatch.setenv("SELLER_PRIVATE_KEY", "0xzz-nope")
+    FakeChain(monkeypatch)
+    result = runner.invoke(
+        app, ["remove-model", "m1", "--key-env", "SELLER_PRIVATE_KEY"]
+    )
+    assert result.exit_code == 2
+    out = all_output(result)
+    assert "SELLER_PRIVATE_KEY" in out
+    assert "valid private key" in out
+    assert "0xzz-nope" not in out  # the key value is never echoed
+
+
+class FakeRemoveRegistry:
+    """Raw web3 Registry surface for remove_model helper tests."""
+
+    def __init__(self, *, event_args=None):
+        self.remove_calls: list[str] = []
+        self.built: dict | None = None
+        self.event_args = event_args or {}
+
+    @property
+    def functions(self):
+        reg = self
+
+        def removeModel(model):
+            reg.remove_calls.append(str(model))
+
+            class _Fn:
+                def build_transaction(self, base):
+                    reg.built = base  # same object web3 would return
+                    return base
+
+            return _Fn()
+
+        return types.SimpleNamespace(removeModel=removeModel)
+
+    @property
+    def events(self):
+        reg = self
+
+        def ModelRemoved():
+            def process_receipt(receipt):
+                if reg.event_args is None:
+                    return []
+                return [{"args": dict(reg.event_args)}]
+
+            return types.SimpleNamespace(process_receipt=process_receipt)
+
+        return types.SimpleNamespace(ModelRemoved=ModelRemoved)
+
+
+def _fake_remove_w3(
+    registry: FakeRemoveRegistry,
+    *,
+    receipt_status: int = 1,
+    estimate_error: Exception | None = None,
+) -> types.SimpleNamespace:
+    class FakeEth:
+        chain_id = 31337
+        gas_price = 1_000
+        tx_hash = b"\x11" * 32
+
+        def contract(self, address, abi):
+            self.contract_addr = address
+            self.contract_abi = abi
+            return registry
+
+        def get_transaction_count(self, address):
+            return 7
+
+        def estimate_gas(self, tx):
+            if estimate_error is not None:
+                raise estimate_error
+            self.estimated_tx = dict(tx)
+            return 60_000
+
+        def send_raw_transaction(self, raw):
+            self.sent_raw = raw
+            return self.tx_hash
+
+        def wait_for_transaction_receipt(self, tx_hash, timeout=None, poll_latency=None):
+            return {"status": receipt_status, "transactionHash": tx_hash}
+
+    return types.SimpleNamespace(eth=FakeEth())
+
+
+def test_remove_model_helper_sends_operator_signed_tx():
+    """Helper plumbing: gas estimate +1.25 buffer, operator as `from`, event
+    decode wins over the fallback identity."""
+    from tokenshare_cli.chain import remove_model
+
+    operator_account = Account.from_key(BUYER_KEY)
+    registry = FakeRemoveRegistry(
+        event_args={"operator": operator_account.address, "model": "m1"}
+    )
+    w3 = _fake_remove_w3(registry)
+
+    result = remove_model(w3, REGISTRY_ADDR, operator_account, "m1")
+
+    assert registry.remove_calls == ["m1"]
+    assert registry.built == {
+        "from": operator_account.address,
+        "nonce": 7,
+        "gasPrice": 1_000,
+        "chainId": 31337,
+        "gas": 75_000,  # 60_000 * 1.25
+    }
+    assert result == {
+        "operator": operator_account.address,
+        "model": "m1",
+        "tx_hash": (b"\x11" * 32).hex(),
+    }
+    assert w3.eth.contract_addr == REGISTRY_ADDR  # bound to the configured registry
+
+
+def test_remove_model_helper_accepts_raw_key_string():
+    from tokenshare_cli.chain import remove_model
+
+    registry = FakeRemoveRegistry(event_args={"model": "m1"})
+    w3 = _fake_remove_w3(registry)
+
+    result = remove_model(w3, REGISTRY_ADDR, BUYER_KEY, "m1")
+
+    assert result["operator"] == addr_of(BUYER_KEY)  # derived from the raw key
+
+
+def test_remove_model_helper_reverted_receipt_raises():
+    from tokenshare_cli.chain import remove_model
+
+    registry = FakeRemoveRegistry(event_args={"model": "m1"})
+    w3 = _fake_remove_w3(registry, receipt_status=0)
+
+    with pytest.raises(TokenshareError, match="reverted on-chain"):
+        remove_model(w3, REGISTRY_ADDR, BUYER_KEY, "m1")
+
+
+def test_remove_model_helper_wraps_guard_revert():
+    """A revert at eth_estimateGas (ModelNotFound/RemoveLastModel) surfaces
+    as TokenshareError carrying the chain's message — the command layer maps
+    the tokens to hints."""
+    from tokenshare_cli.chain import remove_model
+
+    registry = FakeRemoveRegistry(event_args={"model": "m1"})
+    w3 = _fake_remove_w3(
+        registry, estimate_error=ValueError('execution reverted ModelNotFound("m1")')
+    )
+
+    with pytest.raises(TokenshareError, match="ModelNotFound"):
+        remove_model(w3, REGISTRY_ADDR, BUYER_KEY, "m1")
 
 
 # ---------------------------------------------------------------------------
