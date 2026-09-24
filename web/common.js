@@ -52,9 +52,15 @@ window.TS = (() => {
        append-only seller set — O(1) discovery for market/CLI */
     "function sellerCount() view returns (uint256)",
     "function getSellers(uint256 start, uint256 count) view returns (address[] sellers)",
+    /* M12 v4 (additions only, v3 face untouched): per-model delist —
+       swap-and-pop removes model+price at the same index of the parallel
+       arrays; the LAST model is guarded (RemoveLastModel → use deactivate);
+       NO active requirement (an inactive listing may prune models too) */
+    "function removeModel(string model)",
     "event Registered(address indexed operator, string endpoint, string[] models)",
     "event PriceUpdated(address indexed operator, string model, uint256 cachedIn, uint256 input, uint256 output)",
     "event Deactivated(address indexed operator)",
+    "event ModelRemoved(address indexed operator, string model)",
     /* custom errors (contracts/src/Registry.sol) — declared so ethers
        decodes reverts into e.revert.name for human-readable UI copy */
     "error AlreadyRegistered()",
@@ -62,6 +68,7 @@ window.TS = (() => {
     "error ModelNotFound()",
     "error EmptyModels()",
     "error LengthMismatch()",
+    "error RemoveLastModel()",
   ];
 
   const ERC20_ABI = [

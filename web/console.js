@@ -259,13 +259,23 @@
         `<p class="empty-hint">尚未登记。先预检加载 relay 真实模型面，再完成 <code class="inl">Registry.register</code>，` +
         `listing 即刻出现在市场页。</p>`;
     } else {
-      /* v2: one price triple per model — group rows by model */
+      /* v2: one price triple per model — group rows by model.
+         M12 (Registry v4): each row carries a small 下线 control (removeModel,
+         single tx) — deliberately lower-key than the card-level [ DEACTIVATE ].
+         The LAST model's control is disabled (contract guards RemoveLastModel):
+         listing-level offboarding stays on the big button. removeModel has no
+         active requirement → controls render for INACTIVE listings too. */
+      const multiModel = l.models.length > 1;
       const priceRows = l.models.map((m) => {
         const p = T.priceFor(l, m);
+        const del = multiModel
+          ? `<button type="button" class="mdel" data-model="${T.esc(m)}" title="下线该模型 — removeModel(&quot;${T.esc(m)}&quot;) · 单 tx · 即刻停止服务">[ 下线 ]</button>`
+          : `<button type="button" class="mdel" disabled title="最后一个模型请用卡底 [ DEACTIVATE ] — 合约守卫 RemoveLastModel">[ 下线 ]</button>`;
         return `<div class="mpr"><span class="mtag">${T.esc(m)}</span>` +
           (p
             ? `<span class="mono">cached $${T.fmtUsdc(p.cachedIn)} · in $${T.fmtUsdc(p.input)} · out $${T.fmtUsdc(p.output)}</span>`
             : `<span class="dim">no price on-chain</span>`) +
+          del +
           `</div>`;
       }).join("");
       box.innerHTML =
@@ -665,13 +675,16 @@
     $(id).addEventListener("input", onBaseInput));
   $("s-active").addEventListener("change", updatePreview);
 
-  /* human-readable copy for the Registry v2 custom errors (frozen contract) */
+  /* human-readable copy for the Registry custom errors (v2 frozen face +
+     v4 M12 additions — RemoveLastModel / ModelNotFound power the row-level
+     下线 flow's preflight humanization) */
   const REGISTRY_ERR_COPY = {
     AlreadyRegistered: "链上已存在 active listing，register 必 revert。唯一改形路径：deactivate → 重新 register（两笔交易）",
     NotActive: "listing 未激活（NotActive）— 改价需 active listing；改模型集/端点走 deactivate → register",
-    ModelNotFound: "模型不在链上 listing 中（ModelNotFound）— 增删模型需 deactivate → 重新 register",
+    ModelNotFound: "模型不在链上 listing 中（ModelNotFound）— 该行可能刚被移除（刷新后行消失）；加回模型走 deactivate → register，删模型用 MY LISTING 行级 [ 下线 ]",
     EmptyModels: "models 为空（EmptyModels）— 至少勾选一个",
     LengthMismatch: "models 与 prices 长度不一致（LengthMismatch）— 页面组装错误，请反馈",
+    RemoveLastModel: "最后一个模型不可移除（RemoveLastModel）— listing 需保留至少一个模型；整站下线请用卡底 [ DEACTIVATE ]",
   };
   function humanizeRegistryErr(e) {
     let key = (e && e.revert && e.revert.name && REGISTRY_ERR_COPY[e.revert.name]) ? e.revert.name : null;
@@ -797,10 +810,12 @@
     box.appendChild(el);
   };
 
-  /* — deactivate: confirm dialog (self-drawn on the wsel chrome —
+  /* — danger confirm dialog (self-drawn on the wsel chrome —
        createElement + textContent only, zero innerHTML, zero external
-       links; same injection discipline as the M11 wallet selector) — */
-  function confirmDeactivate() {
+       links; same injection discipline as the M11 wallet selector).
+       Shared by the card-level [ DEACTIVATE ] and the M12 row-level
+       model 下线 control. — */
+  function dangerConfirm({ ariaLabel, title, copy, det, goLabel }) {
     return new Promise((resolve) => {
       const overlay = document.createElement("div");
       overlay.className = "wsel-overlay";
@@ -808,28 +823,26 @@
       box.className = "wsel cnf";
       box.setAttribute("role", "alertdialog");
       box.setAttribute("aria-modal", "true");
-      box.setAttribute("aria-label", "confirm deactivate");
+      box.setAttribute("aria-label", ariaLabel);
 
       const bar = document.createElement("div");
       bar.className = "wsel-bar";
       for (let i = 0; i < 3; i++) { const d = document.createElement("span"); d.className = "tdot"; bar.appendChild(d); }
-      const title = document.createElement("span");
-      title.className = "wsel-title";
-      title.textContent = "confirm — registry.deactivate()";
-      bar.appendChild(title);
+      const titleEl = document.createElement("span");
+      titleEl.className = "wsel-title";
+      titleEl.textContent = title;
+      bar.appendChild(titleEl);
       box.appendChild(bar);
 
       const body = document.createElement("div");
       body.className = "cnf-body";
-      const copy = document.createElement("p");
-      copy.className = "cnf-copy";
-      copy.textContent =
-        "下线后：市场页 ACTIVE 展示即刻撤下（卡转 INACTIVE 灰态，买家不可再锁单）；" +
-        "已在途（Locked）的 payment 仍可正常 settle；随时可在右侧表单重新 register 恢复 ACTIVE。";
-      const det = document.createElement("p");
-      det.className = "cnf-det";
-      det.textContent = "deactivate() → active=false · 枚举条目保留（append-only，链上可审计）· 1 tx · 钱包签名";
-      body.append(copy, det);
+      const copyEl = document.createElement("p");
+      copyEl.className = "cnf-copy";
+      copyEl.textContent = copy;
+      const detEl = document.createElement("p");
+      detEl.className = "cnf-det";
+      detEl.textContent = det;
+      body.append(copyEl, detEl);
       box.appendChild(body);
 
       const foot = document.createElement("div");
@@ -844,7 +857,7 @@
       const go = document.createElement("button");
       go.type = "button";
       go.className = "btn btn-danger btn-sm";
-      go.textContent = "[ SIGN DEACTIVATE ]";
+      go.textContent = goLabel;
       foot.append(hint, cancel, go);
       box.appendChild(foot);
 
@@ -867,6 +880,29 @@
       cancel.focus(); /* destructive action never takes the default focus */
     });
   }
+
+  const confirmDeactivate = () => dangerConfirm({
+    ariaLabel: "confirm deactivate",
+    title: "confirm — registry.deactivate()",
+    copy:
+      "下线后：市场页 ACTIVE 展示即刻撤下（卡转 INACTIVE 灰态，买家不可再锁单）；" +
+      "已在途（Locked）的 payment 仍可正常 settle；随时可在右侧表单重新 register 恢复 ACTIVE。",
+    det: "deactivate() → active=false · 枚举条目保留（append-only，链上可审计）· 1 tx · 钱包签名",
+    goLabel: "[ SIGN DEACTIVATE ]",
+  });
+
+  /* M12 row-level delist — model name rides textContent only (chain data,
+     still treated as untrusted) */
+  const confirmRemoveModel = (model) => dangerConfirm({
+    ariaLabel: "confirm remove model",
+    title: "confirm — registry.removeModel()",
+    copy:
+      `下线模型 ${model}：该模型即刻停止服务（getPrice 即刻 revert，relay 对新调用回 400，买家不可再按它锁单调用）；` +
+      "已在途（Locked）payment 的 settle 将走 settle-failed，买家 ttl 到期后 refund 收回全款；" +
+      "下架后可随时经右侧表单 deactivate → register 把它加回来。",
+    det: `removeModel("${model}") → models[]/prices[] 平行数组同索引移除（swap-and-pop）· 1 tx · 钱包签名 · 事件 ModelRemoved(operator, model)`,
+    goLabel: "[ SIGN REMOVE ]",
+  });
 
   /* [ DEACTIVATE ] — one-tap offboarding from the MY LISTING card.
      Signer comes from finishConnect (the M11 wallet layer) — never
@@ -892,6 +928,68 @@
       }
     } catch (e) { formErr(myTx, e.shortMessage || e.message); }
   }));
+
+  /* — removeModel (M12, Registry v4): row-level 下线 inside MY LISTING.
+       Single tx per model — NOT a deactivate→register combo. Signer comes
+       from finishConnect (the M11 wallet layer) — never window.ethereum. — */
+  let rmBusy = false; /* one delist at a time — covers every row button */
+  const myListingBox = $("s-my-listing");
+  const syncMdelDisabled = () => {
+    const multi = !!(state.myListing && state.myListing.models && state.myListing.models.length > 1);
+    myListingBox.querySelectorAll(".mdel").forEach((b) => { b.disabled = rmBusy || !multi; });
+  };
+  myListingBox.addEventListener("click", async (e) => {
+    const btn = e.target.closest(".mdel");
+    if (!btn || btn.disabled || rmBusy) return;
+    rmBusy = true;
+    syncMdelDisabled(); /* freeze all rows for the duration of the op */
+    try { await removeModelFlow(btn.dataset.model); }
+    finally {
+      rmBusy = false;
+      /* success/revert paths re-render the rows (fresh disabled states);
+         only the dialog-cancel path touches the old DOM */
+      syncMdelDisabled();
+    }
+  });
+
+  async function removeModelFlow(model) {
+    if (needWallet() || needConfig()) return;
+    const mine = state.myListing;
+    /* stale-card guards — chain truth is re-read after every outcome */
+    if (!mine || !mine.registered) return;
+    if (!mine.models.includes(model) || mine.models.length <= 1) {
+      await loadMyListing({ prefill: false });
+      return;
+    }
+    if (!(await confirmRemoveModel(model))) return;
+    myTx.innerHTML = "";
+    const reg = T.registry(state.signer);
+    try {
+      /* staticCall preflight → humanized revert (ModelNotFound on a stale
+         row / RemoveLastModel on a chain-state race) without spending a
+         wallet signature */
+      const pf = await preflight(() => reg.removeModel.staticCall(model));
+      if (pf) {
+        formErr(myTx, `${model}: ${pf.text}`);
+        await loadMyListing({ prefill: false });
+        return;
+      }
+      const rcpt = await T.runTx(T.txLine(myTx, `removeModel(${model})`), reg.removeModel(model));
+      if (rcpt) {
+        /* chain-truth refresh: the row disappears from MY LISTING; buyer
+           selects / lock info / call-model dropdown resync off getListing
+           (one model fewer, naturally). Market pages read getListing live
+           on their own renders. Form edits survive (prefill: false). */
+        await Promise.all([loadMyListing({ prefill: false }), loadListingsIntoSelects()]);
+      } else {
+        await loadMyListing({ prefill: false });
+      }
+    } catch (e) {
+      const hz = humanizeRegistryErr(e);
+      formErr(myTx, hz ? hz.text : (e.shortMessage || e.message));
+      await loadMyListing({ prefill: false });
+    }
+  }
 
   /* — upstream precheck card — shares runVerify with the register form:
        a successful run feeds accessible_models into the form chips (联动) */

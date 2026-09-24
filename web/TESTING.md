@@ -68,6 +68,13 @@ Monad testnet (chainId 10143) · Escrow/Registry/USDC 已部署（见 `web/confi
 - [ ] 成功后：MY LISTING STATUS 变 INACTIVE 灰徽章（pulse 停止）+ PRICES 区弱化 + 停用说明行（指引回表单重注册）；买家下拉该 seller 变 `(inactive)` disabled；market.html 刷新后该卡 INACTIVE 灰态、首页 ACTIVE 统计减一（append-only 枚举不删条目）
 - [ ] **deactivate → 重注册回环**：下线后表单勾 LISTING ACTIVE → 预览**直走** `register(…)` 单笔（**不**进 deactivate→register 两步）→ 一笔签名 → STATUS 回 ACTIVE、市场页恢复可购；反向 stale（链上已 active 而本地不知）时 AlreadyRegistered 红条 + 一键两步按钮依旧生效
 - [ ] deactivate 失败兜底：链上已 inactive 而本地 stale 时点 `[ DEACTIVATE ]` → tx 行红（NotActive revert），卡片自动重读链上真值并收起按钮，表单内容不被清
+- [ ] **模型级下线（M12 · Registry v4 removeModel）**：MY LISTING 的 PRICES /1M 区每模型行末尾有小型 `[ 下线 ]` 链接（红系弱样式，视觉档位低于卡底 `[ DEACTIVATE ]` 大按钮）；active 与 inactive listing 均显示（合约无 active 要求）
+- [ ] 确认弹窗：终端风 alertdialog（红标题 `confirm — registry.removeModel()`），文案三要素齐全=①该模型**即刻停止服务**（getPrice revert → relay 对新调用 400）②**在途（Locked）payment 将 settle-failed，买家 ttl 后 refund 收回全款**③下架后可 register 加回；Esc / 点遮罩 / `[ CANCEL ]` 关闭且**不发交易**；默认焦点在 CANCEL
+- [ ] **单 tx**：确认后先 `staticCall` 预演（revert 人话化、不弹钱包）→ 钱包仅弹**一笔** `removeModel(model)` 签名 → tx 行 pending(amber)→hash（可点 explorer)→confirmed（绿）；操作期间全部行级按钮 disabled 防重，结束/取消后恢复正确态
+- [ ] **行消失+联动**：成功后 MY LISTING 重读 getListing，该模型行消失；买家 LOCK 卖家信息、CALL DEMO 模型下拉同步少一模型（同源 getListing）；market.html 下次刷新该卡少一模型 chip；表单内未提交的编辑不被清（prefill 跳过）
+- [ ] **末模型守卫（禁点方案）**：仅剩 1 个模型时其 `[ 下线 ]` 为 disabled 灰态，title 提示「最后一个模型请用卡底 [ DEACTIVATE ]」；竞争兜底=卡片 stale（另一窗口已删到只剩一个）时点下线 → staticCall 捕 `RemoveLastModel` → 人话红条「最后一个模型不可移除…整站下线请用 [ DEACTIVATE ]」且不弹钱包
+- [ ] stale 行兜底：另一窗口已移除该模型后本地仍显示 → 点 `[ 下线 ]` → staticCall 捕 `ModelNotFound` → 人话红条 + 卡片自动重读（行消失），不弹钱包
+- [ ] **重注册回环**：移除某模型后，右侧表单重新勾选该模型并提交 → 走 deactivate→register 两步流 → 该模型行带价复活（价随模型走：prices ∥ models 同索引）；`ModelRemoved(operator, model)` 事件可在 explorer tx 日志核对
 
 ## Buyer tab
 
