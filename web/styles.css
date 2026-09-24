@@ -244,18 +244,36 @@ h1 {
   font-family: var(--mono); font-size: 11px; color: var(--dim);
   border: 1px solid var(--line); padding: 3px 8px; background: var(--bg-2);
 }
+/* chips grow to fill their wrap row — no ragged orphan lines */
+.ls-models .mtag { flex: 1 1 auto; text-align: center; }
 
-.ls-prices { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid var(--line); }
-.ls-price { padding: 12px 10px; text-align: left; }
+/* clickable model selector (v2 per-model pricing) */
+.msel { cursor: pointer; transition: color .2s, border-color .2s, background .2s; }
+.msel:hover { color: var(--text); border-color: var(--line-hi); }
+.msel:focus-visible { outline: 1px solid var(--green-dim); outline-offset: 2px; }
+.msel[aria-pressed="true"] {
+  color: var(--green); border-color: var(--green-dim);
+  background: rgba(61,220,151,0.09); box-shadow: inset 0 -1px 0 var(--green-dim);
+}
+
+/* three tier cells — minmax(0,1fr) + compact type keep $x.xxxxxx inside
+   the frame at the 340px card minimum (was 17px + " /1M" → overflow).
+   mono advance = 0.6em: 13.5px → "$48.000000" ≈ 78px vs 84px cell content */
+.ls-prices { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--line); }
+.ls-price { padding: 10px 7px; text-align: left; min-width: 0; }
 .ls-price + .ls-price { border-left: 1px solid var(--line); }
 .ls-price .tier { font-family: var(--mono); font-size: 9px; letter-spacing: 0.14em; color: var(--faint); display: block; margin-bottom: 6px; }
 .ls-price .usd {
-  font-family: var(--mono); font-size: 17px; color: var(--text);
+  font-family: var(--mono); font-size: 13.5px; color: var(--text);
   font-variant-numeric: tabular-nums; letter-spacing: -0.02em; display: block;
   white-space: nowrap;
 }
-.ls-price .usd b { font-weight: 400; color: var(--faint); font-size: 12px; }
-.ls-price .units { font-family: var(--mono); font-size: 9.5px; color: var(--faint); display: block; margin-top: 4px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ls-price .units { font-family: var(--mono); font-size: 8.5px; color: var(--faint); display: block; margin-top: 4px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ls-prices-cap { font-family: var(--mono); font-size: 9px; color: var(--faint); letter-spacing: 0.06em; margin-top: -8px; }
+.ls-prices-empty {
+  border: 1px dashed var(--line); padding: 14px 10px; text-align: center;
+  font-family: var(--mono); font-size: 10.5px; color: var(--faint); letter-spacing: 0.04em;
+}
 
 .ls-meta {
   display: flex; justify-content: space-between; align-items: center; gap: 6px 10px;
@@ -562,7 +580,8 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
 .model-checks { display: flex; flex-wrap: wrap; gap: 8px; }
 .model-checks:empty { display: none; }
 .mcheck {
-  display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px; cursor: pointer;
+  flex: 1 1 auto; /* balanced wrap rows, same as market chips */
   font-family: var(--mono); font-size: 12px; color: var(--dim);
   border: 1px solid var(--line); background: var(--bg-2); padding: 6px 10px;
   transition: color .2s, border-color .2s, background .2s;
@@ -578,6 +597,28 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
 .model-verify-note.ok { color: var(--green); }
 .model-verify-note.err { color: var(--red); }
 .model-verify-note.warn { color: var(--amber); }
+
+/* per-model price overrides (Registry v2 register form) */
+.model-prices { display: flex; flex-direction: column; gap: 6px; }
+.model-prices:empty { display: none; }
+.mprice {
+  display: grid; grid-template-columns: minmax(0, 1.3fr) repeat(3, minmax(0, 1fr));
+  gap: 6px; align-items: center;
+}
+.mprice-head span {
+  font-family: var(--mono); font-size: 8.5px; letter-spacing: 0.14em; color: var(--faint); padding: 0 2px;
+}
+.mprice-name {
+  font-family: var(--mono); font-size: 11px; color: var(--dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mprice input[type="text"] { padding: 7px 8px; font-size: 11.5px; }
+
+/* per-model price rows inside kv cards (MY LISTING / buyer lock info) */
+.mpr { display: flex; justify-content: flex-end; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.mpr + .mpr { margin-top: 5px; }
+.mpr .mtag { margin-left: 0; flex: none; }
+.mpr .mono { font-size: 11.5px; }
 
 .mswitch { display: flex; align-items: flex-start; gap: 10px; cursor: pointer; }
 .mswitch input { accent-color: var(--green); width: 14px; height: 14px; margin-top: 1px; }
@@ -614,6 +655,8 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
 .txl.is-bad { border-color: rgba(224,108,96,0.45); }
 .txl.is-bad .txl-dot { background: var(--red); }
 .txl.is-bad .txl-state { color: var(--red); }
+.txl.is-skip { opacity: 0.55; border-style: dashed; }
+.txl.is-skip .txl-state { color: var(--faint); }
 .txl-dots i { font-style: normal; animation: pulse 1.2s ease infinite; }
 .txl-dots i:nth-child(2) { animation-delay: .2s; }
 .txl-dots i:nth-child(3) { animation-delay: .4s; }

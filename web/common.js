@@ -35,18 +35,29 @@ window.TS = (() => {
     "event Refunded(uint256 indexed paymentId, address indexed buyer, uint256 amount, address indexed caller)",
   ];
 
+  /* Registry v2 (M9, contracts/src/Registry.sol): per-model pricing.
+     Price = tuple(uint256 cachedIn, uint256 input, uint256 output), 6dp
+     native units per 1M tokens. getListing returns ONE Listing struct
+     (single tuple output — the wire encoding wraps the fields in an extra
+     offset, so the ABI must declare the nested tuple, not flat fields).
+     register takes the FULL parallel Price[] in one tx (atomic); per-model
+     price changes go through updateModelPrice(model, price) afterwards. */
   const REGISTRY_ABI = [
-    "function getListing(address operator) view returns (address listingOperator, string endpoint, string[] models, uint256 priceCachedIn, uint256 priceInput, uint256 priceOutput, bool active)",
-    "function register(string endpoint, string[] models, uint256 priceCachedIn, uint256 priceInput, uint256 priceOutput)",
-    "function updatePrice(uint256 priceCachedIn, uint256 priceInput, uint256 priceOutput)",
+    "function getListing(address operator) view returns (tuple(address operator, string endpoint, string[] models, tuple(uint256 cachedIn, uint256 input, uint256 output)[] prices, bool active) listing)",
+    "function getPrice(address operator, string model) view returns (tuple(uint256 cachedIn, uint256 input, uint256 output) price)",
+    "function register(string endpoint, string[] models, tuple(uint256 cachedIn, uint256 input, uint256 output)[] prices)",
+    "function updateModelPrice(string model, tuple(uint256 cachedIn, uint256 input, uint256 output) price)",
     "function deactivate()",
+    "event Registered(address indexed operator, string endpoint, string[] models)",
+    "event PriceUpdated(address indexed operator, string model, uint256 cachedIn, uint256 input, uint256 output)",
+    "event Deactivated(address indexed operator)",
     /* custom errors (contracts/src/Registry.sol) — declared so ethers
        decodes reverts into e.revert.name for human-readable UI copy */
     "error AlreadyRegistered()",
-    "error NotRegistered()",
-    "error ListingInactive()",
-    "error EmptyEndpoint()",
+    "error NotActive()",
+    "error ModelNotFound()",
     "error EmptyModels()",
+    "error LengthMismatch()",
   ];
 
   const ERC20_ABI = [
@@ -148,17 +159,30 @@ window.TS = (() => {
   /* ── listings ────────────────────────────────────────────── */
   async function fetchListing(provider, operator) {
     const l = await registry(provider).getListing(operator);
+    const li = l.listing || l[0]; /* named tuple access, positional fallback */
+    const models = (li.models || []).filter((m) => m && m.trim() !== ""); // PIN: empty strings filtered
+    /* v2: prices is a Price[] PARALLEL to models — prices[i] prices models[i].
+       Keep BigInts; guard against short arrays (corrupt/old contracts). */
+    const prices = models.map((_, i) => {
+      const p = li.prices && li.prices[i];
+      return p ? { cachedIn: p.cachedIn, input: p.input, output: p.output } : null;
+    });
     return {
       operator,
-      registered: !isZeroAddr(l.listingOperator),
-      endpoint: l.endpoint,
-      models: (l.models || []).filter((m) => m && m.trim() !== ""), // PIN: empty strings filtered
-      priceCachedIn: l.priceCachedIn,
-      priceInput: l.priceInput,
-      priceOutput: l.priceOutput,
-      active: l.active,
+      registered: !isZeroAddr(li.operator),
+      endpoint: li.endpoint,
+      models,
+      prices,
+      active: li.active,
     };
   }
+
+  /* tiered price triple for one model, or null when absent */
+  const priceFor = (listing, model) => {
+    if (!listing || !listing.models || !listing.prices) return null;
+    const i = listing.models.indexOf(model);
+    return i >= 0 ? listing.prices[i] || null : null;
+  };
 
   async function fetchListings(provider) {
     const out = [];
@@ -169,10 +193,19 @@ window.TS = (() => {
     return out;
   }
 
-  /* PIN minAmount estimate, native units:
-     (priceInput*PROMPT_TOKEN_CAP + priceOutput*COMPLETION_TOKEN_CAP) // 1e6 */
-  const minAmountEstimate = (listing) =>
-    (listing.priceInput * PROMPT_TOKEN_CAP + listing.priceOutput * COMPLETION_TOKEN_CAP) / 1000000n;
+  /* PIN minAmount estimate, native units, for ONE model's price triple:
+     (price.input*PROMPT_TOKEN_CAP + price.output*COMPLETION_TOKEN_CAP) // 1e6 */
+  const minAmountEstimate = (price) =>
+    (price.input * PROMPT_TOKEN_CAP + price.output * COMPLETION_TOKEN_CAP) / 1000000n;
+
+  /* strictest estimate across a listing's models — the safe lock bound */
+  const maxMinAmountEstimate = (listing) => {
+    const ps = (listing && listing.prices) || [];
+    return ps.filter(Boolean).reduce((mx, p) => {
+      const e = minAmountEstimate(p);
+      return e > mx ? e : mx;
+    }, 0n);
+  };
 
   /* ══════════════════════════════════════════════════════════
      EIP-191 request signature (buyer → relay) — PIN verbatim:
@@ -392,7 +425,8 @@ window.TS = (() => {
     readProvider, registry, escrow, usdc,
     toNative, fmtUsdc, fmtUsdcTrim, fmtInt,
     esc, truncAddr, addrLink, txLink, joinUrl, hostOf, sameAddr, isZeroAddr,
-    probeHealth, probeInfo, installCopyHandlers, fetchJson, fetchListing, fetchListings, minAmountEstimate,
+    probeHealth, probeInfo, installCopyHandlers, fetchJson, fetchListing, fetchListings,
+    priceFor, minAmountEstimate, maxMinAmountEstimate,
     RELAY_CHAT_PATH, buildEip191Message,
     RECEIPT_DOMAIN_NAME, RECEIPT_DOMAIN_VERSION, RECEIPT_TYPES,
     decodeReceiptHeader, verifyReceipt,

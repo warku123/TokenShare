@@ -80,13 +80,16 @@
           </div>
 
           <div class="fld-row">
-            <label class="fld"><span class="fld-lbl">CACHED IN <i>USDC / 1M tok</i></span>
+            <label class="fld"><span class="fld-lbl">BASE CACHED IN <i>USDC / 1M tok</i></span>
               <input type="text" inputmode="decimal" id="s-price-cached" placeholder="0.16"></label>
-            <label class="fld"><span class="fld-lbl">INPUT <i>USDC / 1M tok</i></span>
+            <label class="fld"><span class="fld-lbl">BASE INPUT <i>USDC / 1M tok</i></span>
               <input type="text" inputmode="decimal" id="s-price-input" placeholder="0.95"></label>
-            <label class="fld"><span class="fld-lbl">OUTPUT <i>USDC / 1M tok</i></span>
+            <label class="fld"><span class="fld-lbl">BASE OUTPUT <i>USDC / 1M tok</i></span>
               <input type="text" inputmode="decimal" id="s-price-output" placeholder="4.00"></label>
           </div>
+          <div class="model-prices" id="s-model-prices"></div>
+          <p class="fld-hint">Registry v2 按模型计价：勾选模型默认继承 BASE 三档价，在对应行单独改格即为该模型覆盖价；
+            改 BASE 时未动过的格子跟随同步。<code class="inl">register</code> 一次性携带全部价格（prices ∥ models）。</p>
 
           <label class="mswitch">
             <input type="checkbox" id="s-active" checked>
@@ -158,7 +161,7 @@
             <label class="fld"><span class="fld-lbl">TTL <i>seconds</i></span>
               <input type="number" id="b-ttl" value="600" min="60" step="60"></label>
           </div>
-          <p class="fld-hint" id="b-lock-hint">≥ 卖家三档价×caps 估计，参考市场页三档价</p>
+          <p class="fld-hint" id="b-lock-hint">≥ 卖家最贵模型×caps 估计，参考市场页各模型三档价</p>
           <button class="btn btn-wide" id="b-lock-btn" type="button">[ LOCK ]</button>
           <div class="txbox" id="b-lock-tx"></div>
           <div class="pid-box" id="b-payment-id"></div>

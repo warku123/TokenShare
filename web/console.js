@@ -230,11 +230,20 @@
         `<p class="empty-hint">尚未登记。先预检加载 relay 真实模型面，再完成 <code class="inl">Registry.register</code>，` +
         `listing 即刻出现在市场页。</p>`;
     } else {
+      /* v2: one price triple per model — group rows by model */
+      const priceRows = l.models.map((m) => {
+        const p = T.priceFor(l, m);
+        return `<div class="mpr"><span class="mtag">${T.esc(m)}</span>` +
+          (p
+            ? `<span class="mono">cached $${T.fmtUsdc(p.cachedIn)} · in $${T.fmtUsdc(p.input)} · out $${T.fmtUsdc(p.output)}</span>`
+            : `<span class="dim">no price on-chain</span>`) +
+          `</div>`;
+      }).join("");
       box.innerHTML =
         `<div class="kv"><span>STATUS</span><b class="${l.active ? "ok" : "dim"}">${l.active ? "ACTIVE" : "INACTIVE"}</b></div>` +
         `<div class="kv"><span>ENDPOINT</span><b class="mono wrap-anywhere">${T.esc(l.endpoint)}</b></div>` +
         `<div class="kv"><span>MODELS</span><b>${l.models.map((m) => `<span class="mtag">${T.esc(m)}</span>`).join(" ") || "—"}</b></div>` +
-        `<div class="kv"><span>PRICES /1M</span><b class="mono">cached $${T.fmtUsdc(l.priceCachedIn)} · in $${T.fmtUsdc(l.priceInput)} · out $${T.fmtUsdc(l.priceOutput)}</b></div>`;
+        `<div class="kv"><span>PRICES /1M</span><b>${priceRows || "—"}</b></div>`;
       /* M7 touchpoint: TEE / upstream-policy rows via GET /info — silent degrade */
       T.probeInfo(l.endpoint).then((info) => {
         if (!info) return;
@@ -248,12 +257,21 @@
         box.insertAdjacentHTML("beforeend", rows);
       }).catch(() => {});
       /* prefill form (skipped when refreshing for the AlreadyRegistered
-         two-step retry — user edits must survive) */
+         two-step retry — user edits must survive). v2: base inputs take the
+         FIRST model's price; every model's own triple seeds modelPrices. */
       if (prefill) {
         $("s-endpoint").value = l.endpoint;
-        $("s-price-cached").value = T.fmtUsdc(l.priceCachedIn);
-        $("s-price-input").value = T.fmtUsdc(l.priceInput);
-        $("s-price-output").value = T.fmtUsdc(l.priceOutput);
+        const first = l.prices[0];
+        if (first) {
+          $("s-price-cached").value = T.fmtUsdc(first.cachedIn);
+          $("s-price-input").value = T.fmtUsdc(first.input);
+          $("s-price-output").value = T.fmtUsdc(first.output);
+        }
+        l.models.forEach((m, i) => {
+          const p = l.prices[i];
+          if (p) modelPrices.set(m, { c: T.fmtUsdc(p.cachedIn), i: T.fmtUsdc(p.input), o: T.fmtUsdc(p.output) });
+        });
+        lastBase = readBase();
         $("s-active").checked = l.active;
         renderModelNote(); /* endpoint changed → re-evaluate precheck-source match */
       }
@@ -275,6 +293,103 @@
   function selectedModels() {
     return [...document.querySelectorAll("#s-model-checks input[name=s-model]:checked")].map((i) => i.value);
   }
+
+  /* ═══ per-model prices (Registry v2) ═══════════════════════
+     The three base inputs price the FIRST model; every checked model gets
+     its own triple in #s-model-prices, seeded from the base values and
+     editable. Fields still equal to the previous base value keep following
+     base edits (live inheritance); user-edited cells stick. */
+  const modelPrices = new Map();   // model → {c, i, o} decimal strings
+  let lastBase = { c: "", i: "", o: "" };
+
+  const readBase = () => ({
+    c: $("s-price-cached").value.trim(),
+    i: $("s-price-input").value.trim(),
+    o: $("s-price-output").value.trim(),
+  });
+
+  function ensurePriceSeed(model) {
+    if (!modelPrices.has(model)) {
+      const b = readBase();
+      modelPrices.set(model, { c: b.c, i: b.i, o: b.o });
+    }
+    return modelPrices.get(model);
+  }
+
+  function renderPriceRows() {
+    const zone = $("s-model-prices");
+    const models = selectedModels();
+    if (!models.length) { zone.innerHTML = ""; return; }
+    const rows = models.map((m) => {
+      const p = ensurePriceSeed(m);
+      return (
+        `<div class="mprice" data-model="${T.esc(m)}">` +
+        `<span class="mprice-name" title="${T.esc(m)}">${T.esc(m)}</span>` +
+        `<input type="text" inputmode="decimal" data-f="c" value="${T.esc(p.c)}" placeholder="cached" aria-label="${T.esc(m)} cached-in price, USDC per 1M tokens">` +
+        `<input type="text" inputmode="decimal" data-f="i" value="${T.esc(p.i)}" placeholder="input" aria-label="${T.esc(m)} input price, USDC per 1M tokens">` +
+        `<input type="text" inputmode="decimal" data-f="o" value="${T.esc(p.o)}" placeholder="output" aria-label="${T.esc(m)} output price, USDC per 1M tokens">` +
+        `</div>`
+      );
+    }).join("");
+    zone.innerHTML =
+      `<div class="mprice mprice-head" aria-hidden="true"><span>PER-MODEL PRICE</span><span>CACHED</span><span>INPUT</span><span>OUTPUT</span></div>` +
+      rows;
+  }
+
+  /* write state → rendered inputs without clobbering the focused cell */
+  function syncPriceRows() {
+    document.querySelectorAll("#s-model-prices .mprice[data-model]").forEach((row) => {
+      const p = modelPrices.get(row.dataset.model);
+      if (!p) return;
+      for (const f of ["c", "i", "o"]) {
+        const inp = row.querySelector(`input[data-f="${f}"]`);
+        if (inp && inp !== document.activeElement && inp.value !== p[f]) inp.value = p[f];
+      }
+    });
+  }
+
+  /* base edit → fields still inheriting (== previous base) follow along */
+  function onBaseInput() {
+    const nb = readBase();
+    for (const p of modelPrices.values()) {
+      if (p.c === lastBase.c) p.c = nb.c;
+      if (p.i === lastBase.i) p.i = nb.i;
+      if (p.o === lastBase.o) p.o = nb.o;
+    }
+    lastBase = nb;
+    syncPriceRows();
+    updatePreview();
+  }
+
+  /* parse a "USDC per 1M" decimal string to native 6dp, null when invalid */
+  function parsePriceStr(v) {
+    v = (v || "").trim();
+    if (!v || isNaN(Number(v)) || Number(v) < 0) return null;
+    try { return T.toNative(v); } catch { return null; } /* >6dp decimals etc. */
+  }
+
+  /* form prices as native BigInts, keyed by model, in selected order */
+  function collectPrices() {
+    const models = selectedModels();
+    const prices = new Map();
+    const bad = [];
+    for (const m of models) {
+      const s = modelPrices.get(m) || { c: "", i: "", o: "" };
+      const c = parsePriceStr(s.c), i = parsePriceStr(s.i), o = parsePriceStr(s.o);
+      if (c === null || i === null || o === null) bad.push(m);
+      prices.set(m, { c, i, o });
+    }
+    return { models, prices, bad };
+  }
+
+  /* which models' form prices differ from the on-chain triples */
+  const changedModels = (mine, models, prices) =>
+    models.filter((m) => {
+      const onchain = T.priceFor(mine, m);
+      const form = prices.get(m);
+      if (!onchain || !form || form.c === null || form.i === null || form.o === null) return true;
+      return onchain.cachedIn !== form.c || onchain.input !== form.i || onchain.output !== form.o;
+    });
 
   /* submit gate: models must come from a successful precheck of the
      endpoint currently in the form */
@@ -320,6 +435,7 @@
     } else {
       zone.innerHTML = "";
     }
+    renderPriceRows(); /* rows follow the checked set; reseeds new checks */
     renderModelNote();
     updatePreview();
   }
@@ -427,17 +543,27 @@
      authoritative checked set in sync */
   $("s-model-checks").addEventListener("change", (e) => {
     if (!e.target.matches("input[name=s-model]")) return;
-    if (e.target.checked) modelsState.checked.add(e.target.value);
-    else modelsState.checked.delete(e.target.value);
+    if (e.target.checked) {
+      modelsState.checked.add(e.target.value);
+      ensurePriceSeed(e.target.value); /* new check inherits the base price */
+    } else {
+      modelsState.checked.delete(e.target.value);
+      modelPrices.delete(e.target.value); /* re-check → fresh inherit */
+    }
+    renderPriceRows();
+    updatePreview();
+  });
+  /* per-model price edits → state (rows render dynamically → delegated) */
+  $("s-model-prices").addEventListener("input", (e) => {
+    const row = e.target.closest(".mprice[data-model]");
+    if (!row || !e.target.dataset.f) return;
+    const p = modelPrices.get(row.dataset.model);
+    if (p) p[e.target.dataset.f] = e.target.value.trim();
     updatePreview();
   });
 
   /* — register / update form — */
-  function readPrice(id) {
-    const v = $(id).value.trim();
-    if (!v || isNaN(Number(v)) || Number(v) < 0) return null;
-    try { return T.toNative(v); } catch { return null; } /* >6dp decimals etc. */
-  }
+  function readPrice(id) { return parsePriceStr($(id).value); }
   const PRICE_ERR = "amounts must be non-negative numbers, ≤6 decimals (USDC)";
 
   /* shape comparison must be order-insensitive — chips render in relay
@@ -446,10 +572,12 @@
     l.endpoint === endpoint &&
     JSON.stringify([...l.models].sort()) === JSON.stringify([...models].sort());
 
+  /* inline "(cached, input, output)" for preview lines — BigInt native or ? */
+  const fmtTriple = (p) => (p ? `(${p.c ?? "?"}, ${p.i ?? "?"}, ${p.o ?? "?"})` : "(?)");
+
   function updatePreview() {
     const endpoint = $("s-endpoint").value.trim();
-    const models = selectedModels();
-    const pc = readPrice("s-price-cached"), pi = readPrice("s-price-input"), po = readPrice("s-price-output");
+    const { models, prices, bad } = collectPrices();
     const active = $("s-active").checked;
     const lines = [];
     const mine = state.myListing;
@@ -458,23 +586,37 @@
       lines.push(`<span class="t-a">! ${T.esc(gateReason())}</span>`);
       lines.push("");
     }
+    if (active && bad.length) {
+      lines.push(`<span class="t-a">! ${T.esc(bad.join(", "))} — ${PRICE_ERR}</span>`);
+      lines.push("");
+    }
+    const pricesInline = models.map((m) => fmtTriple(prices.get(m))).join(", ");
     if (mine && mine.active && !active) {
       lines.push(`<span class="t-a">deactivate()</span> <span class="t-d">// listing stays auditable, stops serving</span>`);
       btn.textContent = "[ DEACTIVATE ]";
     } else if (mine && mine.active) {
       if (sameShape(mine, endpoint, models)) {
-        lines.push(`<span class="t-a">updatePrice(${pc ?? "?"}, ${pi ?? "?"}, ${po ?? "?"})</span> <span class="t-d">// prices only</span>`);
-        btn.textContent = "[ UPDATE PRICE ]";
+        /* v2: prices are per-model — one updateModelPrice per changed model */
+        const changed = changedModels(mine, models, prices);
+        if (!changed.length) {
+          lines.push(`<span class="t-d">// every model price matches on-chain — nothing to send</span>`);
+          btn.textContent = "[ PRICES UNCHANGED ]"; /* click → formErr, no tx */
+        } else {
+          changed.forEach((m, idx) => {
+            lines.push(`<span class="t-a">updateModelPrice("${T.esc(m)}", ${fmtTriple(prices.get(m))})</span> <span class="t-d">// ${idx + 1}/${changed.length} — one signature per model</span>`);
+          });
+          btn.textContent = changed.length === 1 ? "[ UPDATE PRICE · 1 TX ]" : `[ UPDATE PRICES · ${changed.length} TX ]`;
+        }
       } else {
         lines.push(`<span class="t-a">deactivate()</span> <span class="t-d">// step 1/2 — active listing can't be re-registered (AlreadyRegistered)</span>`);
-        lines.push(`<span class="t-g">register(endpoint, models, prices)</span> <span class="t-d">// step 2/2 — new shape takes over</span>`);
+        lines.push(`<span class="t-g">register(endpoint, models, prices)</span> <span class="t-d">// step 2/2 — new shape + per-model prices, one atomic tx</span>`);
         btn.textContent = "[ DEACTIVATE → RE-REGISTER · 2 TX ]";
       }
     } else if (active) {
       lines.push(`<span class="t-g">register(</span>`);
       lines.push(`  endpoint: <span class="t-s">"${T.esc(endpoint) || "…"}"</span>,`);
       lines.push(`  models: <span class="t-s">[${models.map((m) => `"${T.esc(m)}"`).join(", ") || "…"}]</span>,`);
-      lines.push(`  prices: <span class="t-n">${pc ?? "?"}, ${pi ?? "?"}, ${po ?? "?"}</span> <span class="t-d">// native 6dp, per 1M tokens</span>`);
+      lines.push(`  prices: <span class="t-n">[${pricesInline || "…"}]</span> <span class="t-d">// parallel to models · native 6dp per 1M tok</span>`);
       lines.push(`<span class="t-g">)</span>`);
       btn.textContent = "[ SUBMIT TO REGISTRY ]";
     } else {
@@ -483,17 +625,18 @@
     }
     $("s-preview").innerHTML = lines.join("\n");
   }
-  ["s-endpoint", "s-price-cached", "s-price-input", "s-price-output"].forEach((id) =>
-    $(id).addEventListener("input", () => { if (id === "s-endpoint") renderModelNote(); updatePreview(); }));
+  $("s-endpoint").addEventListener("input", () => { renderModelNote(); updatePreview(); });
+  ["s-price-cached", "s-price-input", "s-price-output"].forEach((id) =>
+    $(id).addEventListener("input", onBaseInput));
   $("s-active").addEventListener("change", updatePreview);
 
-  /* human-readable copy for the Registry custom errors (frozen contract) */
+  /* human-readable copy for the Registry v2 custom errors (frozen contract) */
   const REGISTRY_ERR_COPY = {
     AlreadyRegistered: "链上已存在 active listing，register 必 revert。唯一改形路径：deactivate → 重新 register（两笔交易）",
-    NotRegistered: "链上尚无 listing（NotRegistered）",
-    ListingInactive: "listing 当前 inactive — 改价需先重新 register 激活",
-    EmptyEndpoint: "endpoint 为空（EmptyEndpoint）",
+    NotActive: "listing 未激活（NotActive）— 改价需 active listing；改模型集/端点走 deactivate → register",
+    ModelNotFound: "模型不在链上 listing 中（ModelNotFound）— 增删模型需 deactivate → 重新 register",
     EmptyModels: "models 为空（EmptyModels）— 至少勾选一个",
+    LengthMismatch: "models 与 prices 长度不一致（LengthMismatch）— 页面组装错误，请反馈",
   };
   function humanizeRegistryErr(e) {
     let key = (e && e.revert && e.revert.name && REGISTRY_ERR_COPY[e.revert.name]) ? e.revert.name : null;
@@ -524,28 +667,39 @@
     btn.addEventListener("click", () => $("s-submit").click());
     txbox.appendChild(btn);
   }
-  /* after a successful register/updatePrice: refresh listing + re-run the
+  /* after a successful register/updateModelPrice: refresh listing + re-run the
      verify so chips & precheck card reflect the new on-chain truth */
   const reverifyAfterTx = (endpoint) => { runVerify(endpoint, "form").catch(() => {}); };
+
+  /* multi-tx update flow: models after a failure are not attempted —
+     list them as skipped so the partial state is explicit */
+  function markSkipped(txbox, models) {
+    for (const m of models) {
+      const line = T.txLine(txbox, `updateModelPrice(${m})`);
+      line.el.classList.add("is-skip");
+      line.el.querySelector(".txl-state").textContent = "skipped — 修复上方失败后重新提交";
+    }
+  }
 
   $("s-submit").addEventListener("click", () => guard($("s-submit"), async () => {
     if (needWallet() || needConfig()) return;
     const txbox = $("s-tx");
     txbox.innerHTML = "";
     const endpoint = $("s-endpoint").value.trim();
-    const models = selectedModels();
-    const pc = readPrice("s-price-cached"), pi = readPrice("s-price-input"), po = readPrice("s-price-output");
+    const { models, prices, bad } = collectPrices();
     const active = $("s-active").checked;
 
     if (active) {
       if (!endpoint) return formErr(txbox, "endpoint required (https://…:8787)");
       if (!modelsGateOk(endpoint)) return formErr(txbox, gateReason());
       if (!models.length) return formErr(txbox, "至少勾选一个实测可调的模型");
-      if (pc === null || pi === null || po === null) return formErr(txbox, PRICE_ERR + " — prices are USDC per 1M tokens");
+      if (bad.length) return formErr(txbox, `${bad.join(", ")} — ${PRICE_ERR} · prices are USDC per 1M tokens`);
     }
 
     const reg = T.registry(state.signer);
     const mine = state.myListing;
+    /* parallel Price[] for register: prices[i] prices models[i] */
+    const priceArr = models.map((m) => { const p = prices.get(m); return [p.c, p.i, p.o]; });
     try {
       if (mine && mine.active && !active) {
         const rcpt = await T.runTx(T.txLine(txbox, "deactivate()"), reg.deactivate());
@@ -554,23 +708,35 @@
       }
       if (mine && mine.active) {
         if (sameShape(mine, endpoint, models)) {
-          const pf = await preflight(() => reg.updatePrice.staticCall(pc, pi, po));
-          if (pf) return formErr(txbox, pf.text);
-          const rcpt = await T.runTx(T.txLine(txbox, "updatePrice(…)"), reg.updatePrice(pc, pi, po));
-          if (rcpt) { await loadMyListing(); reverifyAfterTx(endpoint); }
+          /* shape unchanged → per-model updateModelPrice, one tx per changed
+             model; each gets its own wallet signature, failures stop the
+             queue and mark the rest skipped */
+          const changed = changedModels(mine, models, prices);
+          if (!changed.length) return formErr(txbox, "所有模型价格与链上一致 — 无需发送");
+          for (let idx = 0; idx < changed.length; idx++) {
+            const m = changed[idx];
+            const p = prices.get(m);
+            const label = `updateModelPrice(${m})` + (changed.length > 1 ? ` — ${idx + 1}/${changed.length}` : "");
+            const pf = await preflight(() => reg.updateModelPrice.staticCall(m, [p.c, p.i, p.o]));
+            if (pf) { formErr(txbox, `${m}: ${pf.text}`); markSkipped(txbox, changed.slice(idx + 1)); return; }
+            const rcpt = await T.runTx(T.txLine(txbox, label), reg.updateModelPrice(m, [p.c, p.i, p.o]));
+            if (!rcpt) { markSkipped(txbox, changed.slice(idx + 1)); return; }
+          }
+          await loadMyListing(); reverifyAfterTx(endpoint);
           return;
         }
-        /* shape changed → the ONLY contract path: deactivate, then re-register */
+        /* shape changed → the ONLY contract path: deactivate, then re-register
+           (register carries the full parallel Price[] in one atomic tx) */
         const rcpt1 = await T.runTx(T.txLine(txbox, "deactivate() — step 1/2"), reg.deactivate());
         if (!rcpt1) return;
-        const pf = await preflight(() => reg.register.staticCall(endpoint, models, pc, pi, po));
+        const pf = await preflight(() => reg.register.staticCall(endpoint, models, priceArr));
         if (pf) { formErr(txbox, pf.text); return; }
-        const rcpt2 = await T.runTx(T.txLine(txbox, "register(…) — step 2/2"), reg.register(endpoint, models, pc, pi, po));
+        const rcpt2 = await T.runTx(T.txLine(txbox, "register(…) — step 2/2"), reg.register(endpoint, models, priceArr));
         if (rcpt2) { await loadMyListing(); reverifyAfterTx(endpoint); }
         return;
       }
       if (active) {
-        const pf = await preflight(() => reg.register.staticCall(endpoint, models, pc, pi, po));
+        const pf = await preflight(() => reg.register.staticCall(endpoint, models, priceArr));
         if (pf) {
           formErr(txbox, pf.text);
           if (pf.kind === "AlreadyRegistered") {
@@ -581,7 +747,7 @@
           }
           return;
         }
-        const rcpt = await T.runTx(T.txLine(txbox, "register(…)"), reg.register(endpoint, models, pc, pi, po));
+        const rcpt = await T.runTx(T.txLine(txbox, "register(…)"), reg.register(endpoint, models, priceArr));
         if (rcpt) { await loadMyListing(); reverifyAfterTx(endpoint); }
       }
     } catch (e) {
@@ -606,12 +772,19 @@
   function syncSellerInfo() {
     const l = listingOf($("b-seller").value);
     const info = $("b-lock-info");
-    if (!l) { info.innerHTML = `<p class="empty-hint">选择卖家后显示三档价与 minAmount 估计。</p>`; return; }
-    const min = T.minAmountEstimate(l);
+    if (!l) { info.innerHTML = `<p class="empty-hint">选择卖家后按模型显示三档价与 minAmount 估计。</p>`; return; }
+    /* v2: one price triple + min estimate per model */
+    const rows = l.models.map((m) => {
+      const p = T.priceFor(l, m);
+      if (!p) return "";
+      return `<div class="mpr"><span class="mtag">${T.esc(m)}</span>` +
+        `<span class="mono">c $${T.fmtUsdc(p.cachedIn)} · i $${T.fmtUsdc(p.input)} · o $${T.fmtUsdc(p.output)} · min ≥ $${T.fmtUsdc(T.minAmountEstimate(p))}</span></div>`;
+    }).join("");
+    const maxMin = T.maxMinAmountEstimate(l);
     info.innerHTML =
-      `<div class="kv"><span>PRICES /1M</span><b class="mono">cached $${T.fmtUsdc(l.priceCachedIn)} · in $${T.fmtUsdc(l.priceInput)} · out $${T.fmtUsdc(l.priceOutput)}</b></div>` +
-      `<div class="kv"><span>MIN ESTIMATE</span><b class="mono">≥ $${T.fmtUsdc(min)} <span class="dim">(in×200k + out×32k caps)</span></b></div>`;
-    $("b-lock-hint").textContent = `≥ 卖家三档价×caps 估计（$${T.fmtUsdc(min)}），参考市场页三档价`;
+      `<div class="kv"><span>PRICES /1M · MIN EST</span><b>${rows || "—"}</b></div>`;
+    $("b-lock-hint").textContent =
+      `≥ 最贵模型估计 $${T.fmtUsdc(maxMin)}（in×200k + out×32k caps，按调用模型取对应档）`;
     /* mirror into call tab */
     const csel = $("c-seller");
     if (!csel.value) { csel.value = l.operator; syncCallModels(); }
@@ -675,7 +848,7 @@
     if (!l) return formErr(txbox, "choose a seller");
     if (max === null || max <= 0n) return formErr(txbox, "enter a positive maxAmount (≤6 decimals)");
     if (!ttl || ttl < 60) return formErr(txbox, "ttl ≥ 60s");
-    const min = T.minAmountEstimate(l);
+    const min = T.maxMinAmountEstimate(l);
     if (max < min) formErr(txbox, `note: maxAmount below relay min estimate $${T.fmtUsdc(min)} — calls will 402`);
 
     const rcpt = await T.runTx(

@@ -93,39 +93,71 @@
     return (
       `<div class="ls-price">` +
       `<span class="tier">${tier}</span>` +
-      `<span class="usd">$${T.fmtUsdc(native)}<b> /1M</b></span>` +
-      `<span class="units">${T.fmtInt(native)} units · 6dp</span>` +
+      `<span class="usd">$${T.fmtUsdc(native)}</span>` +
+      `<span class="units">${T.fmtInt(native)} units</span>` +
       `</div>`
     );
+  }
+
+  /* v2 per-model pricing: chips are a single-select model picker; the
+     three price cells show the selected model's Price from the parallel
+     prices[] array. Selection persists across 30s auto-refreshes. */
+  const selByOperator = {};   // operator → last picked model
+  let cardData = new Map();   // operator → listing (for click re-renders)
+
+  function priceCells(l, model) {
+    const p = T.priceFor(l, model);
+    if (!p) return `<div class="ls-prices-empty">no on-chain price for ${T.esc(model)}</div>`;
+    return priceCell("CACHED IN", p.cachedIn) + priceCell("INPUT", p.input) + priceCell("OUTPUT", p.output);
   }
 
   function listingCard(l) {
     const badge = l.active
       ? `<span class="badge">ACTIVE</span>`
       : `<span class="badge off">INACTIVE</span>`;
+    const sel = l.models.includes(selByOperator[l.operator]) ? selByOperator[l.operator] : l.models[0];
     const models = l.models.length
-      ? l.models.map((m) => `<span class="mtag">${T.esc(m)}</span>`).join("")
+      ? l.models.map((m) =>
+          `<button type="button" class="mtag msel" aria-pressed="${m === sel}" data-model="${T.esc(m)}">${T.esc(m)}</button>`
+        ).join("")
       : `<span class="mtag">—</span>`;
+    const prices = l.models.length
+      ? `<div class="ls-prices">${priceCells(l, sel)}</div>` +
+        `<div class="ls-prices-cap">USDC per 1M tokens · native 6dp units</div>`
+      : `<div class="ls-prices-empty">no models listed — nothing priced on-chain</div>`;
     return (
-      `<article class="card listing rv in${l.active ? "" : " inactive"}" data-endpoint="${T.esc(l.endpoint)}">` +
+      `<article class="card listing rv in${l.active ? "" : " inactive"}" data-endpoint="${T.esc(l.endpoint)}" data-operator="${T.esc(l.operator)}">` +
         `<div class="ls-top">` +
           `<a class="ls-addr" data-copy="${T.esc(l.operator)}" href="${T.addrLink(l.operator)}" target="_blank" rel="noopener" title="${T.esc(l.operator)} — click copies address">${T.truncAddr(l.operator)}</a>` +
           `<span class="ls-health" title="relay /health probe pending"><span class="hdot"></span><span class="ls-health-lbl">probing</span></span>` +
           badge +
         `</div>` +
         `<p class="ls-endpoint" title="${T.esc(l.endpoint)}">${T.esc(T.hostOf(l.endpoint))}</p>` +
-        `<div class="ls-models">${models}</div>` +
-        `<div class="ls-prices">` +
-          priceCell("CACHED IN", l.priceCachedIn) +
-          priceCell("INPUT", l.priceInput) +
-          priceCell("OUTPUT", l.priceOutput) +
-        `</div>` +
+        `<div class="ls-models" role="group" aria-label="model selector — pick a model to see its prices">${models}</div>` +
+        prices +
         `<div class="ls-meta">` +
           `<span>operator <a href="${T.addrLink(l.operator)}" target="_blank" rel="noopener" class="ls-link">explorer ↗</a></span>` +
           `<span class="chip chip-monad">${T.esc((cfg.chainName || "MONAD").toUpperCase())} · ${cfg.chainId}</span>` +
         `</div>` +
       `</article>`
     );
+  }
+
+  /* delegated chip clicks — survives the full re-render each refresh */
+  if (listingsEl) {
+    listingsEl.addEventListener("click", (e) => {
+      const btn = e.target.closest(".msel");
+      if (!btn) return;
+      const card = btn.closest(".listing");
+      const l = card && cardData.get(card.dataset.operator);
+      if (!l) return;
+      const model = btn.dataset.model;
+      selByOperator[l.operator] = model;
+      card.querySelectorAll(".msel").forEach((b) =>
+        b.setAttribute("aria-pressed", String(b === btn)));
+      const grid = card.querySelector(".ls-prices");
+      if (grid) grid.innerHTML = priceCells(l, model);
+    });
   }
 
   async function probeAll(cards) {
@@ -212,6 +244,7 @@
     }
 
     listingsEl.innerHTML = visible.map(listingCard).join("");
+    cardData = new Map(visible.map((l) => [l.operator, l]));
     const cards = visible.map((l) => ({
       el: [...listingsEl.children].find((c) => c.dataset.endpoint === l.endpoint),
       endpoint: l.endpoint,
