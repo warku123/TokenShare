@@ -168,6 +168,18 @@ def verify_upstream_precheck(relay_url: str, models: list[str]) -> None:
           f"all listed models confirmed accessible ({', '.join(models)})")
 
 
+def gas_for(w3: Any, frm: str, fn_call: Any, fallback: int = 1_500_000) -> int:
+    """Estimate gas with a 30% + 30k buffer; fall back rather than fail
+    (estimation can be blocked by RPC quirks while broadcast succeeds).
+    Hardcoded caps previously caused out-of-gas reverts on multi-model
+    Registry v2 registers (4 models + Price structs > 400k)."""
+    try:
+        est = fn_call.estimate_gas({"from": frm})
+        return int(est * 1.3) + 30_000
+    except Exception:  # noqa: BLE001
+        return fallback
+
+
 def send_and_wait(w3: Any, seller: Any, tx: dict) -> str:
     """Sign + send + wait; returns the tx hash or exits on revert."""
     signed = seller.sign_transaction(tx)
@@ -259,7 +271,7 @@ def main() -> None:
             tx = registry.functions.updateModelPrice(model, price_tuple(prices))
             tx_hash = send_and_wait(w3, seller, tx.build_transaction(
                 {"from": seller.address, "nonce": w3.eth.get_transaction_count(seller.address),
-                 "gas": 400_000, "chainId": cfg["chain_id"]}
+                 "gas": gas_for(w3, seller.address, tx), "chainId": cfg["chain_id"]}
             ))
             got = decode_price_tuple(registry.functions.getPrice(operator, model).call())
             if got != prices:
@@ -275,11 +287,12 @@ def main() -> None:
     if not args.skip_verify:
         verify_upstream_precheck(args.relay, models)
 
-    tx_hash = send_and_wait(w3, seller, registry.functions.register(
+    reg_tx = registry.functions.register(
         args.endpoint, models, [price_tuple(p) for p in prices]
-    ).build_transaction(
+    )
+    tx_hash = send_and_wait(w3, seller, reg_tx.build_transaction(
         {"from": seller.address, "nonce": w3.eth.get_transaction_count(seller.address),
-         "gas": 400_000, "chainId": cfg["chain_id"]}
+         "gas": gas_for(w3, seller.address, reg_tx), "chainId": cfg["chain_id"]}
     ))
 
     listing_operator, _endpoint, got_models, got_prices, active = registry.functions.getListing(
