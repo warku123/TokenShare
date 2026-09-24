@@ -1,7 +1,8 @@
 /* TOKENSHARE — console (Seller / Buyer).
-   Every state change goes through window.ethereum (MetaMask);
-   private keys never touch the page. Reads fall back to the
-   public RPC so the market stays visible without a wallet. */
+   Every state change goes through the user-picked wallet (EIP-6963
+   discovery + selector in common.js; window.ethereum is only the
+   zero-6963 fallback). Private keys never touch the page. Reads fall
+   back to the public RPC so the market stays visible without a wallet. */
 "use strict";
 (() => {
   const T = window.TS;
@@ -11,9 +12,10 @@
 
   const $ = (id) => document.getElementById(id);
   const state = {
-    provider: null,   // BrowserProvider
+    provider: null,   // BrowserProvider (wraps the picked raw provider)
     signer: null,
     address: null,
+    walletName: "",   // picked wallet's display name (EIP-6963 info.name)
     listings: [],     // market listings (shared with buyer selects)
     myListing: null,
     lastPaymentId: null,
@@ -62,7 +64,9 @@
     walletAddr.textContent = T.truncAddr(state.address);
     walletAddr.href = T.addrLink(state.address);
     walletAddr.dataset.copy = state.address;
-    walletAddr.title = `${state.address} — click copies, ⧉ explorer via market page`;
+    walletAddr.title = `${state.address}${state.walletName ? ` · via ${state.walletName}` : ""} — click copies, ⧉ explorer via market page`;
+    const nameEl = $("wallet-name");
+    if (nameEl) nameEl.textContent = (state.walletName || "").toUpperCase() || "WALLET";
   }
 
   function renderNet(ok) {
@@ -80,7 +84,7 @@
   async function switchChain() {
     try {
       await ensureChain();
-      await connect(false);
+      await finishConnect(false);
     } catch (e) {
       if (!(e && (e.code === 4001 || e.code === "ACTION_REJECTED"))) console.error("chain switch failed:", e);
     }
@@ -107,48 +111,53 @@
   async function ensureChain() {
     const hex = T.chainIdHex();
     try {
-      await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: hex }] });
+      await T.wallet.request("wallet_switchEthereumChain", [{ chainId: hex }]);
       return true;
     } catch (e) {
       if (e && e.code === 4902) {
-        await window.ethereum.request({
-          method: "wallet_addEthereumChain",
-          params: [{
-            chainId: hex,
-            chainName: cfg.chainName,
-            nativeCurrency: cfg.nativeCurrency,
-            rpcUrls: [cfg.rpcUrl],
-            blockExplorerUrls: [cfg.explorer],
-          }],
-        });
+        await T.wallet.request("wallet_addEthereumChain", [{
+          chainId: hex,
+          chainName: cfg.chainName,
+          nativeCurrency: cfg.nativeCurrency,
+          rpcUrls: [cfg.rpcUrl],
+          blockExplorerUrls: [cfg.explorer],
+        }]);
         return true;
       }
       throw e;
     }
   }
 
-  async function connect(autoSwitch = true) {
-    if (!window.ethereum) {
-      connectBtn.textContent = "[ NO WALLET — INSTALL METAMASK ]";
-      connectBtn.disabled = true;
-      return;
+  /* shared post-connect tail — the wallet layer already holds the picked
+     raw provider; the BrowserProvider wrap lives HERE (single place).
+     getSigner stays popup-free: accounts were authorized by the selector's
+     eth_requestAccounts (interactive) or verified by bare eth_accounts
+     (silent resume) before we get here. */
+  async function finishConnect(autoSwitch) {
+    state.provider = T.wallet.browserProvider();
+    const net = await state.provider.getNetwork();
+    if (Number(net.chainId) !== Number(cfg.chainId)) {
+      renderNet(false);
+      if (!autoSwitch) { renderWallet(); return; }
+      await ensureChain();
+      state.provider = T.wallet.browserProvider(); /* re-create after a possible switch */
     }
+    state.signer = await state.provider.getSigner();
+    state.address = await state.signer.getAddress();
+    const sel = T.wallet.selected();
+    state.walletName = (sel && sel.info && sel.info.name) || "";
+    renderNet(true);
+    renderWallet();
+    await Promise.all([refreshBalances(), loadMyListing(), loadListingsIntoSelects()]);
+  }
+
+  /* CONNECT → the EIP-6963 selector modal; the single
+     eth_requestAccounts popup fires only after the user picks a row */
+  async function connect(autoSwitch = true) {
     try {
-      state.provider = new ethers.BrowserProvider(window.ethereum);
-      await state.provider.send("eth_requestAccounts", []);
-      const net = await state.provider.getNetwork();
-      if (Number(net.chainId) !== Number(cfg.chainId)) {
-        renderNet(false);
-        if (!autoSwitch) { renderWallet(); return; }
-        await ensureChain();
-      }
-      /* re-create after a possible switch */
-      state.provider = new ethers.BrowserProvider(window.ethereum);
-      state.signer = await state.provider.getSigner();
-      state.address = await state.signer.getAddress();
-      renderNet(true);
-      renderWallet();
-      await Promise.all([refreshBalances(), loadMyListing(), loadListingsIntoSelects()]);
+      const picked = await T.wallet.connectInteractive();
+      if (!picked) { renderWallet(); return; } /* cancelled, or the no-wallet empty state */
+      await finishConnect(autoSwitch);
     } catch (e) {
       renderNet(false);
       connectBtn.textContent = "[ CONNECT WALLET ]";
@@ -158,14 +167,26 @@
   }
 
   connectBtn.addEventListener("click", () => connect(true));
-  if (window.ethereum) {
-    window.ethereum.on("accountsChanged", () => { state.signer = null; state.address = null; renderWallet(); connect(false); });
-    window.ethereum.on("chainChanged", () => window.location.reload());
-    /* silent resume: previously-authorized wallet reconnects without a popup */
-    window.ethereum.request({ method: "eth_accounts" })
-      .then((accs) => { if (accs && accs.length) connect(false); })
-      .catch(() => {});
-  }
+
+  /* events ride the RAW picked provider inside the wallet layer (ethers
+     BrowserProvider forwards neither); the layer removeListener's the old
+     provider whenever the pick changes */
+  T.wallet.onChange({
+    accounts: (accs) => {
+      state.signer = null;
+      state.address = null;
+      state.walletName = "";
+      renderWallet();
+      /* non-empty = account switch inside the same wallet → silent re-sync,
+         no picker, no popup; empty = disconnected (layer already forgot rdns) */
+      if (accs && accs.length) finishConnect(false).catch((e) => console.error("account switch failed:", e));
+    },
+    chain: () => window.location.reload(),
+  });
+  /* silent resume: remembered rdns → bare eth_accounts — never pops */
+  T.wallet.resume()
+    .then((r) => { if (r) return finishConnect(false); })
+    .catch(() => {});
   renderWallet();
 
   const needWallet = () => {

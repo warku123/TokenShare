@@ -603,6 +603,285 @@ window.TS = (() => {
     }
   }
 
+  /* ══════════════════════════════════════════════════════════
+     M11 — EIP-6963 multi-wallet discovery + self-drawn selector.
+
+     Discovery: a lifetime window listener collects
+     "eip6963:announceProvider" (detail = {info:{uuid,name,icon,rdns},
+     provider}); "eip6963:requestProvider" is (re)dispatched once the
+     DOM is ready, so late-injected wallets still replay their
+     announcement. Dedupe by uuid, rdns as the fallback key.
+
+     PIN discipline:
+     · the ONLY popup in the whole flow is eth_requestAccounts on the
+       user-picked provider, fired after the selector row click;
+     · silent resume NEVER goes through getSigner (ethers auto-falls
+       back to eth_requestAccounts when eth_accounts is empty) — bare
+       provider.request({method:"eth_accounts"}) only;
+     · accountsChanged/chainChanged bind the RAW provider (ethers
+       BrowserProvider forwards neither); switching wallets
+       removeListener's the old binding first;
+     · window.ethereum is consulted ONLY when zero 6963 announcements
+       arrived (OKX hijacks it as "default wallet") — .providers
+       arrays are labeled best-effort off isMetaMask/isOkxWallet;
+     · selector rows are createElement("img") + textContent only —
+       no innerHTML (a data-URI SVG icon can carry script).
+     ══════════════════════════════════════════════════════════ */
+  const WALLET_RDNS_KEY = "tokenshare.wallet.rdns";
+
+  const wallet = (() => {
+    const announced = new Map(); /* dedupe key (uuid, else rdns) → {info, provider} */
+    const subs = { accounts: [], chain: [] };
+    let current = null;      /* picked {info, provider} */
+    let binding = null;      /* {provider, onAccounts, onChain} — raw listeners */
+    let modalList = null;    /* row container of the open selector (singleton) */
+    let modalResolve = null;
+    let modalTeardown = null;
+
+    function onAnnounce(ev) {
+      const d = ev && ev.detail;
+      if (!d || !d.info || !d.provider) return;
+      const { uuid, rdns } = d.info;
+      if (uuid && announced.has(uuid)) return;                                     /* uuid dedupe */
+      if (rdns && [...announced.values()].some((w) => w.info.rdns === rdns)) return; /* rdns dedupe */
+      announced.set(uuid || rdns || `anon#${announced.size}`, { info: d.info, provider: d.provider });
+      if (modalList) renderModalRows(); /* late announcement → live row in the open modal */
+    }
+    window.addEventListener("eip6963:announceProvider", onAnnounce); /* never removed */
+
+    const rediscover = () => window.dispatchEvent(new Event("eip6963:requestProvider"));
+    /* dispatch after DOMContentLoaded, then give late wallets a beat to
+       replay before resume() reads the announced set */
+    const announcedReady = new Promise((resolve) => {
+      const kick = () => { rediscover(); setTimeout(resolve, 150); };
+      if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", kick, { once: true });
+      } else kick();
+    });
+
+    /* legacy fallback — consulted ONLY when zero 6963 announcements arrived */
+    function legacyEntries() {
+      const eth = window.ethereum;
+      if (!eth) return [];
+      const label = (p) =>
+        p.isOkxWallet ? { name: "OKX Wallet", rdns: "com.okex.wallet" }
+        : p.isMetaMask ? { name: "MetaMask", rdns: "io.metamask" }
+        : p.isCoinbaseWallet ? { name: "Coinbase Wallet", rdns: "com.coinbase.wallet" }
+        : { name: "Injected Wallet", rdns: null };
+      const mk = (p) => {
+        const { name, rdns } = label(p);
+        return { info: { uuid: `legacy:${rdns || name}`, name, rdns, icon: "" }, provider: p };
+      };
+      return Array.isArray(eth.providers) && eth.providers.length ? eth.providers.map(mk) : [mk(eth)];
+    }
+
+    const list = () => (announced.size ? [...announced.values()] : legacyEntries());
+
+    const remember = (entry) => {
+      if (entry.info.rdns) { try { localStorage.setItem(WALLET_RDNS_KEY, entry.info.rdns); } catch { /* private mode */ } }
+    };
+    const forget = () => { try { localStorage.removeItem(WALLET_RDNS_KEY); } catch { /* ignore */ } };
+
+    function emit(kind, arg) {
+      for (const cb of subs[kind]) { try { cb(arg); } catch { /* one bad callback ≠ all */ } }
+    }
+    function unbind() {
+      if (!binding) return;
+      try { binding.provider.removeListener("accountsChanged", binding.onAccounts); } catch { /* ignore */ }
+      try { binding.provider.removeListener("chainChanged", binding.onChain); } catch { /* ignore */ }
+      binding = null;
+    }
+    /* bind the RAW provider — switching wallets unbinds the old one first */
+    function bind(provider) {
+      unbind();
+      const onAccounts = (accs) => {
+        const a = accs || [];
+        if (!a.length) forget(); /* disconnected inside the wallet → drop the memory */
+        emit("accounts", a);
+      };
+      const onChain = (chainId) => emit("chain", chainId);
+      provider.on("accountsChanged", onAccounts);
+      provider.on("chainChanged", onChain);
+      binding = { provider, onAccounts, onChain };
+    }
+
+    function select(entry) {
+      if (!current || current.provider !== entry.provider) bind(entry.provider);
+      current = entry;
+      return current;
+    }
+
+    /* ── selector modal (self-drawn; createElement + textContent only) ── */
+    function renderModalRows() {
+      const listEl = modalList;
+      if (!listEl) return;
+      listEl.textContent = ""; /* safe clear */
+      const entries = list();
+      if (!entries.length) {
+        /* 无钱包空态 — install links */
+        const empty = document.createElement("div");
+        empty.className = "wsel-empty";
+        const p1 = document.createElement("p");
+        p1.textContent = "未检测到钱包 — 没有 EIP-6963 公告，window.ethereum 也为空。";
+        const p2 = document.createElement("p");
+        p2.textContent = "安装一个后刷新本页：";
+        const links = document.createElement("div");
+        links.className = "wsel-install";
+        for (const [name, url] of [["MetaMask", "https://metamask.io/download/"], ["OKX Wallet", "https://www.okx.com/web3"]]) {
+          const a = document.createElement("a");
+          a.href = url;
+          a.target = "_blank";
+          a.rel = "noopener";
+          a.textContent = name + " ↗";
+          links.appendChild(a);
+        }
+        empty.append(p1, p2, links);
+        listEl.appendChild(empty);
+        return;
+      }
+      for (const entry of entries) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "wsel-item";
+        if (entry.info.icon) {
+          const img = document.createElement("img"); /* wallet-supplied data URI — never innerHTML */
+          img.className = "wsel-icon";
+          img.src = entry.info.icon;
+          img.alt = "";
+          btn.appendChild(img);
+        }
+        const name = document.createElement("span");
+        name.className = "wsel-name";
+        name.textContent = entry.info.name || "Injected Wallet";
+        btn.appendChild(name);
+        if (entry.info.rdns) {
+          const rd = document.createElement("span");
+          rd.className = "wsel-rdns";
+          rd.textContent = entry.info.rdns;
+          btn.appendChild(rd);
+        }
+        btn.addEventListener("click", () => closeModal(entry));
+        listEl.appendChild(btn);
+      }
+    }
+
+    function closeModal(result) {
+      const resolve = modalResolve;
+      if (modalTeardown) modalTeardown();
+      modalResolve = null;
+      modalList = null;
+      modalTeardown = null;
+      if (resolve) resolve(result || null);
+    }
+
+    function openSelector() {
+      if (modalResolve) closeModal(null); /* singleton */
+      return new Promise((resolve) => {
+        modalResolve = resolve;
+
+        const overlay = document.createElement("div");
+        overlay.className = "wsel-overlay";
+        const box = document.createElement("div");
+        box.className = "wsel";
+        box.setAttribute("role", "dialog");
+        box.setAttribute("aria-modal", "true");
+        box.setAttribute("aria-label", "select wallet");
+
+        const bar = document.createElement("div");
+        bar.className = "wsel-bar";
+        for (let i = 0; i < 3; i++) { const d = document.createElement("span"); d.className = "tdot"; bar.appendChild(d); }
+        const title = document.createElement("span");
+        title.className = "wsel-title";
+        title.textContent = "select wallet — eip-6963 discovery";
+        bar.appendChild(title);
+        box.appendChild(bar);
+
+        const listEl = document.createElement("div");
+        listEl.className = "wsel-list";
+        box.appendChild(listEl);
+
+        const foot = document.createElement("div");
+        foot.className = "wsel-foot";
+        const hint = document.createElement("span");
+        hint.className = "wsel-hint";
+        hint.textContent = "esc / click outside to close · the picked wallet pops once";
+        const cancel = document.createElement("button");
+        cancel.type = "button";
+        cancel.className = "wsel-cancel";
+        cancel.textContent = "[ CANCEL ]";
+        cancel.addEventListener("click", () => closeModal(null));
+        foot.append(hint, cancel);
+        box.appendChild(foot);
+
+        const onKey = (e) => {
+          if (e.key === "Escape") { e.stopPropagation(); closeModal(null); }
+        };
+        document.addEventListener("keydown", onKey, true);
+        overlay.addEventListener("click", (e) => { if (e.target === overlay) closeModal(null); });
+        const prevOverflow = document.body.style.overflow;
+        document.body.style.overflow = "hidden";
+
+        modalTeardown = () => {
+          document.removeEventListener("keydown", onKey, true);
+          document.body.style.overflow = prevOverflow;
+          overlay.remove();
+        };
+
+        overlay.appendChild(box);
+        document.body.appendChild(overlay);
+        modalList = listEl;
+        renderModalRows();
+      });
+    }
+
+    /* THE interactive path: selector → eth_requestAccounts on the pick
+       (the single wallet popup of the whole flow). Resolves
+       {provider, address, name}, or null on cancel / empty selection. */
+    async function connectInteractive() {
+      const entry = await openSelector();
+      if (!entry) return null;
+      const accs = await entry.provider.request({ method: "eth_requestAccounts" });
+      if (!accs || !accs.length) return null;
+      select(entry);
+      remember(entry);
+      return { provider: entry.provider, address: ethers.getAddress(accs[0]), name: entry.info.name };
+    }
+
+    /* silent session restore: remembered rdns → announced match → bare
+       eth_accounts. NEVER getSigner here — it would auto-pop
+       eth_requestAccounts when the wallet is unauthorized. */
+    async function resume() {
+      let rdns = null;
+      try { rdns = localStorage.getItem(WALLET_RDNS_KEY); } catch { return null; }
+      if (!rdns) return null;
+      await announcedReady;
+      const entry = list().find((w) => w.info.rdns === rdns);
+      if (!entry) return null; /* wallet absent this session — keep the memory */
+      let accs = [];
+      try { accs = await entry.provider.request({ method: "eth_accounts" }); } catch { return null; }
+      if (!accs || !accs.length) { forget(); return null; } /* 无账户清存 */
+      select(entry);
+      return { provider: entry.provider, address: ethers.getAddress(accs[0]), name: entry.info.name };
+    }
+
+    return {
+      list,
+      selected: () => current,
+      connectInteractive,
+      resume,
+      forget,
+      /* one encapsulation: raw picked provider → ethers wrapper */
+      browserProvider: () => (current ? new ethers.BrowserProvider(current.provider) : null),
+      request: (method, params) =>
+        current ? current.provider.request({ method, params }) : Promise.reject(new Error("no wallet selected")),
+      onChange(handlers) {
+        if (handlers && handlers.accounts) subs.accounts.push(handlers.accounts);
+        if (handlers && handlers.chain) subs.chain.push(handlers.chain);
+      },
+      _bound: () => binding, /* test introspection only */
+    };
+  })();
+
   return {
     cfg, cfgReady, chainIdHex,
     ESCROW_ABI, REGISTRY_ABI, ERC20_ABI, PAYMENT_STATES,
@@ -618,5 +897,6 @@ window.TS = (() => {
     decodeReceiptHeader, verifyReceipt,
     txLine, runTx, parseLockedPaymentId,
     locks, disputes, relayErrorCopy,
+    wallet, WALLET_RDNS_KEY,
   };
 })();

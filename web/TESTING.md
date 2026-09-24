@@ -5,12 +5,23 @@ Monad testnet (chainId 10143) · Escrow/Registry/USDC 已部署（见 `web/confi
 
 ## 前置条件
 
-1. **MetaMask** 已装。打开 console 页点 `[ CONNECT WALLET]`；若钱包不在 Monad testnet，页面自动 `wallet_addEthereumChain` 引导（chainId `0x279f` = 10143，RPC `https://testnet-rpc.monad.xyz`）。手动切换后页面自动重载。
+1. **钱包**（M11 起任一 EIP-6963 钱包）：MetaMask / OKX Wallet 均可，多装时点 `[ CONNECT WALLET ]` 在自绘选择器里选（详见下节）。连接后若钱包不在 Monad testnet，页面自动 `wallet_addEthereumChain` 引导（chainId `0x279f` = 10143，RPC `https://testnet-rpc.monad.xyz`）。手动切换后页面自动重载。
 2. **测试币**（两个账号各一份，卖方+买方）：
    - MON gas：https://faucet.monad.xyz
    - USDC：https://faucet.circle.com （选 Monad testnet）
 3. **卖方 relay** 跑在公网可达地址且 **CORS 已开**（`Access-Control-Allow-Origin` 覆盖页面源；响应头需 `Access-Control-Expose-Headers: X-Settle-Status, X-Receipt`），否则浏览器调不通 `/health`、`/verify-upstream`、`/v1/chat/completions`。
 4. 卖家地址已列入 `web/config.js` 的 `sellers`（市场页/买家下拉的数据源）。
+
+## 钱包选择器（M11 · EIP-6963 多钱包）
+
+- [ ] **双钱包选 MetaMask 不弹 OKX**：同时装 MetaMask + OKX（OKX 设为 Default Wallet 抢注 `window.ethereum`）→ 点 `[ CONNECT WALLET ]` 只弹**自绘选择器**（终端风 modal，无任何钱包扩展弹窗）；列表两行各带图标+名称+rdns；选 MetaMask 行后**只有 MetaMask** 弹连接授权，OKX 全程静默
+- [ ] **唯一弹窗**：从点 CONNECT 到连接成功整流仅一次 `eth_requestAccounts` 弹窗（点选行之后）；Esc / 点遮罩 / `[ CANCEL ]` 关闭选择器时不弹窗、不报错、按钮复原
+- [ ] **刷新静默恢复**：连接过 MetaMask 后刷新页面 → 零弹窗，地址/钱包名/USDC 余额/net 徽章自动恢复（localStorage `tokenshare.wallet.rdns` 记忆 → 按 rdns 匹配公告 → 裸 `eth_accounts` 探测；**不**走 getSigner 的隐式弹窗路径）
+- [ ] **断开重选**：在钱包扩展里断开本站连接 → 页面立即掉回未连接态（CONNECT 按钮复现）且 rdns 记忆被清，再点 CONNECT 可选另一钱包；钱包内切账户（accountsChanged 非空）→ 同一钱包静默换地址，不弹窗、不重开选择器
+- [ ] **事件绑原始 provider + 切换解绑**：连着 MetaMask 时在 OKX 扩展里切账户 → 页面无反应（监听器只绑 MetaMask 的原始 provider）；通过选择器改连 OKX 后，MetaMask 里切账户不再影响页面，OKX 里切账户则静默换地址（旧绑定已 removeListener）
+- [ ] **无钱包空态**：无扩展的纯净浏览器 → 点 CONNECT 弹选择器空态（虚线框 + MetaMask/OKX 安装链接），页面其余只读可用，console 无报错
+- [ ] **6963 零公告回退**：钱包不支持 6963（仅注入 `window.ethereum`，含 `providers` 数组）→ 选择器列出 legacy 行（按 isMetaMask/isOkxWallet 标注名称），可正常连接；有 6963 公告时 `window.ethereum` 完全不参与（OKX 抢注失效）
+- [ ] **图标注入面**：选择器行仅用 `createElement('img')` + `textContent` 渲染（DevTools 检查 DOM 无 innerHTML 注入路径）；伪造恶意 announce（icon 为带脚本的 data-URI SVG、name 含 `<img onerror>`）→ 名称按纯文本显示、无脚本执行
 
 ## 市场页（只读，无需钱包）
 
@@ -71,6 +82,6 @@ Monad testnet (chainId 10143) · Escrow/Registry/USDC 已部署（见 `web/confi
 ## 网络/断线走查
 
 - [ ] 钱包切到非 10143：net 徽章变红 + 琥珀色 banner + `[ SWITCH / ADD NETWORK ]` 按钮（徽章本体也可点）
-- [ ] 无 MetaMask：connect 按钮变为 `NO WALLET — INSTALL METAMASK`，页面其余只读可用
+- [ ] 无钱包：CONNECT 点开为选择器空态（含 MetaMask/OKX 安装链接）—— 详见「钱包选择器」节；页面其余只读可用
 - [ ] RPC 不可达：市场页显示琥珀色「RPC 不可达」提示而非崩溃；console 静默兜底
-- [ ] 未装钱包时刷新页面无 console 报错；已授权钱包刷新后静默恢复连接（不弹窗）
+- [ ] 未装钱包时刷新页面无 console 报错；已授权钱包刷新后静默恢复连接（不弹窗，走 rdns + eth_accounts）
