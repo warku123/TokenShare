@@ -5,7 +5,8 @@ Extracted verbatim from:
   contracts/out/Registry.sol/Registry.json
   contracts/out/MockUSDC.sol/MockUSDC.json  (standard OZ ERC-20, 6 decimals)
 
-Only the function entries the CLI actually calls are embedded. These are
+Only the function/event entries the CLI actually calls are embedded (Registry
+v2 = M9 ABI PIN 「M9 ABI PIN（Registry v2）」, per-model pricing). These are
 public interfaces — NOT configuration — so embedding them does not violate
 the zero-hardcode rule (no addresses, no chain ids appear here).
 """
@@ -101,7 +102,57 @@ ESCROW_ABI = [
     },
 ]
 
+# Registry v2 (M9 ABI PIN 「M9 ABI PIN（Registry v2）」, verbatim — no drift):
+#   struct Price { uint256 cachedIn; uint256 input; uint256 output; }
+#   struct Listing { address operator; string endpoint; string[] models;
+#                    Price[] prices; bool active; }   // prices parallel to models
+# Pricing is PER MODEL: the three-tier unit prices for a request come from
+# getPrice(operator, model); the pricing FORMULA is unchanged.
+_PRICE_COMPONENTS = [
+    {"name": "cachedIn", "type": "uint256", "internalType": "uint256"},
+    {"name": "input", "type": "uint256", "internalType": "uint256"},
+    {"name": "output", "type": "uint256", "internalType": "uint256"},
+]
+
 REGISTRY_ABI = [
+    {
+        "type": "function",
+        "name": "register",
+        "inputs": [
+            {"name": "endpoint", "type": "string", "internalType": "string"},
+            {"name": "models", "type": "string[]", "internalType": "string[]"},
+            {
+                "name": "prices",
+                "type": "tuple[]",
+                "internalType": "struct Registry.Price[]",
+                "components": _PRICE_COMPONENTS,
+            },
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable",
+    },
+    {
+        "type": "function",
+        "name": "updateModelPrice",
+        "inputs": [
+            {"name": "model", "type": "string", "internalType": "string"},
+            {
+                "name": "price",
+                "type": "tuple",
+                "internalType": "struct Registry.Price",
+                "components": _PRICE_COMPONENTS,
+            },
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable",
+    },
+    {
+        "type": "function",
+        "name": "deactivate",
+        "inputs": [],
+        "outputs": [],
+        "stateMutability": "nonpayable",
+    },
     {
         "type": "function",
         "name": "getListing",
@@ -110,17 +161,40 @@ REGISTRY_ABI = [
             {"name": "listingOperator", "type": "address", "internalType": "address"},
             {"name": "endpoint", "type": "string", "internalType": "string"},
             {"name": "models", "type": "string[]", "internalType": "string[]"},
-            {"name": "priceCachedIn", "type": "uint256", "internalType": "uint256"},
-            {"name": "priceInput", "type": "uint256", "internalType": "uint256"},
-            {"name": "priceOutput", "type": "uint256", "internalType": "uint256"},
+            {
+                "name": "prices",
+                "type": "tuple[]",
+                "internalType": "struct Registry.Price[]",
+                "components": _PRICE_COMPONENTS,
+            },
             {"name": "active", "type": "bool", "internalType": "bool"},
         ],
         "stateMutability": "view",
     },
+    {
+        "type": "function",
+        "name": "getPrice",
+        "inputs": [
+            {"name": "operator", "type": "address", "internalType": "address"},
+            {"name": "model", "type": "string", "internalType": "string"},
+        ],
+        "outputs": [
+            {
+                "name": "",
+                "type": "tuple",
+                "internalType": "struct Registry.Price",
+                "components": _PRICE_COMPONENTS,
+            }
+        ],
+        "stateMutability": "view",
+    },
     # Discovery source for `listings`: the Registry has NO on-chain
-    # enumeration, so sellers are collected via eth_getLogs over this event
-    # (verbatim from contracts/src/Registry.sol EVENTS; cross-checked by
-    # tests/test_listings.py against the .sol source).
+    # enumeration, so sellers are collected via eth_getLogs over this event.
+    # v2 (M9 PIN): the flat price fields are gone (prices are per-model now);
+    # the CLI scanner only consumes the indexed `operator` topic and reads the
+    # CURRENT per-model state via getListing. Signature cross-checked by
+    # tests/test_listings.py against the M9 PIN (and against
+    # contracts/src/Registry.sol once fix-17 lands the v2 source).
     {
         "type": "event",
         "name": "Registered",
@@ -129,9 +203,26 @@ REGISTRY_ABI = [
             {"name": "operator", "type": "address", "indexed": True, "internalType": "address"},
             {"name": "endpoint", "type": "string", "indexed": False, "internalType": "string"},
             {"name": "models", "type": "string[]", "indexed": False, "internalType": "string[]"},
-            {"name": "priceCachedIn", "type": "uint256", "indexed": False, "internalType": "uint256"},
-            {"name": "priceInput", "type": "uint256", "indexed": False, "internalType": "uint256"},
-            {"name": "priceOutput", "type": "uint256", "indexed": False, "internalType": "uint256"},
+        ],
+    },
+    {
+        "type": "event",
+        "name": "PriceUpdated",
+        "anonymous": False,
+        "inputs": [
+            {"name": "operator", "type": "address", "indexed": True, "internalType": "address"},
+            {"name": "model", "type": "string", "indexed": False, "internalType": "string"},
+            {"name": "cachedIn", "type": "uint256", "indexed": False, "internalType": "uint256"},
+            {"name": "input", "type": "uint256", "indexed": False, "internalType": "uint256"},
+            {"name": "output", "type": "uint256", "indexed": False, "internalType": "uint256"},
+        ],
+    },
+    {
+        "type": "event",
+        "name": "Deactivated",
+        "anonymous": False,
+        "inputs": [
+            {"name": "operator", "type": "address", "indexed": True, "internalType": "address"},
         ],
     },
 ]

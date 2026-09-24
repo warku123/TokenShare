@@ -44,7 +44,7 @@ Env vars required by every chain-touching command (no values are ever hardcoded)
 
 Optional env: SELLER_ADDR (default seller for call), PROMPT_TOKEN_CAP / COMPLETION_TOKEN_CAP (default lock sizing, mirrors relay defaults 200000 / 32000), TX_TIMEOUT_S (tx wait timeout).
 
-Commands: deposit (approve + deposit USDC into Escrow); lock (lock(seller, maxAmount, ttl=600) -> prints paymentId); call (pick seller -> lock NEW paymentId, or reuse via --payment-id -> read Registry listing.endpoint -> POST /v1/chat/completions with EIP-191 X-Payment-Id + X-Signature -> prints reply, X-Settle-Status, and verifies the EIP-712 X-Receipt against the Registry listing operator); balance (wallet USDC + withdrawable Escrow); refund (withdraw an expired lock after its TTL); disputes (list locally recorded receipt-verification disputes); verify-attestation (best-effort off-chain parse of a TEE attestation quote + optional on-chain digest comparison); listings (compare ACTIVE Registry listings — tiered prices + estimated per-call cost, cheapest first; sellers discovered via the Registered event, env LISTINGS_FROM_BLOCK tunes the scan start).
+Commands: deposit (approve + deposit USDC into Escrow); lock (lock(seller, maxAmount, ttl=600) -> prints paymentId); call (pick seller -> lock NEW paymentId, or reuse via --payment-id -> read Registry listing.endpoint -> POST /v1/chat/completions with EIP-191 X-Payment-Id + X-Signature -> prints reply, X-Settle-Status, and verifies the EIP-712 X-Receipt against the Registry listing operator); balance (wallet USDC + withdrawable Escrow); refund (withdraw an expired lock after its TTL); disputes (list locally recorded receipt-verification disputes); verify-attestation (best-effort off-chain parse of a TEE attestation quote + optional on-chain digest comparison); listings (compare ACTIVE Registry listings — per-model tiered prices + estimated per-call cost, cheapest first; sellers discovered via the Registered event, env LISTINGS_FROM_BLOCK tunes the scan start).
 
 Receipt verification (BUILD_SPEC §6.3): a failed X-Receipt check prints a warning and records the paymentId in the dispute ledger (default ~/.tokenshare/disputes.json; override with --disputes-file, review via the `disputes` command).
 
@@ -389,20 +389,28 @@ def _estimate_call_cost(
 
 @app.command("listings")
 def listings_cmd(
+    model: Optional[str] = typer.Option(
+        None,
+        "--model",
+        help="Only show rows for this model (each seller is priced per model in Registry v2).",
+    ),
     json_output: bool = typer.Option(
         False,
         "--json",
         help="Output structured JSON instead of a table (for scripts / the web console).",
     ),
 ) -> None:
-    """List ACTIVE Registry listings with tiered prices + estimated per-call cost.
+    """List ACTIVE Registry listings with per-model tiered prices + est. per-call cost.
 
-    Discovery: the Registry has no on-chain enumeration, so sellers are
-    collected via eth_getLogs over the Registered event (re-registers dedup;
-    per-seller CURRENT state comes from getListing). Set env
-    LISTINGS_FROM_BLOCK to start the scan closer to the Registry deployment
-    block on long chains. Rows are sorted by estimated per-call cost
-    (cheapest first); pick a seller's full address from the list for
+    Registry v2 (M9 ABI PIN): prices are PER MODEL — getListing returns
+    `models` and a parallel `prices` array, so every row is one
+    (operator, model) price pair. Discovery: the Registry has no on-chain
+    enumeration, so sellers are collected via eth_getLogs over the
+    Registered event (re-registers dedup; per-seller CURRENT state comes
+    from getListing). Set env LISTINGS_FROM_BLOCK to start the scan closer
+    to the Registry deployment block on long chains. Rows are sorted by
+    estimated per-call cost (cheapest first); with --model only that model's
+    rows are compared. Pick a seller's full address from the list for
     `call --seller` / `lock --seller`.
     """
     def body() -> None:
@@ -430,25 +438,31 @@ def listings_cmd(
                 ) from exc
             if not listing.get("active"):
                 continue
-            rows.append(
-                {
-                    "operator": operator,
-                    "endpoint": str(listing.get("endpoint") or ""),
-                    "models": [
-                        str(m)
-                        for m in (listing.get("models") or [])
-                        if str(m).strip()
-                    ],
-                    "priceCachedIn": int(listing["price_cached_in"]),
-                    "priceInput": int(listing["price_input"]),
-                    "priceOutput": int(listing["price_output"]),
-                    "estimatedCallCost": _estimate_call_cost(
-                        listing["price_input"], listing["price_output"],
-                        prompt_cap, completion_cap,
-                    ),
-                }
-            )
-        rows.sort(key=lambda r: (r["estimatedCallCost"], r["operator"].lower()))
+            models = [str(m) for m in (listing.get("models") or []) if str(m).strip()]
+            prices = list(listing.get("prices") or [])
+            # models and prices are parallel arrays (M9 ABI PIN); a malformed
+            # (short) prices tail is skipped instead of crashing the table.
+            for i, model_name in enumerate(models):
+                if i >= len(prices):
+                    continue
+                price = prices[i]
+                if model is not None and model_name != model:
+                    continue
+                rows.append(
+                    {
+                        "operator": operator,
+                        "endpoint": str(listing.get("endpoint") or ""),
+                        "model": model_name,
+                        "priceCachedIn": int(price["cached_in"]),
+                        "priceInput": int(price["input"]),
+                        "priceOutput": int(price["output"]),
+                        "estimatedCallCost": _estimate_call_cost(
+                            price["input"], price["output"],
+                            prompt_cap, completion_cap,
+                        ),
+                    }
+                )
+        rows.sort(key=lambda r: (r["estimatedCallCost"], r["operator"].lower(), r["model"]))
 
         if json_output:
             typer.echo(
@@ -458,6 +472,7 @@ def listings_cmd(
                         "registry": cfg.registry_addr,
                         "fromBlock": from_block,
                         "activeOnly": True,
+                        "model": model,
                         "count": len(rows),
                         "listings": rows,
                     },
@@ -474,20 +489,28 @@ def listings_cmd(
             )
             return
         if not rows:
+            if model is not None:
+                typer.echo(
+                    f"no ACTIVE listing serves model {model!r} "
+                    f"({len(seen_operators)} registered operator(s) scanned)."
+                )
+                return
             typer.echo(
                 f"{len(seen_operators)} registered operator(s), none ACTIVE — all "
                 "listings were deactivated after registration."
             )
             return
 
+        suffix = f", model {model!r}" if model is not None else ""
         typer.echo(
-            f"Active listings ({len(rows)}/{len(seen_operators)} sellers, chainId "
-            f"{cfg.chain_id}; Registered events scanned from block {from_block}), "
-            "sorted by estimated per-call cost:"
+            f"Active listings ({len(rows)} model price rows / {len(seen_operators)} "
+            f"seller(s), chainId {cfg.chain_id}{suffix}; Registered events scanned "
+            "from block "
+            f"{from_block}), sorted by estimated per-call cost:"
         )
         typer.echo("")
         header = [
-            "#", "operator", "endpoint", "models",
+            "#", "operator", "endpoint", "model",
             "cached/1M", "input/1M", "output/1M", "est/call",
         ]
         table = [header]
@@ -497,7 +520,7 @@ def listings_cmd(
                     str(i),
                     _short_addr(row["operator"]),
                     row["endpoint"] or "(none)",
-                    ",".join(row["models"]) or "(none)",
+                    row["model"],
                     display_usdc(row["priceCachedIn"]),
                     display_usdc(row["priceInput"]),
                     display_usdc(row["priceOutput"]),
@@ -515,12 +538,16 @@ def listings_cmd(
         typer.echo("")
         typer.echo(
             f"est/call = (priceInput*{prompt_cap} + priceOutput*{completion_cap})//1e6 "
-            "native USDC, 0 cached tokens assumed (cache hits bill at cached/1M, "
-            "so the real cost is lower)."
+            "native USDC for THAT model, 0 cached tokens assumed (cache hits bill "
+            "at cached/1M, so the real cost is lower)."
         )
         typer.echo("Full seller addresses (for --seller):")
-        for i, row in enumerate(rows, 1):
-            typer.echo(f"  {i:>2}  {row['operator']}")
+        printed_operators: set[str] = set()
+        for row in rows:
+            if row["operator"] in printed_operators:
+                continue
+            printed_operators.add(row["operator"])
+            typer.echo(f"  {row['operator']}  ({row['endpoint'] or '(no endpoint)'})")
 
     _run(body)
 
@@ -534,14 +561,14 @@ def listings_cmd(
 def call_cmd(
     prompt: str = typer.Argument(..., help="User prompt sent to the seller relay."),
     seller: Optional[str] = typer.Option(None, "--seller", help="Seller (relay operator) address; defaults to env SELLER_ADDR."),
-    model: Optional[str] = typer.Option(None, "--model", help="Model name; defaults to the first model of the Registry listing."),
+    model: Optional[str] = typer.Option(None, "--model", help="Model name; defaults to the first model of the Registry listing; must be one of the listing's models."),
     max_amount: Optional[str] = typer.Option(
         None,
         "--max",
         help=(
-            "Lock maxAmount in USDC (human). Default is estimated from the CLI token caps "
-            "(PROMPT_TOKEN_CAP/COMPLETION_TOKEN_CAP = 200000/32000); these may be out of sync "
-            "with the relay-side caps — on HTTP 402 pass --max explicitly."
+            "Lock maxAmount in USDC (human). Default is estimated from the SELECTED MODEL's Registry prices "
+            "with the CLI token caps (PROMPT_TOKEN_CAP/COMPLETION_TOKEN_CAP = 200000/32000); these may be out "
+            "of sync with the relay-side caps — on HTTP 402 pass --max explicitly."
         ),
     ),
     ttl: int = typer.Option(600, "--ttl", help="TTL for the auto-lock (seconds)."),
@@ -552,10 +579,12 @@ def call_cmd(
 ) -> None:
     """One-shot paid call: pick seller -> lock -> POST /v1/chat/completions -> verify receipt.
 
-    Flow: reads the Registry listing for the seller (endpoint + prices), locks
-    a NEW paymentId (unless --payment-id reuses one), signs the request with
+    Flow: reads the Registry listing for the seller (endpoint + per-model
+    prices, Registry v2), locks a NEW paymentId (unless --payment-id reuses
+    one) sized from the SELECTED model's prices, signs the request with
     EIP-191 (X-Payment-Id + X-Signature), prints the model reply, the
     X-Settle-Status header and the EIP-712 receipt verification result.
+    --model must be one of the listing's models (fast failure otherwise).
     """
     def body() -> None:
         cfg = load_config()
@@ -576,9 +605,27 @@ def call_cmd(
         endpoint = relay or listing["endpoint"]
         if relay is not None:
             _warn_if_plain_http(relay)
-        model_name = model or next((m for m in (listing["models"] or []) if str(m).strip()), None)
+        # Registry v2 (M9): models and prices are parallel arrays; the whole
+        # call is priced by the SELECTED model's three-tier price.
+        models = [str(m) for m in (listing["models"] or []) if str(m).strip()]
+        prices = list(listing.get("prices") or [])
+        model_name = model or (models[0] if models else None)
         if not model_name:
             _fail("listing has no models and --model not given")
+        if model_name not in models:
+            _fail(
+                f"model {model_name!r} is not in the listing of seller {seller_addr} "
+                f"(models: {', '.join(models) or '(none)'})"
+            )
+        price = prices[models.index(model_name)] if models.index(model_name) < len(prices) else None
+        if price is not None:
+            typer.echo(
+                f"model: {model_name}  (cached/1M: {display_usdc(price['cached_in'])}, "
+                f"input/1M: {display_usdc(price['input'])}, "
+                f"output/1M: {display_usdc(price['output'])})"
+            )
+        else:
+            typer.echo(f"model: {model_name}")
 
         expected_seller = str(listing["operator"] or "")
 
@@ -598,11 +645,14 @@ def call_cmd(
                 )
             typer.echo(f"paymentId: {active_pid} (reused lock)")
         else:
-            units = (
-                parse_usdc_amount(max_amount, "--max")
-                if max_amount is not None
-                else _default_lock_amount(listing)
-            )
+            if max_amount is not None:
+                units = parse_usdc_amount(max_amount, "--max")
+            elif price is not None:
+                units = _default_lock_amount(price)
+            else:
+                _fail(
+                    f"listing prices missing for model {model_name!r}; pass --max explicitly"
+                )
             lock_result = chain_mod.lock(ctx, seller_addr, units, ttl)
             _print_lock(lock_result)
             active_pid = lock_result["payment_id"]
@@ -628,21 +678,22 @@ def _require_listing(listing: dict, relay_override: str | None) -> None:
         _fail("listing endpoint is empty; pass --relay to override")
 
 
-def _default_lock_amount(listing: dict) -> int:
-    """Size the default lock maxAmount from Registry prices with the same
-    token caps the relay uses by default (PROMPT_TOKEN_CAP / COMPLETION_TOKEN_CAP).
+def _default_lock_amount(price: dict) -> int:
+    """Size the default lock maxAmount from the SELECTED MODEL's Registry
+    prices (M9 per-model pricing) with the same token caps the relay uses by
+    default (PROMPT_TOKEN_CAP / COMPLETION_TOKEN_CAP).
 
-    Relay minAmount = (priceInput*P + priceOutput*C) // 1e6  (floor to whole
-    USDC-native units, i.e. the USDC cost of the estimate).
+    Relay minAmount = (price.input*P + price.output*C) // 1e6  (floor to whole
+    USDC-native units, i.e. the USDC cost of the estimate — the //1e6 here is
+    what makes the default sane; Gate G R2 regression guard).
     The CLI locks that same estimate rounded UP to whole USDC (with a 1 USDC
     floor) so maxAmount >= relay minAmount always holds.
     """
     prompt_cap = int(os.environ.get("PROMPT_TOKEN_CAP", PROMPT_TOKEN_CAP_DEFAULT))
     completion_cap = int(os.environ.get("COMPLETION_TOKEN_CAP", COMPLETION_TOKEN_CAP_DEFAULT))
-    total_native = (
-        listing["price_input"] * prompt_cap + listing["price_output"] * completion_cap
-    )
-    estimate = total_native // 1_000_000  # = relay minAmount (USDC-native)
+    estimate = (
+        int(price["input"]) * prompt_cap + int(price["output"]) * completion_cap
+    ) // 1_000_000  # = relay minAmount for this model (USDC-native)
     amount = max(((estimate + 999_999) // 1_000_000) * 1_000_000, 1_000_000)
     return amount
 

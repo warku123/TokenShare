@@ -54,13 +54,12 @@ class FakeChain:
 
     def __init__(self, monkeypatch, *, listing=None, escrow_balance=10**9, payment=None):
         self.calls = []
+        # Registry v2 shape (M9): models + parallel per-model prices array.
         self.listing = listing or {
             "operator": SELLER,
             "endpoint": "http://127.0.0.1:8787",
             "models": ["gpt-4o-mini"],
-            "price_cached_in": 100,
-            "price_input": 1000,
-            "price_output": 1000,
+            "prices": [{"cached_in": 100, "input": 1000, "output": 1000}],
             "active": True,
         }
         self.escrow_balance = escrow_balance
@@ -179,48 +178,132 @@ def test_lock_rejects_zero_max(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# default lock sizing formula (R2)
+# default lock sizing formula (R2, now per-model — M9 Registry v2)
 # ---------------------------------------------------------------------------
 
 
 def test_default_lock_amount_known_prices(monkeypatch):
-    """priceInput=2e6, priceOutput=3e6, caps 200000/32000 ->
-    total_native = 2e6*200000 + 3e6*32000 = 496_000_000_000
-    estimate = total_native // 1e6 = 496_000 (matches relay minAmount floor)
-    ceil to whole USDC = 1_000_000 (also the 1 USDC floor)."""
+    """Per-model price (M9): input=2e6, output=3e6, caps 200000/32000 ->
+    estimate = (2e6*200000 + 3e6*32000)//1e6 = 496_000 (matches relay
+    minAmount floor for THIS model) -> ceil to whole USDC = 1_000_000
+    (also the 1 USDC floor)."""
     from tokenshare_cli.app import _default_lock_amount
 
     monkeypatch.delenv("PROMPT_TOKEN_CAP", raising=False)
     monkeypatch.delenv("COMPLETION_TOKEN_CAP", raising=False)
-    listing = {"price_input": 2_000_000, "price_output": 3_000_000}
-    assert _default_lock_amount(listing) == 1_000_000
+    price = {"cached_in": 0, "input": 2_000_000, "output": 3_000_000}
+    assert _default_lock_amount(price) == 1_000_000
 
 
 def test_default_lock_amount_small_prices_hits_usdc_floor(monkeypatch):
     """priceInput=1000, priceOutput=1000 (the FakeChain default listing) ->
-    total_native = 1000*200000 + 1000*32000 = 232_000_000
-    estimate = 232 (USDC-native, matches relay minAmount)
-    ceil to whole USDC = 1_000_000 (below the 1 USDC floor -> exactly 1 USDC)."""
+    estimate = (1000*200000 + 1000*32000)//1e6 = 232 (USDC-native, matches
+    relay minAmount) -> ceil to whole USDC = 1_000_000 (below the 1 USDC
+    floor -> exactly 1 USDC)."""
     from tokenshare_cli.app import _default_lock_amount
 
     monkeypatch.delenv("PROMPT_TOKEN_CAP", raising=False)
     monkeypatch.delenv("COMPLETION_TOKEN_CAP", raising=False)
-    listing = {"price_input": 1000, "price_output": 1000}
-    assert _default_lock_amount(listing) == 1_000_000
+    price = {"cached_in": 100, "input": 1000, "output": 1000}
+    assert _default_lock_amount(price) == 1_000_000
 
 
 def test_default_lock_amount_large_prices_ceil_to_whole_usdc(monkeypatch):
     """Big-price scenario: estimate exceeds 1e6 -> rounded UP to whole USDC.
     priceInput=9_000_000, priceOutput=9_999_999, caps 200000/32000 ->
-    total_native = 9e6*200000 + 9999999*32000 = 2_119_999_968_000
-    estimate = 2_119_999  (matches relay minAmount)
-    ceil to whole USDC = 3_000_000."""
+    estimate = (9e6*200000 + 9999999*32000)//1e6 = 2_119_999  (matches relay
+    minAmount) -> ceil to whole USDC = 3_000_000."""
     from tokenshare_cli.app import _default_lock_amount
 
     monkeypatch.delenv("PROMPT_TOKEN_CAP", raising=False)
     monkeypatch.delenv("COMPLETION_TOKEN_CAP", raising=False)
-    listing = {"price_input": 9_000_000, "price_output": 9_999_999}
-    assert _default_lock_amount(listing) == 3_000_000
+    price = {"cached_in": 0, "input": 9_000_000, "output": 9_999_999}
+    assert _default_lock_amount(price) == 3_000_000
+
+
+def test_call_default_lock_uses_selected_model_price(monkeypatch, tmp_path):
+    """M9: with two models priced differently, the auto-lock must use the
+    price of the SELECTED model (--model wins over models[0])."""
+    _set_full_env(monkeypatch)
+    listing = {
+        "operator": SELLER,
+        "endpoint": "http://127.0.0.1:8787",
+        "models": ["cheap-model", "fancy-model"],
+        "prices": [
+            {"cached_in": 0, "input": 1000, "output": 1000},      # est 232 -> 1 USDC floor
+            {"cached_in": 0, "input": 10_000_000, "output": 10_000_000},  # est 2_320_000 -> ceil 3 USDC
+        ],
+        "active": True,
+    }
+    fake = FakeChain(monkeypatch, listing=listing)
+    receipt = make_receipt(SELLER_KEY, 42, seller_addr=SELLER)
+    _mock_http(monkeypatch, receipt_header(receipt))
+
+    result = runner.invoke(
+        app,
+        ["call", "hi", "--seller", SELLER, "--model", "fancy-model"],
+    )
+    assert result.exit_code == 0, all_output(result)
+    lock_call = [c for c in fake.calls if c[0] == "lock"][0]
+    # (10_000_000*200_000 + 10_000_000*32_000)//1e6 = 2_320_000 -> ceil 3_000_000
+    assert lock_call[2] == 3_000_000
+    assert seen_model_price_line(all_output(result), "fancy-model")
+
+
+def seen_model_price_line(out: str, model: str) -> bool:
+    """The call output shows the selected model's three per-1M prices."""
+    return f"model: {model}  (cached/1M:" in out
+
+
+def test_call_unknown_model_fails_fast(monkeypatch):
+    """M9: --model not in the listing -> exit 2 BEFORE locking or HTTP."""
+    _set_full_env(monkeypatch)
+    fake = FakeChain(monkeypatch)
+    seen = _mock_http(monkeypatch, None)  # would succeed if ever reached
+
+    result = runner.invoke(
+        app, ["call", "hi", "--seller", SELLER, "--model", "no-such-model"]
+    )
+    assert result.exit_code == 2
+    out = all_output(result)
+    assert "no-such-model" in out
+    assert "not in the listing" in out
+    assert not any(c[0] == "lock" for c in fake.calls)  # no lock happened
+    assert "payment_id" not in seen  # relay never contacted
+
+
+def test_call_blank_model_fails_when_listing_only_has_blank_models(monkeypatch):
+    """M9: listing whose model list is only blank strings -> clear error."""
+    _set_full_env(monkeypatch)
+    listing = {
+        "operator": SELLER,
+        "endpoint": "http://127.0.0.1:8787",
+        "models": ["", "  "],
+        "prices": [
+            {"cached_in": 0, "input": 1, "output": 1},
+            {"cached_in": 0, "input": 1, "output": 1},
+        ],
+        "active": True,
+    }
+    FakeChain(monkeypatch, listing=listing)
+    result = runner.invoke(app, ["call", "hi", "--seller", SELLER])
+    assert result.exit_code == 2
+    assert "listing has no models" in all_output(result)
+
+
+def test_call_shows_selected_model_prices(monkeypatch, tmp_path):
+    """M9: call prints the selected model's three-tier per-1M prices."""
+    _set_full_env(monkeypatch)
+    FakeChain(monkeypatch)  # default listing: 100/1000/1000 for gpt-4o-mini
+    receipt = make_receipt(SELLER_KEY, 42, seller_addr=SELLER)
+    _mock_http(monkeypatch, receipt_header(receipt))
+
+    result = runner.invoke(app, ["call", "hi", "--seller", SELLER])
+    assert result.exit_code == 0, all_output(result)
+    out = all_output(result)
+    assert "model: gpt-4o-mini  (cached/1M: 100 native (= 0.0001 USDC)" in out
+    assert "input/1M: 1000 native (= 0.001 USDC)" in out
+    assert "output/1M: 1000 native (= 0.001 USDC)" in out
 
 
 # ---------------------------------------------------------------------------
@@ -420,9 +503,7 @@ def test_call_inactive_listing(monkeypatch):
         "operator": SELLER,
         "endpoint": "http://127.0.0.1:8787",
         "models": ["gpt-4o-mini"],
-        "price_cached_in": 100,
-        "price_input": 1000,
-        "price_output": 1000,
+        "prices": [{"cached_in": 100, "input": 1000, "output": 1000}],
         "active": False,
     }
     FakeChain(monkeypatch, listing=listing)

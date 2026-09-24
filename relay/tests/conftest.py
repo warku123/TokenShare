@@ -20,6 +20,9 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from fastapi.testclient import TestClient
 
+from relay.app.chain import ModelNotFound, NotActive
+from relay.app.pricing import Prices
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -64,6 +67,13 @@ class FakeChain:
     listing_active: bool = True
     listing_registered: bool = True
     models: list[str] = ["gpt-4o-mini", ""]
+    # M9 Registry v2 per-model pricing: get_price behavior knobs.
+    price_reads: int = 0
+    # None | "NotActive" | "ModelNotFound" → the mapped revert face to raise.
+    price_error: str | None = None
+    # Per-model price overrides {model: (cachedIn, input, output)}; models
+    # without an entry price at the suite-wide defaults.
+    model_prices: dict[str, tuple[int, int, int]] = {}
 
     def __init__(
         self, *, rpc_url: str, escrow_addr: str, registry_addr: str,
@@ -84,6 +94,9 @@ class FakeChain:
         cls.listing_active = True
         cls.listing_registered = True
         cls.models = ["gpt-4o-mini", ""]
+        cls.price_reads = 0
+        cls.price_error = None
+        cls.model_prices = {}
 
     def get_payment(self, payment_id: int) -> dict[str, Any]:
         type(self).payment_reads += 1
@@ -100,18 +113,43 @@ class FakeChain:
         return type(self).valid
 
     def get_listing(self, operator: str) -> dict[str, Any] | None:
+        """M9 Registry v2 shape: 5 fields — models[] with a PARALLEL prices[]
+        array (one Price triple per model)."""
         type(self).listing_reads += 1
         if not type(self).listing_registered:
             return None
+        models = list(type(self).models)
         return {
             "operator": operator,
             "endpoint": "http://relay.example",
-            "models": list(type(self).models),
-            "priceCachedIn": PRICE_CACHED_IN,
-            "priceInput": PRICE_INPUT,
-            "priceOutput": PRICE_OUTPUT,
+            "models": models,
+            "prices": [
+                {
+                    "cachedIn": PRICE_CACHED_IN,
+                    "input": PRICE_INPUT,
+                    "output": PRICE_OUTPUT,
+                }
+                for _ in models
+            ],
             "active": type(self).listing_active,
         }
+
+    def get_price(self, operator: str, model: str) -> Prices:
+        """Same surface + error faces as ChainClient.get_price (Registry v2)."""
+        type(self).price_reads += 1
+        error = type(self).price_error
+        if error == "NotActive":
+            raise NotActive("NotActive()")
+        if error == "ModelNotFound":
+            raise ModelNotFound("ModelNotFound()")
+        cached_in, price_input, price_output = type(self).model_prices.get(
+            model, (PRICE_CACHED_IN, PRICE_INPUT, PRICE_OUTPUT)
+        )
+        return Prices(
+            price_cached_in=cached_in,
+            price_input=price_input,
+            price_output=price_output,
+        )
 
     def settle(self, payment_id: int, actual_amount: int) -> dict[str, Any]:
         if type(self).settle_fails:

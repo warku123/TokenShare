@@ -31,6 +31,12 @@ import {MockUSDC} from "../src/MockUSDC.sol";
  *   forge script script/Deploy.s.sol --sig run(base_sepolia) \
  *     --rpc-url http://127.0.0.1:8545 --broadcast
  *
+ *   # Registry-only redeploy (M9 Registry v2): rewrites ONLY the `registry`
+ *   # field of the EXISTING deployed.json, preserving escrow/usdc/usdcIsMock
+ *   # (deposits stay untouched). Requires a prior full run() artifact:
+ *   forge script script/Deploy.s.sol --sig runRegistryOnly(monad_testnet) \
+ *     --rpc-url https://testnet-rpc.monad.xyz --broadcast
+ *
  * Env:
  *   USDC_ADDR (optional) — existing ERC-20 USDC (6dp) to use as the settlement
  *   token. When empty/absent, a fresh MockUSDC is deployed and the artifact
@@ -83,6 +89,56 @@ contract Deploy is Script {
         console2.log("chainId:      ", chainId);
         console2.log("escrow:       ", address(escrow));
         console2.log("registry:     ", address(registry));
+        console2.log("usdc:         ", usdc);
+        console2.log("usdcIsMock:   ", usdcIsMock);
+        console2.log("deployer:     ", deployer);
+        console2.log("artifact:     ", ARTIFACT_PATH);
+    }
+
+    /**
+     * @notice Registry-only redeploy (M9 Registry v2): deploys a fresh Registry
+     *         and rewrites the `registry` field of the EXISTING deployed.json,
+     *         preserving escrow/usdc/usdcIsMock (Escrow untouched — deposits
+     *         stay). `network` is only a label; run on the SAME chain as the
+     *         original artifact (chainId is re-recorded from block.chainid).
+     *         The artifact must already exist (produced by a prior full
+     *         `run(string)`); otherwise vm.readFile reverts.
+     */
+    function runRegistryOnly(string calldata network) external {
+        // ------------------------------------------------------------------
+        // Preserve operational fields from the existing artifact.
+        // ------------------------------------------------------------------
+        string memory existing = vm.readFile(ARTIFACT_PATH);
+        address escrow = vm.parseJsonAddress(existing, ".escrow");
+        address usdc = vm.parseJsonAddress(existing, ".usdc");
+        bool usdcIsMock = vm.parseJsonBool(existing, ".usdcIsMock");
+
+        uint256 chainId = block.chainid;
+        address deployer = msg.sender;
+
+        vm.startBroadcast();
+        Registry registry = new Registry();
+        vm.stopBroadcast();
+
+        // ------------------------------------------------------------------
+        // Artifact: same field set as run(), registry swapped for the new one.
+        // ------------------------------------------------------------------
+        string memory json = "deployed";
+        vm.serializeString(json, "network", network);
+        vm.serializeUint(json, "chainId", chainId);
+        vm.serializeAddress(json, "escrow", escrow);
+        vm.serializeAddress(json, "registry", address(registry));
+        vm.serializeAddress(json, "usdc", usdc);
+        vm.serializeBool(json, "usdcIsMock", usdcIsMock);
+        vm.serializeAddress(json, "deployer", deployer);
+        string memory artifact = vm.serializeUint(json, "deployedAt", block.timestamp);
+        vm.writeJson(artifact, ARTIFACT_PATH);
+
+        console2.log("=== TokenShare registry-only redeploy complete ===");
+        console2.log("network:      ", network);
+        console2.log("chainId:      ", chainId);
+        console2.log("escrow:       ", escrow);
+        console2.log("registry NEW: ", address(registry));
         console2.log("usdc:         ", usdc);
         console2.log("usdcIsMock:   ", usdcIsMock);
         console2.log("deployer:     ", deployer);

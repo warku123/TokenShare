@@ -39,14 +39,16 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .chain import ChainClient
+from .chain import ChainClient, ModelNotFound, NotActive
 from .config import (
     MODEL_PROVIDER_PREFIXES,
     OFFICIAL_UPSTREAM_HOSTS,
     TEE_KEY_PATH,
     Config,
     ConfigError,
+    ENV_ALLOW_CUSTOM_UPSTREAM,
     ENV_CORS_ORIGINS,
+    _normalize_openai_base_url,
     dstack_client,
     host_provider,
     load_config,
@@ -307,6 +309,96 @@ async def verify_upstream() -> dict[str, Any]:
     out["mismatches"] = mismatches
     out["listing_ok"] = not mismatches
     return out
+
+
+# ------------------------------------------------------------- preview-models
+
+
+@app.post("/preview-models")
+async def preview_models(request: Request) -> dict[str, Any]:
+    """Seller register-flow probe (M9 PIN, verbatim semantics):
+
+        body: {"upstream_base_url": "https://api.kimi.com/coding", "api_key": "sk-..."}
+        → GET {normalized base}/v1/models, Authorization: Bearer <api_key>
+          (normalization strips a trailing /v1 — the same rule as forwarding)
+        → 200: {"upstream_host": "api.kimi.com", "official": true, "models": [...]}
+
+    Errors: 400 missing body fields / 400 host not on the official allowlist
+    (unless ALLOW_CUSTOM_UPSTREAM=1) / 401 upstream 401|403 (key rejected) /
+    502 upstream network error or timeout. Timeout 10s.
+
+    KEY DISCIPLINE: api_key is used for this ONE probe and is never stored,
+    never logged, never reflected into any response (upstream error bodies
+    are intentionally NOT forwarded — they could echo the Authorization
+    header back)."""
+    _get_state()  # probe is served only by a fully-initialized relay
+    try:
+        body = await request.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+
+    base_raw = body.get("upstream_base_url")
+    api_key = body.get("api_key")
+    if not isinstance(base_raw, str) or not base_raw.strip():
+        raise HTTPException(status_code=400, detail="missing upstream_base_url")
+    if not isinstance(api_key, str) or not api_key.strip():
+        raise HTTPException(status_code=400, detail="missing api_key")
+
+    normalized = _normalize_openai_base_url(base_raw)
+    official = host_provider(normalized) is not None
+    if not official and os.environ.get(ENV_ALLOW_CUSTOM_UPSTREAM, "").strip() != "1":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "upstream host is not an official model-provider endpoint "
+                f"(allowlist: {sorted(OFFICIAL_UPSTREAM_HOSTS)})"
+            ),
+        )
+
+    host = _upstream_host(normalized)
+    try:
+        # One-off client on purpose: st.http is bound to the relay's own
+        # configured upstream and key; this endpoint probes an ARBITRARY base
+        # with the seller-supplied key. Timeout 10s per the PIN.
+        async with httpx.AsyncClient(timeout=VERIFY_UPSTREAM_TIMEOUT) as probe:
+            resp = await probe.get(
+                f"{normalized}/v1/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"upstream unreachable: {exc}"
+        ) from exc
+
+    if resp.status_code in (401, 403):
+        # Static detail: never echo the upstream's error body here.
+        raise HTTPException(
+            status_code=401,
+            detail=f"upstream rejected the key (HTTP {resp.status_code})",
+        )
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502, detail=f"upstream HTTP {resp.status_code}"
+        )
+    try:
+        payload = resp.json()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=502, detail="upstream /v1/models returned non-JSON"
+        ) from exc
+    data = payload.get("data") if isinstance(payload, dict) else None
+    models: list[str] = []
+    if isinstance(data, list):
+        models = sorted(
+            {
+                m.get("id")
+                for m in data
+                if isinstance(m, dict) and isinstance(m.get("id"), str) and m.get("id")
+            }
+        )
+    return {"upstream_host": host, "official": official, "models": models}
 
 
 # --------------------------------------------------------------------- health
@@ -765,11 +857,6 @@ async def chat_completions(request: Request) -> Any:
     # 2. Listing must be active; model must be listed (400s) — chain read in
     #    a worker thread.
     listing = await _load_listing(st)
-    prices = Prices(
-        price_cached_in=listing["priceCachedIn"],
-        price_input=listing["priceInput"],
-        price_output=listing["priceOutput"],
-    )
     try:
         body = json.loads(raw_body)
     except json.JSONDecodeError as exc:
@@ -779,6 +866,21 @@ async def chat_completions(request: Request) -> Any:
     _check_model(listing, body)
     _check_model_provider_consistency(body)
     model_name = str(body["model"])  # validated as a listed string above
+
+    # 2b. Registry v2 per-model price (PIN: the three unit prices follow the
+    #     REQUESTED model, fetched from the chain via getPrice).
+    try:
+        prices = await asyncio.to_thread(
+            st.chain.get_price, st.chain.seller_address, model_name
+        )
+    except NotActive as exc:
+        raise HTTPException(
+            status_code=400, detail="listing inactive or unregistered"
+        ) from exc
+    except ModelNotFound as exc:
+        raise HTTPException(
+            status_code=400, detail="model not in listing.models"
+        ) from exc
 
     # 3. TTL margin guard: seller needs FORWARD_MARGIN_S to settle (409).
     if int(payment["expiresAt"]) - int(time.time()) < st.config.forward_margin_s:

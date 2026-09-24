@@ -6,14 +6,24 @@
  *
  *   1. TRIGGER (index 0): Escrow.Settled log on Monad testnet (chain 10143).
  *   2. EVM READ: Escrow.getPayment(paymentId) → buyer/max/expiresAt/state,
- *                Registry.getListing(seller) → 3-tier pricing rows
- *                (priceCachedIn / priceInput / priceOutput, 6-dp USDC).
+ *                Registry.getListing(seller) → Listing v2 {operator, endpoint,
+ *                models[], prices[] (parallel per-model 3-tier, 6-dp USDC),
+ *                active}.
  *   3. CONFIDENTIAL HTTP: GET {relayBaseUrl}/receipt/{paymentId} — the relay's
  *                EIP-712 signed receipt. The bearer credential is template-
  *                resolved inside the enclave via {{.receipts_bearer}}
  *                (simulation: value injected from .env; deployed: Vault DON).
- *   4. VERIFY  : receipt.message.actualAmount vs on-chain settled actualAmount
- *                (±1 native-unit tolerance = 0.000001 USDC rounding slop).
+ *   4. VERIFY  : receipt.message.actualAmount vs the on-chain PER-MODEL
+ *                estimate. Price is resolved for the RECEIPT's model
+ *                (Registry v2): primary getPrice(operator, model) — on-chain
+ *                authoritative, reverts NotActive/ModelNotFound — with the
+ *                Listing models/prices parallel arrays as fallback; expected =
+ *                (cached*cachedIn + (prompt-cached)*input + completion*output)
+ *                // 1e6, ±1 native-unit tolerance (0.000001 USDC rounding
+ *                slop). A receipt model missing on-chain ⇒ MODEL MISSING
+ *                conclusion (logged, nothing anchored) instead of a crash.
+ *                The anchored record still carries the on-chain Escrow
+ *                settled amount in settledAmount (ReceiptAnchor schema).
  *                This closes the trust gap a relay can never self-close —
  *                the DON, not the seller, adjudicates the settlement.
  *   5. WRITE   : evm.writeReport → ReceiptAnchor.onReport via the Keystone
@@ -81,8 +91,12 @@ const escrowAbi = parseAbi([
   "event Settled(uint256 indexed paymentId, address indexed buyer, address indexed seller, uint256 actualAmount, uint256 refundedAmount)",
   "function getPayment(uint256 paymentId) view returns (address buyer, address seller, uint256 maxAmount, uint64 expiresAt, uint8 state)",
 ])
+// Registry v2 (M9 ABI PIN): Listing{operator, endpoint, models[], prices[],
+// active} — prices is parallel to models; getPrice(operator, model) returns
+// the per-model 3-tier price and reverts NotActive/ModelNotFound.
 const registryAbi = parseAbi([
-  "function getListing(address operator) view returns (address listingOperator, string endpoint, string[] models, uint256 priceCachedIn, uint256 priceInput, uint256 priceOutput, bool active)",
+  "function getListing(address operator) view returns (address listingOperator, string endpoint, string[] models, (uint256 priceCachedIn, uint256 priceInput, uint256 priceOutput)[] prices, bool active)",
+  "function getPrice(address operator, string model) view returns (uint256 priceCachedIn, uint256 priceInput, uint256 priceOutput)",
 ])
 const onReportAbi = parseAbi(["function onReport(bytes metadata, bytes report)"])
 
@@ -106,6 +120,13 @@ type ReceiptJSON = {
     model: string
   }
   signature: string
+}
+
+/** Per-model 3-tier price row (Registry v2 Price struct, 6-dp USDC native). */
+type Price = {
+  readonly priceCachedIn: bigint
+  readonly priceInput: bigint
+  readonly priceOutput: bigint
 }
 
 type SettledArgs = {
@@ -158,9 +179,13 @@ const onSettled = (runtime: Runtime<Config>, log: EVMLog): string => {
       })
       .result().data,
   )
+  // Registry v2 Listing — 5 top-level outputs, decoded with the same
+  // decodeAbiParameters/parseAbiParameters method as the payment read:
+  // [0]=operator, [1]=endpoint, [2]=models, [3]=prices (parallel to models,
+  // each {priceCachedIn, priceInput, priceOutput}), [4]=active
   const listing = decodeAbiParameters(
     parseAbiParameters(
-      "address listingOperator, string endpoint, string[] models, uint256 priceCachedIn, uint256 priceInput, uint256 priceOutput, bool active",
+      "address listingOperator, string endpoint, string[] models, (uint256 priceCachedIn, uint256 priceInput, uint256 priceOutput)[] prices, bool active",
     ),
     evm
       .callContract(runtime, {
@@ -176,11 +201,8 @@ const onSettled = (runtime: Runtime<Config>, log: EVMLog): string => {
   runtime.log(
     `getPayment: buyer=${payment[0]} maxAmount=${payment[2]} expiresAt=${payment[3]} state=${payment[4]}`,
   )
-  // listing tuple (7 outputs, mirrors registryAbi.getListing): [0]=operator,
-  // [1]=endpoint, [2]=models, [3]=priceCachedIn, [4]=priceInput,
-  // [5]=priceOutput, [6]=active
   runtime.log(
-    `getListing: cached=${listing[3]} input=${listing[4]} output=${listing[5]} active=${listing[6]}`,
+    `getListing: models=${listing[2].length} active=${listing[4]}`,
   )
   // 3. CONFIDENTIAL HTTP — relay receipt fetch runs inside the enclave;
   //    {{.receipts_bearer}} is template-resolved there (never in workflow
@@ -222,15 +244,61 @@ const onSettled = (runtime: Runtime<Config>, log: EVMLog): string => {
   )
 
   // 4. COMPARE — arbitrate receipt vs chain (DON is the referee, not the relay).
+  //    Registry v2: the price is taken PER THE RECEIPT'S MODEL. Primary =
+  //    getPrice(operator, model) — on-chain authoritative, reverts
+  //    NotActive/ModelNotFound; fallback = locate the model in the Listing
+  //    models/prices parallel arrays (covers NotActive listings too).
+  //    Model missing on-chain ⇒ MODEL MISSING conclusion (no crash, nothing
+  //    anchored — the DON cannot adjudicate a price that does not exist).
   const receiptAmount = BigInt(receipt.message.actualAmount)
   const ceiling = BigInt(config.maxPriceUsd6)
   if (receiptAmount > ceiling) {
     throw new Error(`Receipt amount ${receiptAmount} exceeds sanity ceiling ${ceiling} — refusing to anchor`)
   }
-  const delta = receiptAmount > actualAmount ? receiptAmount - actualAmount : actualAmount - receiptAmount
+  const model = receipt.message.model
+  let price: Price | undefined
+  try {
+    price = decodeAbiParameters(
+      parseAbiParameters("(uint256 priceCachedIn, uint256 priceInput, uint256 priceOutput)"),
+      evm
+        .callContract(runtime, {
+          call: encodeCallMsg({
+            from: ZERO,
+            to: config.registryAddress as Address,
+            data: encodeFunctionData({ abi: registryAbi, functionName: "getPrice", args: [seller, model] }),
+          }),
+          blockNumber: LAST_FINALIZED_BLOCK_NUMBER,
+        })
+        .result().data,
+    )[0]
+    runtime.log(
+      `getPrice(${model}): cachedIn=${price.priceCachedIn} input=${price.priceInput} output=${price.priceOutput}`,
+    )
+  } catch {
+    const idx = listing[2].indexOf(model)
+    if (idx >= 0) {
+      price = listing[3][idx]
+      runtime.log(`getPrice reverted — using listing.models[${idx}] parallel price`)
+    }
+  }
+  if (!price) {
+    runtime.log(`MODEL MISSING: ${model} not on Registry — reconciliation inconclusive, nothing anchored`)
+    return `MODEL MISSING payment ${paymentId}: model=${model} not found on Registry (getPrice reverted, absent from listing.models) — nothing anchored`
+  }
+  // PIN pricing formula (integer floor via bigint division):
+  // expected = (cached*cachedIn + (prompt-cached)*input + completion*output) // 1e6
+  const promptTokens = BigInt(receipt.message.promptTokens)
+  const cachedTokens = BigInt(receipt.message.cachedTokens)
+  const completionTokens = BigInt(receipt.message.completionTokens)
+  const expected =
+    (cachedTokens * price.priceCachedIn +
+      (promptTokens - cachedTokens) * price.priceInput +
+      completionTokens * price.priceOutput) /
+    1_000_000n
+  const delta = receiptAmount > expected ? receiptAmount - expected : expected - receiptAmount
   const verdict = delta <= 1n ? 1 : 2 // 1=MATCH, 2=MISMATCH (Contract enum order)
   runtime.log(
-    `Compare: onchain=${actualAmount} receipt=${receiptAmount} → ${verdict === 1 ? "MATCH" : `MISMATCH (delta=${delta})`}`,
+    `Compare: model=${model} expected=${expected} receipt=${receiptAmount} (onchain settled=${actualAmount}) → ${verdict === 1 ? "MATCH" : `MISMATCH (delta=${delta})`}`,
   )
 
   // 5. WRITE — ABI-encoded audit payload routed to ReceiptAnchor.onReport
@@ -274,8 +342,8 @@ const onSettled = (runtime: Runtime<Config>, log: EVMLog): string => {
   runtime.log(`ReceiptAnchored on ${config.anchorAddress} tx=${txHash} verdict=${verdict}`)
 
   return verdict === 1
-    ? `AUDIT OK payment ${paymentId}: onchain=${actualAmount} receipt=${receiptAmount} tx=${txHash}`
-    : `DISCREPANCY payment ${paymentId}: onchain=${actualAmount} receipt=${receiptAmount} tx=${txHash}`
+    ? `AUDIT OK payment ${paymentId}: model=${model} expected=${expected} receipt=${receiptAmount} (settled=${actualAmount}) tx=${txHash}`
+    : `DISCREPANCY payment ${paymentId}: model=${model} expected=${expected} receipt=${receiptAmount} (settled=${actualAmount}, delta=${delta}) tx=${txHash}`
 }
 
 // ─── Workflow definition ────────────────────────────────────────────────────

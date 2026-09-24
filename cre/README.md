@@ -27,12 +27,14 @@ what the buyer was told?"* — and makes the answer permanent and on-chain.
 │ CRE workflow (TypeScript, cre/settlement-audit/main.ts)                     │
 │                                                                             │
 │  1. EVM read   Escrow.getPayment(paymentId)   → buyer/max/expiresAt/state   │
-│  2. EVM read   Registry.getListing(seller)    → 3-tier pricing rows         │
+│  2. EVM read   Registry.getListing(seller)    → Listing v2: models[] +      │
+│                parallel per-model prices[] (Registry v2)                    │
 │  3. Confidential HTTP  GET {relay}/receipt/{paymentId}                      │
 │       — bearer credential template-resolved INSIDE the enclave              │
 │         ({{.receipts_bearer}}; simulation value from .env,                  │
 │          deployed value from the Vault DON — never in node memory)          │
-│  4. Verify     receipt.actualAmount  vs  on-chain actualAmount (±1 unit)    │
+│  4. Verify     receipt.actualAmount  vs  per-model on-chain estimate        │
+│                (getPrice(model) / listing parallel arrays, ±1 unit)         │
 │  5. writeReport → ReceiptAnchor.onReport via Keystone forwarder             │
 │       — DON-consensus signed report; verdict MATCH / MISMATCH               │
 └──────────────────────────────────────────────┬──────────────────────────────┘
@@ -148,8 +150,13 @@ cre workflow simulate settlement-audit --target staging-settings \
 * `--evm-event-index 0` = that log's index within the transaction.
 
 Expected console shape: `Settled: paymentId=2 …`, `getPayment: …`,
-`getListing: …`, `Receipt: actualAmount=730 …`, `Compare: onchain=730
-receipt=730 → MATCH`, then the dry-run write with `0x` tx hash.
+`getListing: models=4 active=true …`, `Receipt: actualAmount=730 …`,
+`Compare: model=… expected=730 receipt=730 → MATCH`, then the dry-run write
+with `0x` tx hash. The price is resolved per the receipt's model (Registry
+v2 `getPrice(operator, model)`, falling back to the Listing models/prices
+parallel arrays). If the model is missing on-chain (getPrice reverts
+ModelNotFound and it is absent from listing.models), the workflow returns
+`MODEL MISSING …` instead of anchoring.
 
 ### Step 4 — Broadcast the anchor and assert it on-chain
 

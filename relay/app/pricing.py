@@ -1,8 +1,10 @@
 """Tiered per-token pricing for the seller relay.
 
-Prices come from the Registry listing and are native USDC units (6 dp),
-expressed per 1M tokens: priceInput = USDC-native price per 1,000,000 prompt
-tokens, etc.
+Prices come from the Registry (M9 v2: PER-MODEL prices — Registry v2 keeps one
+Price triple per MODEL instead of per seller) and are native USDC units
+(6 dp), expressed per 1M tokens: priceInput = USDC-native price per 1,000,000
+prompt tokens, etc. A request's three unit prices are the prices of the
+REQUESTED model (relay fetches them via Registry.getPrice(operator, model)).
 
 PIN formula (verbatim):
     actual = (cached*priceCachedIn + (prompt-cached)*priceInput + completion*priceOutput) // 1e6
@@ -28,7 +30,8 @@ class Usage:
 
 @dataclass(frozen=True)
 class Prices:
-    """Registry listing prices, all in USDC native units per 1M tokens."""
+    """Registry prices for ONE model, all in USDC native units per 1M tokens
+    (M9 Registry v2: prices are per-model, fetched via getPrice)."""
 
     price_cached_in: int
     price_input: int
@@ -57,6 +60,8 @@ def estimate_min_amount(prices: Prices, prompt_token_cap: int, completion_token_
     """Per-request minAmount upper-bound estimate (PIN):
 
     (priceInput*PROMPT_TOKEN_CAP + priceOutput*COMPLETION_TOKEN_CAP) // 1e6
+
+    M9 v2: `prices` are the prices of the REQUESTED model.
     """
     return (
         prices.price_input * prompt_token_cap + prices.price_output * completion_token_cap

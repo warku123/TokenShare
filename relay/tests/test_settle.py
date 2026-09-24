@@ -73,3 +73,57 @@ def test_receipt_endpoint_serves_same_structure(client: Any, fake_chain: Any) ->
     assert r2.status_code == 200
     assert r2.json() == header_receipt
     assert json.loads(json.dumps(r2.json())) == header_receipt  # plain JSON round-trip
+
+
+# ------------------------------------------------- M9 Registry v2 per-model
+
+
+def test_pricing_and_min_amount_use_requested_model_price(
+    client: Any, fake_chain: Any
+) -> None:
+    """M9 v2: the three unit prices follow the REQUESTED model (getPrice) —
+    both the settle amount AND the minAmount estimate."""
+    fake_chain.models = ["gpt-4o-mini", "gpt-4.1-mini", ""]
+    fake_chain.model_prices = {
+        "gpt-4o-mini": (12_500, 25_000, 50_000),
+        "gpt-4.1-mini": (25_000, 50_000, 100_000),
+    }
+
+    r = post_chat(client, chat_body(model="gpt-4o-mini"))
+    assert r.status_code == 200
+    assert r.headers["X-Settle-Status"] == "settled"
+    # (400*12.5k + 1100*25k + 2500*50k) // 1e6 = 157
+    assert fake_chain.settle_calls == [(42, 157)]
+    # minAmount = (25k*200000 + 50k*32000) // 1e6 = 6600 — same model's prices
+    assert fake_chain.valid_calls == [(42, SELLER, 6_600)]
+    receipt = decode_x_receipt(r.headers["X-Receipt"])
+    assert receipt["message"]["model"] == "gpt-4o-mini"
+    assert receipt["message"]["actualAmount"] == 157
+
+    # The other listed model prices at the suite-wide defaults → 315 / 13_200.
+    r2 = post_chat(client, chat_body(model="gpt-4.1-mini"), payment_id="43")
+    assert r2.status_code == 200
+    assert fake_chain.settle_calls[-1] == (43, ACTUAL)
+    assert fake_chain.valid_calls[-1] == (43, SELLER, 13_200)
+    assert fake_chain.price_reads == 2
+
+
+def test_get_price_not_active_maps_to_400(client: Any, fake_chain: Any) -> None:
+    """Race: listing deactivated between getListing and getPrice → the
+    NotActive revert face maps to the listing-inactive 400."""
+    fake_chain.price_error = "NotActive"
+    r = post_chat(client, chat_body())
+    assert r.status_code == 400
+    assert "inactive" in r.json()["detail"]
+    assert fake_chain.settle_calls == []
+
+
+def test_get_price_model_not_found_maps_to_400(
+    client: Any, fake_chain: Any
+) -> None:
+    """ModelNotFound revert face maps to the model-gate 400."""
+    fake_chain.price_error = "ModelNotFound"
+    r = post_chat(client, chat_body())
+    assert r.status_code == 400
+    assert "model not in listing.models" in r.json()["detail"]
+    assert fake_chain.settle_calls == []

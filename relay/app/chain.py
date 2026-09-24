@@ -17,9 +17,11 @@ from typing import Any
 from eth_account import Account
 from web3 import Web3
 from web3.contract import Contract
+from web3.exceptions import ContractLogicError
 from web3.types import TxReceipt
 
 from .config import ConfigError
+from .pricing import Prices
 
 # Foundry artifact locations relative to the repo root (relay/app/chain.py).
 _REPO_ROOT: Path = Path(__file__).resolve().parents[2]
@@ -27,6 +29,40 @@ _ESCROW_ABI_PATH: Path = _REPO_ROOT / "contracts" / "out" / "Escrow.sol" / "Escr
 _REGISTRY_ABI_PATH: Path = _REPO_ROOT / "contracts" / "out" / "Registry.sol" / "Registry.json"
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+
+
+class NotActive(LookupError):
+    """Registry.getPrice reverted NotActive — the operator's listing is not
+    active (M9 Registry v2 error face)."""
+
+
+class ModelNotFound(LookupError):
+    """Registry.getPrice reverted ModelNotFound — the model is not in the
+    operator's listing (M9 Registry v2 error face)."""
+
+
+_PRICE_ERROR_FACES: tuple[tuple[str, type[LookupError]], ...] = (
+    ("NotActive", NotActive),
+    ("ModelNotFound", ModelNotFound),
+)
+
+
+def _map_price_revert(exc: Exception) -> LookupError | None:
+    """Map a raw getPrice revert onto the contract's two error faces.
+
+    web3 surfaces custom reverts either as decoded error names (ABI errors
+    present) or as selector/text fragments inside ContractLogicError — match
+    on the error NAME across message + data so both shapes map cleanly."""
+    parts = (
+        type(exc).__name__,
+        str(exc),
+        repr(getattr(exc, "data", None)),
+    )
+    text = " ".join(part for part in parts if part)
+    for name, cls in _PRICE_ERROR_FACES:
+        if name in text:
+            return cls(text)
+    return None
 
 
 def _load_artifact(path: Path) -> dict[str, Any]:
@@ -107,14 +143,16 @@ class ChainClient:
     def get_listing(self, operator: str) -> dict[str, Any] | None:
         """Registry.getListing(operator) → parsed listing, or None when the
         operator never registered (listingOperator == address(0)).
-        Callers must still check `active` themselves."""
+        Callers must still check `active` themselves.
+
+        M9 Registry v2 structure (5 fields, operator still first):
+        (address operator, string endpoint, string[] models,
+         Price[] prices /* parallel to models */, bool active)."""
         (
             listing_operator,
             endpoint,
             models,
-            price_cached_in,
-            price_input,
-            price_output,
+            prices,
             active,
         ) = self.registry.functions.getListing(Web3.to_checksum_address(operator)).call()
 
@@ -125,11 +163,40 @@ class ChainClient:
             "operator": listing_operator,
             "endpoint": endpoint,
             "models": [str(m) for m in models],
-            "priceCachedIn": int(price_cached_in),
-            "priceInput": int(price_input),
-            "priceOutput": int(price_output),
+            # Parallel to `models` (same length): per-model Price triple,
+            # USDC 6dp native units per 1M tokens.
+            "prices": [
+                {
+                    "cachedIn": int(price[0]),
+                    "input": int(price[1]),
+                    "output": int(price[2]),
+                }
+                for price in prices
+            ],
             "active": bool(active),
         }
+
+    def get_price(self, operator: str, model: str) -> Prices:
+        """Registry.getPrice(operator, model) → the per-model Price triple
+        (M9 Registry v2): settle pricing and the minAmount estimate for a
+        request MUST use the prices of the REQUESTED model.
+
+        Reverts are mapped: NotActive → chain.NotActive, ModelNotFound →
+        chain.ModelNotFound; any other revert propagates untouched."""
+        try:
+            cached_in, price_input, price_output = self.registry.functions.getPrice(
+                Web3.to_checksum_address(operator), model
+            ).call()
+        except ContractLogicError as exc:
+            mapped = _map_price_revert(exc)
+            if mapped is not None:
+                raise mapped from exc
+            raise
+        return Prices(
+            price_cached_in=int(cached_in),
+            price_input=int(price_input),
+            price_output=int(price_output),
+        )
 
     # ------------------------------------------------------------------ write
 

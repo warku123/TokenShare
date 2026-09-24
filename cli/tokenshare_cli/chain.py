@@ -151,30 +151,54 @@ def get_payment(ctx: ChainContext, payment_id: int) -> dict:
 
 
 def get_listing(ctx: ChainContext, seller: str) -> dict:
+    """Registry v2 getListing: (operator, endpoint, models, prices[], active).
+
+    `prices` is parallel to `models` (M9 ABI PIN) — one Price
+    {cached_in, input, output} per model entry, all USDC 6dp native.
+    """
     (
         operator,
         endpoint,
         models,
-        price_cached_in,
-        price_input,
-        price_output,
+        prices,
         active,
     ) = ctx.registry.functions.getListing(seller).call()
     return {
         "operator": operator,
         "endpoint": endpoint,
-        "models": list(models),
-        "price_cached_in": int(price_cached_in),
-        "price_input": int(price_input),
-        "price_output": int(price_output),
+        "models": [str(m) for m in (models or [])],
+        "prices": [_decode_price(p) for p in (prices or [])],
         "active": bool(active),
     }
 
 
+def _decode_price(price: Any) -> dict:
+    """(cachedIn, input, output) tuple -> {"cached_in", "input", "output"}."""
+    cached_in, price_input, price_output = price
+    return {
+        "cached_in": int(cached_in),
+        "input": int(price_input),
+        "output": int(price_output),
+    }
+
+
+def get_price(ctx: ChainContext, seller: str, model: str) -> dict:
+    """Registry v2 getPrice(operator, model) -> {"cached_in","input","output"}.
+
+    Reverts on-chain when the listing is inactive (NotActive) or the model is
+    unknown (ModelNotFound) — surfaced as TokenshareError by _send-free call()
+    wrapping (web3 raises ContractLogicError).
+    """
+    return _decode_price(ctx.registry.functions.getPrice(seller, model).call())
+
+
 # Registry.Registered event — canonical Solidity signature string (topic0 =
-# keccak256 of it). Must stay in sync with contracts/src/Registry.sol EVENTS;
-# tests/test_listings.py cross-checks the two against each other.
-REGISTERED_EVENT_SIG = "Registered(address,string,string[],uint256,uint256,uint256)"
+# keccak256 of it). Registry v2 (M9 ABI PIN): the event carries only
+# (operator, endpoint, models) — per-model prices live in getListing/getPrice.
+# The scanner consumes only the indexed operator topic; current per-model
+# state is read via getListing. tests/test_listings.py cross-checks this
+# constant against the M9 PIN (and the v2 .sol source once it lands).
+REGISTERED_EVENT_SIG = "Registered(address,string,string[])"
 
 
 def registered_operators(ctx: ChainContext, from_block: int) -> list[str]:

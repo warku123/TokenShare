@@ -7,16 +7,15 @@ import {Registry} from "../src/Registry.sol";
 
 /**
  * @title RegistryTest
- * @notice Behavioral suite for the Registry listing contract (BUILD_SPEC v1.1
- *         §3 M2, §5 per-function happy+revert acceptance). Plain anvil/local
- *         EVM, no fork. All prices are USDC 6-decimal native units (1 USDC = 1e6).
+ * @notice Behavioral suite for the Registry v2 listing contract (BUILD_SPEC
+ *         v1.1 §3 M2 + M9 per-model pricing PIN). Plain anvil/local EVM, no
+ *         fork. All prices are USDC 6-decimal native units per 1M tokens
+ *         (1 USDC = 1e6).
  *
- * IMPLEMENTATION NOTE: `getListing` returns a 7-tuple with two dynamic types.
- * Direct tuple destructuring hits "Stack too deep" in solc 0.8.24 legacy
- * codegen, and decoding the raw returndata as a whole struct reverts on
- * non-empty listings. We therefore read the tuple per-field: scalars straight
- * from head words, dynamic fields decoded from their own offset slices
- * (abi-encoding is standard: head offsets are relative to the tuple start).
+ * IMPLEMENTATION NOTE: unlike v1's 7-tuple (which needed raw returndata
+ * decoding to dodge "Stack too deep"), v2 `getListing` returns a single
+ * `Listing` struct — forge/solc decode that natively, so tests read fields
+ * directly.
  */
 contract RegistryTest is Test {
     // ------------------------------------------------------------------ data
@@ -26,90 +25,55 @@ contract RegistryTest is Test {
     address internal operatorB = makeAddr("operatorB");
     address internal stranger = makeAddr("stranger");
 
+    string internal constant ENDPOINT = "https://relay.example.com:8787";
+
     // ------------------------------------------------------------------ setup
     function setUp() public {
         registry = new Registry();
     }
 
     // ------------------------------------------------------------------ helpers
-    /// @dev Register a listing as `who` with the given fields.
-    function _register(address who, string memory endpoint, string[] memory models, uint256 cached, uint256 input, uint256 output)
+    /// @dev Register a listing as `who` with the given parallel arrays.
+    function _register(address who, string memory endpoint, string[] memory models, Registry.Price[] memory prices)
         internal
     {
         vm.startPrank(who);
-        registry.register(endpoint, models, cached, input, output);
+        registry.register(endpoint, models, prices);
         vm.stopPrank();
     }
 
-    /// @dev Register `who` with the suite's default listing.
+    /// @dev Build the suite's default two-model price list: m0 = (1,2,3)e6,
+    ///      m1 = (4,5,6)e6 — distinct per model on purpose.
+    function _defaultPrices() internal pure returns (Registry.Price[] memory prices) {
+        prices = new Registry.Price[](2);
+        prices[0] = Registry.Price({cachedIn: 1e6, input: 2e6, output: 3e6});
+        prices[1] = Registry.Price({cachedIn: 4e6, input: 5e6, output: 6e6});
+    }
+
+    /// @dev Register `who` with the suite's default listing
+    ///      (["gpt-4o", "gpt-4o-mini"] + _defaultPrices()).
     function _registerDefault(address who) internal {
         string[] memory models = new string[](2);
         models[0] = "gpt-4o";
         models[1] = "gpt-4o-mini";
-        _register(who, "https://relay.example.com:8787", models, 1e6, 2e6, 3e6);
+        _register(who, ENDPOINT, models, _defaultPrices());
     }
 
-    /// @dev Raw returndata of getListing(op).
-    function _rawListing(address op) internal view returns (bytes memory ret) {
-        (bool ok, bytes memory data) = address(registry).staticcall(abi.encodeCall(Registry.getListing, (op)));
-        require(ok, "getListing staticcall failed");
-        ret = data;
+    /// @dev Single-model helpers for revert tests.
+    function _oneModel(string memory name) internal pure returns (string[] memory) {
+        string[] memory models = new string[](1);
+        models[0] = name;
+        return models;
     }
 
-    /// @dev Word i of an ABI tuple (offsets/heads/values), i in 32-byte units.
-    function _word(bytes memory data, uint256 i) internal pure returns (bytes32) {
-        bytes32 w;
-        assembly {
-            w := mload(add(data, add(32, mul(i, 32))))
-        }
-        return w;
-    }
-
-    /// @dev data[from:] re-framed as the encoding of ONE dynamic value
-    ///      ([0x20 offset][payload]) so `abi.decode(out, (T))` is valid.
-    function _tail(bytes memory data, uint256 from) internal pure returns (bytes memory out) {
-        uint256 len = data.length - from;
-        assembly {
-            out := mload(0x40)
-            let payload := and(add(len, 31), not(31))
-            mstore(out, add(32, payload)) // bytes length: offset word + payload
-            mstore(add(out, 32), 32) // the offset word abi.decode expects
-            let src := add(data, add(32, from))
-            let dst := add(out, 64)
-            for { let j := 0 } lt(j, len) { j := add(j, 32) } {
-                mstore(add(dst, j), mload(add(src, j)))
-            }
-            mstore(0x40, add(out, add(64, payload)))
-        }
-    }
-
-    function _listingOperator(address op) internal view returns (address) {
-        return address(uint160(uint256(_word(_rawListing(op), 0))));
-    }
-
-    function _listingEndpoint(address op) internal view returns (string memory) {
-        bytes memory ret = _rawListing(op);
-        uint256 off = uint256(_word(ret, 1));
-        if (ret.length - off == 0) return "";
-        return abi.decode(_tail(ret, off), (string));
-    }
-
-    function _listingModels(address op) internal view returns (string[] memory) {
-        bytes memory ret = _rawListing(op);
-        uint256 off = uint256(_word(ret, 2));
-        if (ret.length - off == 0) return new string[](0);
-        return abi.decode(_tail(ret, off), (string[]));
-    }
-
-    function _listingPrices(address op) internal view returns (uint256 cached, uint256 input, uint256 output) {
-        bytes memory ret = _rawListing(op);
-        cached = uint256(_word(ret, 3));
-        input = uint256(_word(ret, 4));
-        output = uint256(_word(ret, 5));
-    }
-
-    function _listingActive(address op) internal view returns (bool) {
-        return _word(_rawListing(op), 6) != bytes32(0);
+    function _onePrice(uint256 cachedIn, uint256 input, uint256 output)
+        internal
+        pure
+        returns (Registry.Price[] memory)
+    {
+        Registry.Price[] memory prices = new Registry.Price[](1);
+        prices[0] = Registry.Price({cachedIn: cachedIn, input: input, output: output});
+        return prices;
     }
 
     // =====================================================================
@@ -120,41 +84,35 @@ contract RegistryTest is Test {
         string[] memory models = new string[](2);
         models[0] = "gpt-4o";
         models[1] = "gpt-4o-mini";
+        Registry.Price[] memory prices = _defaultPrices();
 
-        // Registered event: topic1 = indexed operator; data = endpoint, models, 3 prices
+        // Registered event: topic1 = indexed operator; data = endpoint, models
         vm.expectEmit(true, false, false, true, address(registry));
-        emit Registry.Registered(operatorA, "https://relay.example.com:8787", models, 1e6, 2e6, 3e6);
+        emit Registry.Registered(operatorA, ENDPOINT, models);
 
-        _register(operatorA, "https://relay.example.com:8787", models, 1e6, 2e6, 3e6);
+        _register(operatorA, ENDPOINT, models, prices);
 
-        assertEq(_listingOperator(operatorA), operatorA, "operator");
-        assertEq(_listingEndpoint(operatorA), "https://relay.example.com:8787", "endpoint");
-        string[] memory got = _listingModels(operatorA);
-        assertEq(got.length, 2, "models length");
-        assertEq(got[0], "gpt-4o", "models[0]");
-        assertEq(got[1], "gpt-4o-mini", "models[1]");
-        (uint256 cached, uint256 input, uint256 output) = _listingPrices(operatorA);
-        assertEq(cached, 1e6, "priceCachedIn");
-        assertEq(input, 2e6, "priceInput");
-        assertEq(output, 3e6, "priceOutput");
-        assertTrue(_listingActive(operatorA), "active flag");
-    }
+        Registry.Listing memory listing = registry.getListing(operatorA);
+        assertEq(listing.operator, operatorA, "operator");
+        assertEq(listing.endpoint, ENDPOINT, "endpoint");
+        assertEq(listing.models.length, 2, "models length");
+        assertEq(listing.models[0], "gpt-4o", "models[0]");
+        assertEq(listing.models[1], "gpt-4o-mini", "models[1]");
+        // prices fall to storage as a parallel array, asserted per field
+        assertEq(listing.prices.length, 2, "prices length");
+        assertEq(listing.prices[0].cachedIn, 1e6, "prices[0].cachedIn");
+        assertEq(listing.prices[0].input, 2e6, "prices[0].input");
+        assertEq(listing.prices[0].output, 3e6, "prices[0].output");
+        assertEq(listing.prices[1].cachedIn, 4e6, "prices[1].cachedIn");
+        assertEq(listing.prices[1].input, 5e6, "prices[1].input");
+        assertEq(listing.prices[1].output, 6e6, "prices[1].output");
+        assertTrue(listing.active, "active flag");
 
-    function test_RevertRegister_EmptyEndpoint() public {
-        string[] memory models = new string[](1);
-        models[0] = "gpt-4o";
-
-        vm.prank(operatorA);
-        vm.expectRevert(Registry.EmptyEndpoint.selector);
-        registry.register("", models, 1e6, 2e6, 3e6);
-    }
-
-    function test_RevertRegister_EmptyModels() public {
-        string[] memory models = new string[](0);
-
-        vm.prank(operatorA);
-        vm.expectRevert(Registry.EmptyModels.selector);
-        registry.register("https://relay.example.com:8787", models, 1e6, 2e6, 3e6);
+        // getPrice agrees with the stored parallel array
+        Registry.Price memory p0 = registry.getPrice(operatorA, "gpt-4o");
+        assertEq(p0.cachedIn, 1e6, "getPrice m0 cachedIn");
+        Registry.Price memory p1 = registry.getPrice(operatorA, "gpt-4o-mini");
+        assertEq(p1.output, 6e6, "getPrice m1 output");
     }
 
     function test_RevertRegister_AlreadyRegistered() public {
@@ -163,81 +121,154 @@ contract RegistryTest is Test {
         // still-active duplicate registration reverts
         vm.prank(operatorA);
         vm.expectRevert(Registry.AlreadyRegistered.selector);
-        registry.register("https://other.example.com", new string[](1), 0, 0, 0);
+        registry.register("https://other.example.com", _oneModel("o1-preview"), _onePrice(0, 0, 0));
+    }
+
+    function test_RevertRegister_EmptyModels() public {
+        string[] memory models = new string[](0);
+        Registry.Price[] memory prices = new Registry.Price[](0);
+
+        vm.prank(operatorA);
+        vm.expectRevert(Registry.EmptyModels.selector);
+        registry.register(ENDPOINT, models, prices);
+    }
+
+    /// @dev Both mismatch directions revert: models longer or prices longer.
+    function test_RevertRegister_LengthMismatch() public {
+        // 2 models, 1 price
+        string[] memory models = new string[](2);
+        models[0] = "gpt-4o";
+        models[1] = "gpt-4o-mini";
+
+        vm.prank(operatorA);
+        vm.expectRevert(Registry.LengthMismatch.selector);
+        registry.register(ENDPOINT, models, _onePrice(1e6, 2e6, 3e6));
+
+        // 1 model, 2 prices
+        Registry.Price[] memory prices = new Registry.Price[](2);
+        prices[0] = Registry.Price({cachedIn: 1e6, input: 2e6, output: 3e6});
+        prices[1] = Registry.Price({cachedIn: 4e6, input: 5e6, output: 6e6});
+
+        vm.prank(operatorA);
+        vm.expectRevert(Registry.LengthMismatch.selector);
+        registry.register(ENDPOINT, _oneModel("gpt-4o"), prices);
     }
 
     /// @dev After deactivate, re-register succeeds and FULLY replaces every
-    ///      field (endpoint, models as a fresh list with no stale elements,
-    ///      all three prices) and re-activates, emitting Registered again.
+    ///      field (endpoint, a fresh models list, a fresh prices array — no
+    ///      stale elements) and re-activates, emitting Registered again.
     function test_ReRegister_AfterDeactivate() public {
         _registerDefault(operatorA);
         vm.prank(operatorA);
         registry.deactivate();
 
-        string[] memory newModels = new string[](1);
-        newModels[0] = "o1-preview";
+        string[] memory newModels = _oneModel("o1-preview");
 
         vm.expectEmit(true, false, false, true, address(registry));
-        emit Registry.Registered(operatorA, "https://relay2.example.com", newModels, 0, 1, 2);
+        emit Registry.Registered(operatorA, "https://relay2.example.com", newModels);
 
-        _register(operatorA, "https://relay2.example.com", newModels, 0, 1, 2);
+        _register(operatorA, "https://relay2.example.com", newModels, _onePrice(0, 1, 2));
 
-        assertTrue(_listingActive(operatorA), "re-activated");
-        assertEq(_listingEndpoint(operatorA), "https://relay2.example.com", "endpoint replaced");
-        string[] memory got = _listingModels(operatorA);
-        assertEq(got.length, 1, "models replaced");
-        assertEq(got[0], "o1-preview", "new model present");
-        (uint256 cached, uint256 input, uint256 output) = _listingPrices(operatorA);
-        assertEq(cached, 0, "priceCachedIn replaced");
-        assertEq(input, 1, "priceInput replaced");
-        assertEq(output, 2, "priceOutput replaced");
+        Registry.Listing memory listing = registry.getListing(operatorA);
+        assertTrue(listing.active, "re-activated");
+        assertEq(listing.endpoint, "https://relay2.example.com", "endpoint replaced");
+        assertEq(listing.models.length, 1, "models replaced");
+        assertEq(listing.models[0], "o1-preview", "new model present");
+        assertEq(listing.prices.length, 1, "prices replaced");
+        assertEq(listing.prices[0].cachedIn, 0, "price cachedIn replaced");
+        assertEq(listing.prices[0].input, 1, "price input replaced");
+        assertEq(listing.prices[0].output, 2, "price output replaced");
     }
 
     // =====================================================================
-    // updatePrice
+    // updateModelPrice
     // =====================================================================
 
-    function test_UpdatePrice_Happy() public {
+    function test_UpdateModelPrice_Happy() public {
         _registerDefault(operatorA);
 
         vm.expectEmit(true, false, false, true, address(registry));
-        emit Registry.PriceUpdated(operatorA, 10e6, 11e6, 12e6);
+        emit Registry.PriceUpdated(operatorA, "gpt-4o", 10e6, 11e6, 12e6);
 
         vm.startPrank(operatorA);
-        registry.updatePrice(10e6, 11e6, 12e6);
+        registry.updateModelPrice("gpt-4o", Registry.Price({cachedIn: 10e6, input: 11e6, output: 12e6}));
         vm.stopPrank();
 
-        (uint256 cached, uint256 input, uint256 output) = _listingPrices(operatorA);
-        assertEq(cached, 10e6, "priceCachedIn updated");
-        assertEq(input, 11e6, "priceInput updated");
-        assertEq(output, 12e6, "priceOutput updated");
-        assertEq(_listingEndpoint(operatorA), "https://relay.example.com:8787", "endpoint unchanged");
-        assertEq(_listingModels(operatorA).length, 2, "models unchanged");
-        assertTrue(_listingActive(operatorA), "still active");
+        Registry.Listing memory listing = registry.getListing(operatorA);
+        // target model updated
+        assertEq(listing.prices[0].cachedIn, 10e6, "m0 cachedIn updated");
+        assertEq(listing.prices[0].input, 11e6, "m0 input updated");
+        assertEq(listing.prices[0].output, 12e6, "m0 output updated");
+        // other model untouched
+        assertEq(listing.prices[1].cachedIn, 4e6, "m1 cachedIn unchanged");
+        assertEq(listing.prices[1].input, 5e6, "m1 input unchanged");
+        assertEq(listing.prices[1].output, 6e6, "m1 output unchanged");
+        // no model added or removed
+        assertEq(listing.models.length, 2, "models count unchanged");
+        assertEq(listing.models[0], "gpt-4o", "models[0] unchanged");
+        assertEq(listing.models[1], "gpt-4o-mini", "models[1] unchanged");
+        assertEq(listing.endpoint, ENDPOINT, "endpoint unchanged");
+        assertTrue(listing.active, "still active");
     }
 
-    /// @dev Anyone without a listing reverts with NotRegistered (the mapping
-    ///      key is the caller; NotOperator was removed as dead code).
-    function test_RevertUpdatePrice_NotRegistered() public {
-        // operator never registered
+    function test_RevertUpdateModelPrice_ModelNotFound() public {
+        _registerDefault(operatorA);
+
         vm.prank(operatorA);
-        vm.expectRevert(Registry.NotRegistered.selector);
-        registry.updatePrice(1e6, 2e6, 3e6);
-
-        // any other address (never registered) — same revert
-        vm.prank(stranger);
-        vm.expectRevert(Registry.NotRegistered.selector);
-        registry.updatePrice(1e6, 2e6, 3e6);
+        vm.expectRevert(Registry.ModelNotFound.selector);
+        registry.updateModelPrice("unknown-model", Registry.Price({cachedIn: 1e6, input: 2e6, output: 3e6}));
     }
 
-    function test_RevertUpdatePrice_ListingInactive() public {
+    function test_RevertUpdateModelPrice_NotActive() public {
         _registerDefault(operatorA);
         vm.startPrank(operatorA);
         registry.deactivate();
 
-        vm.expectRevert(Registry.ListingInactive.selector);
-        registry.updatePrice(10e6, 11e6, 12e6);
+        vm.expectRevert(Registry.NotActive.selector);
+        registry.updateModelPrice("gpt-4o", Registry.Price({cachedIn: 10e6, input: 11e6, output: 12e6}));
         vm.stopPrank();
+    }
+
+    // =====================================================================
+    // getPrice
+    // =====================================================================
+
+    function test_GetPrice_Happy() public {
+        _registerDefault(operatorA);
+
+        Registry.Price memory p0 = registry.getPrice(operatorA, "gpt-4o");
+        assertEq(p0.cachedIn, 1e6, "m0 cachedIn");
+        assertEq(p0.input, 2e6, "m0 input");
+        assertEq(p0.output, 3e6, "m0 output");
+
+        Registry.Price memory p1 = registry.getPrice(operatorA, "gpt-4o-mini");
+        assertEq(p1.cachedIn, 4e6, "m1 cachedIn");
+        assertEq(p1.input, 5e6, "m1 input");
+        assertEq(p1.output, 6e6, "m1 output");
+    }
+
+    function test_RevertGetPrice_ModelNotFound() public {
+        _registerDefault(operatorA);
+
+        vm.prank(stranger);
+        vm.expectRevert(Registry.ModelNotFound.selector);
+        registry.getPrice(operatorA, "unknown-model");
+    }
+
+    function test_RevertGetPrice_NotActive() public {
+        _registerDefault(operatorA);
+        vm.prank(operatorA);
+        registry.deactivate();
+
+        // inactive listing: even a listed model reverts
+        vm.prank(stranger);
+        vm.expectRevert(Registry.NotActive.selector);
+        registry.getPrice(operatorA, "gpt-4o");
+
+        // never-registered operator is inactive too
+        vm.prank(stranger);
+        vm.expectRevert(Registry.NotActive.selector);
+        registry.getPrice(operatorB, "gpt-4o");
     }
 
     // =====================================================================
@@ -253,128 +284,88 @@ contract RegistryTest is Test {
         vm.prank(operatorA);
         registry.deactivate();
 
-        assertFalse(_listingActive(operatorA), "active flag cleared");
-        assertEq(_listingOperator(operatorA), operatorA, "operator retained");
-        assertEq(_listingEndpoint(operatorA), "https://relay.example.com:8787", "endpoint retained");
-        assertEq(_listingModels(operatorA).length, 2, "models retained");
-        (uint256 cached, uint256 input, uint256 output) = _listingPrices(operatorA);
-        assertEq(cached, 1e6, "priceCachedIn retained");
-        assertEq(input, 2e6, "priceInput retained");
-        assertEq(output, 3e6, "priceOutput retained");
+        Registry.Listing memory listing = registry.getListing(operatorA);
+        assertFalse(listing.active, "active flag cleared");
+        assertEq(listing.operator, operatorA, "operator retained");
+        assertEq(listing.endpoint, ENDPOINT, "endpoint retained");
+        assertEq(listing.models.length, 2, "models retained");
+        assertEq(listing.models[0], "gpt-4o", "models[0] retained");
+        assertEq(listing.prices.length, 2, "prices retained");
+        assertEq(listing.prices[0].cachedIn, 1e6, "prices[0].cachedIn retained");
+        assertEq(listing.prices[1].output, 6e6, "prices[1].output retained");
     }
 
-    function test_RevertDeactivate_NotRegistered() public {
-        vm.prank(operatorA);
-        vm.expectRevert(Registry.NotRegistered.selector);
-        registry.deactivate();
-    }
+    // =====================================================================
+    // getListing
+    // =====================================================================
 
-    function test_RevertDeactivate_ListingInactive() public {
+    /// @dev Struct shape: operator is the FIRST field, prices stay parallel to
+    ///      models (same length, per-index triples), active last.
+    function test_GetListing_StructShape() public {
         _registerDefault(operatorA);
-        vm.startPrank(operatorA);
-        registry.deactivate();
 
-        vm.expectRevert(Registry.ListingInactive.selector);
-        registry.deactivate();
-        vm.stopPrank();
+        Registry.Listing memory listing = registry.getListing(operatorA);
+        // field order: operator, endpoint, models, prices, active
+        assertEq(listing.operator, operatorA, "operator is field 0");
+        assertEq(listing.endpoint, ENDPOINT, "endpoint is field 1");
+        assertEq(listing.models.length, 2, "models is field 2");
+        assertEq(listing.prices.length, listing.models.length, "prices parallel to models");
+        for (uint256 i = 0; i < listing.models.length; i++) {
+            Registry.Price memory p = registry.getPrice(operatorA, listing.models[i]);
+            assertEq(listing.prices[i].cachedIn, p.cachedIn, "parallel cachedIn");
+            assertEq(listing.prices[i].input, p.input, "parallel input");
+            assertEq(listing.prices[i].output, p.output, "parallel output");
+        }
+        assertTrue(listing.active, "active is last field");
     }
 
-    // =====================================================================
-    // getListing boundaries
-    // =====================================================================
-
+    /// @dev An unregistered operator returns the default (empty) struct:
+    ///      zero operator, empty strings/arrays, active == false.
     function test_GetListing_Unregistered() public view {
-        assertEq(_listingOperator(operatorB), address(0), "no operator");
-        assertEq(bytes(_listingEndpoint(operatorB)).length, 0, "no endpoint");
-        assertEq(_listingModels(operatorB).length, 0, "no models");
-        (uint256 cached, uint256 input, uint256 output) = _listingPrices(operatorB);
-        assertEq(cached, 0, "no priceCachedIn");
-        assertEq(input, 0, "no priceInput");
-        assertEq(output, 0, "no priceOutput");
-        assertFalse(_listingActive(operatorB), "not active");
-    }
-
-    // =====================================================================
-    // price boundaries
-    // =====================================================================
-
-    /// @dev A zero price on all three tiers is legal (free tier), at register
-    ///      and via updatePrice.
-    function test_Register_FreeTier_AllZeroPrices() public {
-        string[] memory models = new string[](1);
-        models[0] = "gpt-4o";
-
-        _register(operatorA, "https://free.example.com", models, 0, 0, 0);
-
-        (uint256 cached, uint256 input, uint256 output) = _listingPrices(operatorA);
-        assertEq(cached, 0, "cached price 0");
-        assertEq(input, 0, "input price 0");
-        assertEq(output, 0, "output price 0");
-        assertTrue(_listingActive(operatorA), "active");
-
-        // zero-price update is legal too
-        vm.prank(operatorA);
-        registry.updatePrice(0, 0, 0);
-        (cached, input, output) = _listingPrices(operatorA);
-        assertEq(cached + input + output, 0, "all prices still zero");
-    }
-
-    /// @dev Very large prices carry no overflow semantics (uint256 storage).
-    function test_Register_LargePrices() public {
-        string[] memory models = new string[](1);
-        models[0] = "gpt-4o";
-        uint256 big = type(uint64).max; // 18,446,744,073,709,551,615
-
-        _register(operatorA, "https://big.example.com", models, big, big, big);
-        (uint256 cached, uint256 input, uint256 output) = _listingPrices(operatorA);
-        assertEq(cached, big, "large cached price");
-        assertEq(input, big, "large input price");
-        assertEq(output, big, "large output price");
-
-        // even type(uint256).max is storable and updatable
-        vm.prank(operatorA);
-        registry.updatePrice(type(uint256).max, type(uint256).max, type(uint256).max);
-        (cached, input, output) = _listingPrices(operatorA);
-        assertEq(cached, type(uint256).max, "max cached price");
-        assertEq(input, type(uint256).max, "max input price");
-        assertEq(output, type(uint256).max, "max output price");
+        Registry.Listing memory listing = registry.getListing(operatorB);
+        assertEq(listing.operator, address(0), "no operator");
+        assertEq(bytes(listing.endpoint).length, 0, "no endpoint");
+        assertEq(listing.models.length, 0, "no models");
+        assertEq(listing.prices.length, 0, "no prices");
+        assertFalse(listing.active, "not active");
     }
 
     // =====================================================================
     // multiple operators
     // =====================================================================
 
-    /// @dev A and B each have exactly one listing; writes and deactivation of
-    ///      one never touch the other.
+    /// @dev A and B each have exactly one listing; price updates and
+    ///      deactivation of one never touch the other.
     function test_MultipleOperators_Independent() public {
         _registerDefault(operatorA);
         _registerDefault(operatorB);
 
-        // A updates its prices and deactivates
+        // A updates its m0 price and deactivates
         vm.startPrank(operatorA);
-        registry.updatePrice(9e6, 9e6, 9e6);
+        registry.updateModelPrice("gpt-4o", Registry.Price({cachedIn: 9e6, input: 9e6, output: 9e6}));
         registry.deactivate();
         vm.stopPrank();
 
         // B is untouched: still active, original prices
-        assertTrue(_listingActive(operatorB), "B still active");
-        (uint256 cachedB, uint256 inB, uint256 outB) = _listingPrices(operatorB);
-        assertEq(cachedB, 1e6, "B cached price unchanged");
-        assertEq(inB, 2e6, "B input price unchanged");
-        assertEq(outB, 3e6, "B output price unchanged");
-        assertEq(_listingEndpoint(operatorB), "https://relay.example.com:8787", "B endpoint unchanged");
-        assertEq(_listingModels(operatorB).length, 2, "B models unchanged");
+        assertTrue(registry.getListing(operatorB).active, "B still active");
+        Registry.Price memory pb = registry.getPrice(operatorB, "gpt-4o");
+        assertEq(pb.cachedIn, 1e6, "B m0 cachedIn unchanged");
+        assertEq(pb.input, 2e6, "B m0 input unchanged");
+        assertEq(pb.output, 3e6, "B m0 output unchanged");
+        Registry.Listing memory listingB = registry.getListing(operatorB);
+        assertEq(listingB.endpoint, ENDPOINT, "B endpoint unchanged");
+        assertEq(listingB.models.length, 2, "B models unchanged");
 
-        // A is inactive with its new prices
-        assertFalse(_listingActive(operatorA), "A deactivated");
-        (uint256 cachedA, , ) = _listingPrices(operatorA);
-        assertEq(cachedA, 9e6, "A updated price retained");
+        // A is inactive with its new price retained
+        Registry.Listing memory listingA = registry.getListing(operatorA);
+        assertFalse(listingA.active, "A deactivated");
+        assertEq(listingA.prices[0].cachedIn, 9e6, "A updated price retained");
 
         // B can still update its own prices (no cross-effect)
         vm.prank(operatorB);
-        registry.updatePrice(4e6, 5e6, 6e6);
-        (cachedB, , ) = _listingPrices(operatorB);
-        assertEq(cachedB, 4e6, "B updated its own price");
-        assertFalse(_listingActive(operatorA), "A still inactive");
+        registry.updateModelPrice("gpt-4o", Registry.Price({cachedIn: 4e6, input: 4e6, output: 4e6}));
+        pb = registry.getPrice(operatorB, "gpt-4o");
+        assertEq(pb.cachedIn, 4e6, "B updated its own price");
+        assertFalse(registry.getListing(operatorA).active, "A still inactive");
     }
 }
