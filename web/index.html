@@ -17,6 +17,7 @@
     <button class="nav-toggle" aria-expanded="false" aria-controls="topnav" aria-label="Toggle navigation">[ MENU ]</button>
     <nav class="topnav" id="topnav" aria-label="Sections">
       <a href="#market">MARKET</a>
+      <a href="market.html">FULL&nbsp;MARKET</a>
       <a href="#mechanism">MECHANISM</a>
       <a href="#state">STATE&nbsp;MACHINE</a>
       <a href="#features">FEATURES</a>
@@ -44,7 +45,7 @@
       </p>
       <div class="hero-cta rv" style="--d:.2s">
         <a class="btn" href="console.html">[ OPEN CONSOLE ]</a>
-        <a class="btn btn-ghost" href="#market">[ BROWSE MARKET ]</a>
+        <a class="btn btn-ghost" href="market.html">[ BROWSE FULL MARKET ]</a>
       </div>
       <dl class="hero-stats rv" style="--d:.25s">
         <div><dt>LISTINGS ON-CHAIN</dt><dd id="hstat-listings">—</dd></div>
@@ -74,12 +75,12 @@
   </div>
 </section>
 
-<!-- ══ 01 MARKET ══ -->
+<!-- ══ 01 MARKET (preview — full market on market.html) ══ -->
 <section id="market" class="section">
   <div class="wrap">
     <header class="sec-head rv">
       <h2><span class="sec-num">01</span><span class="sec-rule"></span>MARKET</h2>
-      <p class="sec-sub">Registry.getListing() — every seller listing lives on-chain: endpoint, models, per-model three-tier pricing, active flag. Pick a model chip to see its tier prices. Relay dots probe each listing's <code class="inl">/health</code> live from your browser.</p>
+      <p class="sec-sub">Preview of the configured sellers (<code class="inl">config.js</code>) — Registry.getListing() live: endpoint, models, per-model three-tier pricing, active flag. Pick a model chip to see its tier prices. Relay dots probe each listing's <code class="inl">/health</code> live from your browser.</p>
       <div class="mkt-bar">
         <dl class="mkt-stats">
           <div><dt>LISTINGS</dt><dd id="stat-listings">—</dd></div>
@@ -92,6 +93,12 @@
     </header>
     <div class="mkt-notice" id="mkt-notice" hidden></div>
     <div class="listings" id="listings"><noscript><p class="mock-note">listings render via JavaScript — enable JS to read on-chain Registry state</p></noscript></div>
+
+    <!-- full-market entry (static: visible even without JS) -->
+    <a class="market-entry rv" href="market.html">
+      <span class="market-entry-l1">FULL MARKET<span class="market-entry-arrow">→</span></span>
+      <span class="market-entry-l2">every seller discovered from Registered events — pagination, model filters, operator/model search, price sort</span>
+    </a>
   </div>
 </section>
 

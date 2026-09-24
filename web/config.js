@@ -18,6 +18,13 @@ window.TS_CONFIG = {
   /* official Circle USDC on Monad testnet (fixed chain fact) */
   usdcAddr: "0x534b2f3A21130d7a60830c2Df862319e593943A3",
 
+  /* M9 market.html event-scan discovery (orchestrator-verified from the
+     deployment receipt): Registry v2 deployed AT this block — Registered
+     events are scanned from here up to head, capped by scanDepthBlocks
+     per pass (Monad eth_getLogs limit = 100 blocks/call; windows of 90). */
+  registryFromBlock: 65211780,
+  scanDepthBlocks: 50000,
+
   /* seller operator addresses listed on the market page */
   sellers: ["0x38c26E1782b7E6F656Aa35EbF473e2ff0D718Dd6"],
 };

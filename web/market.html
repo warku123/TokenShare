@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="TokenShare full market — every seller listing discovered from Registry.Registered events on-chain: per-model three-tier pricing, model filters, search, sort. Read-only, no wallet.">
+<title>TokenShare — Full Market</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body class="market-page">
+
+<header class="topbar">
+  <div class="wrap topbar-in">
+    <a class="brand" href="index.html">TOKENSHARE<span class="brand-dim"> / market</span></a>
+    <nav class="topnav" aria-label="Sections">
+      <a href="index.html">OVERVIEW</a>
+      <a href="market.html" class="nav-console" aria-current="page">[ FULL MARKET ]</a>
+      <a href="console.html">CONSOLE</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <!-- ══ PAGE HEAD ══ -->
+  <section class="con-head mkt-head">
+    <div>
+      <h1 class="con-title">MARKET<span class="cursor" aria-hidden="true"></span></h1>
+      <p class="con-sub">Sellers discovered by scanning <code class="inl">Registry.Registered</code> events
+        (windows of 90 blocks — Monad caps eth_getLogs at 100), each enriched live via
+        <code class="inl">getListing</code>. Pick a model chip to see its tier prices. Read-only — no wallet.</p>
+    </div>
+    <dl class="mkt-stats mkt-stats-side">
+      <div><dt>CHAIN</dt><dd id="stat-net">—</dd></div>
+    </dl>
+  </section>
+
+  <!-- ══ SCAN STATUS ══ -->
+  <div class="scan-bar" id="scan-bar" hidden>
+    <div class="scan-track"><div class="scan-fill" id="scan-fill"></div></div>
+    <span class="scan-text" id="scan-text">…</span>
+  </div>
+  <div class="scan-meta" id="scan-meta"></div>
+  <button class="btn btn-sm btn-ghost" id="scan-more" type="button" hidden>[ LOAD EARLIER ]</button>
+
+  <div class="mkt-notice" id="mkt-notice" hidden></div>
+
+  <!-- ══ TOOLBAR ══ -->
+  <div class="mkt-toolbar">
+    <input type="search" id="f-search" class="f-search" placeholder="search operator address or model name …" spellcheck="false" autocomplete="off" aria-label="search listings by operator or model">
+    <label class="f-sort-w"><span class="fld-lbl">SORT</span>
+      <select id="f-sort" aria-label="sort listings">
+        <option value="reg-desc">NEWEST REGISTERED</option>
+        <option value="price-asc">PRICE (first model · INPUT) ↑</option>
+        <option value="price-desc">PRICE (first model · INPUT) ↓</option>
+        <option value="operator-asc">OPERATOR A→Z</option>
+        <option value="operator-desc">OPERATOR Z→A</option>
+        <option value="models-desc">MODEL COUNT ↓</option>
+        <option value="models-asc">MODEL COUNT ↑</option>
+      </select></label>
+    <span class="f-count mono" id="f-count">—</span>
+    <button class="btn btn-sm btn-ghost" id="mkt-refresh" type="button">[ REFRESH ]</button>
+  </div>
+
+  <!-- ══ MODEL FILTERS ══ -->
+  <div class="filter-chips" id="f-models" role="group" aria-label="filter by model" hidden></div>
+
+  <!-- ══ LISTINGS ══ -->
+  <div class="listings listings-full" id="listings">
+    <noscript><p class="mock-note">listings render via JavaScript — enable JS to scan the Registry on-chain</p></noscript>
+  </div>
+
+  <!-- ══ PAGER ══ -->
+  <div class="mkt-pager">
+    <button class="btn btn-sm btn-ghost" id="pg-prev" type="button">[ ← PREV ]</button>
+    <span class="pg-info mono" id="pg-info">—</span>
+    <button class="btn btn-sm btn-ghost" id="pg-next" type="button">[ NEXT → ]</button>
+  </div>
+
+</main>
+
+<footer class="footer">
+  <div class="wrap">
+    <p class="foot-fine">Discovery via Registered events · freshness via getListing · deactivate() never deletes history — the active flag governs.</p>
+  </div>
+</footer>
+
+<script src="vendor/ethers.umd.min.js"></script>
+<script src="config.js"></script>
+<script src="common.js"></script>
+<script src="market.js"></script>
+</body>
+</html>

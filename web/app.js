@@ -1,7 +1,7 @@
-/* TOKENSHARE — market page.
-   Live listings from the on-chain Registry (config.js sellers
-   array → getListing each) + relay /health probes. Read-only:
-   a JsonRpcProvider is enough; no wallet, no keys. */
+/* TOKENSHARE — landing page.
+   Market PREVIEW from the on-chain Registry (config.js sellers →
+   getListing, ≤2 cards); the full discovered/filtered market lives on
+   market.html. Read-only: a JsonRpcProvider is enough; no wallet. */
 "use strict";
 (() => {
   const T = window.TS;
@@ -89,119 +89,12 @@
     noticeEl.innerHTML = html || "";
   }
 
-  function priceCell(tier, native) {
-    return (
-      `<div class="ls-price">` +
-      `<span class="tier">${tier}</span>` +
-      `<span class="usd">$${T.fmtUsdc(native)}</span>` +
-      `<span class="units">${T.fmtInt(native)} units</span>` +
-      `</div>`
-    );
-  }
-
-  /* v2 per-model pricing: chips are a single-select model picker; the
-     three price cells show the selected model's Price from the parallel
-     prices[] array. Selection persists across 30s auto-refreshes. */
-  const selByOperator = {};   // operator → last picked model
-  let cardData = new Map();   // operator → listing (for click re-renders)
-
-  function priceCells(l, model) {
-    const p = T.priceFor(l, model);
-    if (!p) return `<div class="ls-prices-empty">no on-chain price for ${T.esc(model)}</div>`;
-    return priceCell("CACHED IN", p.cachedIn) + priceCell("INPUT", p.input) + priceCell("OUTPUT", p.output);
-  }
-
-  function listingCard(l) {
-    const badge = l.active
-      ? `<span class="badge">ACTIVE</span>`
-      : `<span class="badge off">INACTIVE</span>`;
-    const sel = l.models.includes(selByOperator[l.operator]) ? selByOperator[l.operator] : l.models[0];
-    const models = l.models.length
-      ? l.models.map((m) =>
-          `<button type="button" class="mtag msel" aria-pressed="${m === sel}" data-model="${T.esc(m)}">${T.esc(m)}</button>`
-        ).join("")
-      : `<span class="mtag">—</span>`;
-    const prices = l.models.length
-      ? `<div class="ls-prices">${priceCells(l, sel)}</div>` +
-        `<div class="ls-prices-cap">USDC per 1M tokens · native 6dp units</div>`
-      : `<div class="ls-prices-empty">no models listed — nothing priced on-chain</div>`;
-    return (
-      `<article class="card listing rv in${l.active ? "" : " inactive"}" data-endpoint="${T.esc(l.endpoint)}" data-operator="${T.esc(l.operator)}">` +
-        `<div class="ls-top">` +
-          `<a class="ls-addr" data-copy="${T.esc(l.operator)}" href="${T.addrLink(l.operator)}" target="_blank" rel="noopener" title="${T.esc(l.operator)} — click copies address">${T.truncAddr(l.operator)}</a>` +
-          `<span class="ls-health" title="relay /health probe pending"><span class="hdot"></span><span class="ls-health-lbl">probing</span></span>` +
-          badge +
-        `</div>` +
-        `<p class="ls-endpoint" title="${T.esc(l.endpoint)}">${T.esc(T.hostOf(l.endpoint))}</p>` +
-        `<div class="ls-models" role="group" aria-label="model selector — pick a model to see its prices">${models}</div>` +
-        prices +
-        `<div class="ls-meta">` +
-          `<span>operator <a href="${T.addrLink(l.operator)}" target="_blank" rel="noopener" class="ls-link">explorer ↗</a></span>` +
-          `<span class="chip chip-monad">${T.esc((cfg.chainName || "MONAD").toUpperCase())} · ${cfg.chainId}</span>` +
-        `</div>` +
-      `</article>`
-    );
-  }
-
-  /* delegated chip clicks — survives the full re-render each refresh */
-  if (listingsEl) {
-    listingsEl.addEventListener("click", (e) => {
-      const btn = e.target.closest(".msel");
-      if (!btn) return;
-      const card = btn.closest(".listing");
-      const l = card && cardData.get(card.dataset.operator);
-      if (!l) return;
-      const model = btn.dataset.model;
-      selByOperator[l.operator] = model;
-      card.querySelectorAll(".msel").forEach((b) =>
-        b.setAttribute("aria-pressed", String(b === btn)));
-      const grid = card.querySelector(".ls-prices");
-      if (grid) grid.innerHTML = priceCells(l, model);
-    });
-  }
-
-  async function probeAll(cards) {
-    let online = 0;
-    await Promise.all(cards.map(async ({ el, endpoint }) => {
-      const slot = el.querySelector(".ls-health");
-      const r = await T.probeHealth(endpoint);
-      const dot = slot.querySelector(".hdot");
-      const lbl = slot.querySelector(".ls-health-lbl");
-      if (r.ok) {
-        online += 1;
-        dot.classList.add("ok");
-        lbl.textContent = `${r.ms}ms`;
-        slot.title = `relay /health OK · ${r.ms}ms`;
-        /* M7 touchpoint: TEE / upstream-policy badges via GET /info.
-           Silent degrade — unreachable or non-JSON → no badge, no throw. */
-        const info = await T.probeInfo(endpoint);
-        if (info) {
-          const top = el.querySelector(".ls-top");
-          if (info.teeEnabled) {
-            const a = document.createElement("a");
-            a.className = "badge tee";
-            a.href = T.joinUrl(endpoint, "/attestation");
-            a.target = "_blank";
-            a.rel = "noopener";
-            a.title = "TEE attested relay — view /attestation quote (derived key, reportData, quoteDigest)";
-            a.textContent = "TEE";
-            top.insertBefore(a, top.querySelector(".badge"));
-          }
-          if (info.upstreamHost) {
-            const meta = el.querySelector(".ls-meta span");
-            meta.innerHTML =
-              `upstream <b class="${info.official ? "ok" : "bad"}">${T.esc(info.upstreamHost)}${info.official ? " · official" : " · CUSTOM"}</b> · ` +
-              meta.innerHTML;
-          }
-        }
-      } else {
-        dot.classList.add("off");
-        lbl.textContent = "offline";
-        slot.title = "relay unreachable — or CORS not enabled yet (等待 relay CORS 配置)";
-      }
-    }));
-    return online;
-  }
+  /* ── market preview (M9: full market moved to market.html) ──
+     Shared v2 board from common.js: model-chip picker + per-model price
+     cells + chip-click delegation. This page renders a ≤2 card preview
+     of the config.js sellers; discovery/filter/sort/paging live on the
+     market subpage. */
+  const board = listingsEl ? T.marketBoard(listingsEl) : null;
 
   async function loadMarket() {
     if (!listingsEl) return;
@@ -219,6 +112,7 @@
       listingsEl.innerHTML = "";
       return;
     }
+    if (!board) return;
 
     notice("");
     listingsEl.innerHTML =
@@ -243,21 +137,19 @@
       return;
     }
 
-    listingsEl.innerHTML = visible.map(listingCard).join("");
-    cardData = new Map(visible.map((l) => [l.operator, l]));
-    const cards = visible.map((l) => ({
-      el: [...listingsEl.children].find((c) => c.dataset.endpoint === l.endpoint),
-      endpoint: l.endpoint,
-    })).filter((c) => c.el);
+    /* preview cap — the full paginated/filterable market lives on
+       market.html (entry panel sits right below the grid) */
+    const preview = visible.slice(0, 2);
+    const cards = board.render(preview);
 
-    /* stats */
+    /* stats count the full configured seller set, not the 2-card preview */
     const active = visible.filter((l) => l.active).length;
     if (statListings) statListings.textContent = String(visible.length);
     if (statActive) statActive.textContent = String(active);
     if (heroStats.listings) heroStats.listings.textContent = String(visible.length);
     if (heroStats.active) heroStats.active.textContent = String(active);
     if (statOnline) statOnline.textContent = "…";
-    const online = await probeAll(cards);
+    const online = await T.probeListings(cards);
     if (statOnline) statOnline.textContent = `${online}/${cards.length}`;
     if (heroStats.online) heroStats.online.textContent = `${online}/${cards.length}`;
   }

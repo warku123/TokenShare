@@ -14,6 +14,9 @@ Monad testnet (chainId 10143) · Escrow/Registry/USDC 已部署（见 `web/confi
 
 ## 市场页（只读，无需钱包）
 
+> M9 起首页 `index.html` 仅保留 ≤2 卡预览 + FULL MARKET 入口面板；完整市场在 `market.html`（导航三页互链）。
+
+- [ ] **首页预览**：市场区渲染 config sellers 前 2 张卡（v2 卡同规格）；统计条 LISTINGS/ACTIVE/RELAYS ONLINE 按全量 sellers 计数（非 2 卡截断）；入口面板无 JS 也可见，点击进 `market.html`
 - [ ] listings 卡渲染：operator（截断，点击=复制地址）、endpoint 域名、models 标签、ACTIVE 徽章、explorer 链接
 - [ ] **模型选择器（v2）**：模型 chips 可点（button + aria-pressed），默认选中首模型并高亮；点选后三档价格框（CACHED IN $ · INPUT $ · OUTPUT $ + 原生 6dp units 行）切换为该模型价；30s 自刷/手动 REFRESH 后选中态保留；键盘 Tab 聚焦 + Enter 可切
 - [ ] 每模型独立价：同一 listing 多模型不同价时逐 chip 核对与链上 `getPrice(operator, model)` 一致（数据源 = getListing 的 prices[] 平行数组）
@@ -22,6 +25,19 @@ Monad testnet (chainId 10143) · Escrow/Registry/USDC 已部署（见 `web/confi
 - [ ] relay 健康点：relay 在线=绿点+延迟 ms；离线/CORS 未开=灰点（hover 有说明）
 - [ ] relay `/info` 在线时：TEE 模式显紫色 `TEE` 徽标（点击开 `/attestation` quote JSON)；meta 行显 upstream host + official/CUSTOM；relay 不可达时全部静默不显示
 - [ ] 统计条 LISTINGS/ACTIVE/RELAYS ONLINE 数字一致；`[ REFRESH ]` 与 30s 自刷生效
+
+## 市场子页 market.html（Registered 事件发现 + 分页/筛选/搜索/排序）
+
+- [ ] **事件扫描**：进度条推进（window i/N + 块区间），完成后 meta 行显 operator 数 + 扫描块区间；listing 卡=发现结果（不依赖 config sellers）；同一 operator 多次 register 取最新事件，active 状态以 getListing 为准
+- [ ] **会话缓存/增量扫描**：同会话二次进入或 REFRESH → 只扫上次 head 之后的增量（秒级返回，scan 行标注 incremental/cached）；active/价格每次经 getListing 新鲜读取；Registry 重部署（registryAddr/registryFromBlock 变化）缓存键自动失效转全量
+- [ ] **扫描深度上限**：默认只扫最近 `scanDepthBlocks`（config.js，现 50000）块；未扫到部署块时 `[ LOAD EARLIER ]` 可见可点，每点扩展一个深度块并合并新 operator（已知的跳过）；扫到 `registryFromBlock`（部署块）后按钮隐藏、meta 标注 full history
+- [ ] **扫描降级**：RPC 不可达/限流打满重试 → 琥珀条降级为 config.js sellers（现行为），meta 标注 EVENT SCAN FAILED + 原因；页面不崩
+- [ ] **分页**：>12 listing 时 12/页，PREV/NEXT 边界禁用，SHOWING a–b OF n · PAGE x/y 与实际一致；换页仅探测当前页卡片
+- [ ] **模型筛选**：filter chips = 已加载 listings 的 models 并集（含计数徽标），ALL 默认选中；点选过滤列表并重置到第 1 页；筛选后无结果给 RESET 提示
+- [ ] **搜索**：operator 地址子串（大小写不敏感）或模型名子串命中；无命中空态+RESET；输入 200ms 防抖
+- [ ] **排序**：NEWEST REGISTERED（默认，按事件块高）· 首模型 INPUT 价 ↑/↓（无价 listing 排尾/首）· OPERATOR A→Z/Z→A · 模型数 ↑/↓，切换后立即重排
+- [ ] 卡片行为同首页：模型 chip 选择器/每模型价/健康点/TEE 徽标/复制地址全部生效
+- [ ] `config.js` 键核对：`registryFromBlock`（Registry v2 部署块）与 `scanDepthBlocks` 存在且仅增未改既有键
 
 ## Seller tab
 

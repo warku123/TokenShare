@@ -158,8 +158,12 @@ window.TS = (() => {
 
   /* ── listings ────────────────────────────────────────────── */
   async function fetchListing(provider, operator) {
-    const l = await registry(provider).getListing(operator);
-    const li = l.listing || l[0]; /* named tuple access, positional fallback */
+    const raw = await registry(provider).getListing(operator);
+    /* ethers v6 COLLAPSES a single struct output: the awaited Contract
+       call IS the tuple Result (named .models/.prices/.active). The
+       outer `.listing` wrapper only exists in manual Interface decoding
+       (decodeFunctionResult) — support both shapes. */
+    const li = (raw && raw.models !== undefined) ? raw : ((raw && (raw.listing || raw[0])) || raw);
     const models = (li.models || []).filter((m) => m && m.trim() !== ""); // PIN: empty strings filtered
     /* v2: prices is a Price[] PARALLEL to models — prices[i] prices models[i].
        Keep BigInts; guard against short arrays (corrupt/old contracts). */
@@ -191,6 +195,218 @@ window.TS = (() => {
       catch { out.push({ operator: addr, registered: false, error: true, models: [] }); }
     }
     return out;
+  }
+
+  /* ── shared v2 market card board (index preview + market.html) ──
+     One board per grid container: renders listing cards (model chip
+     picker + per-model price cells), keeps per-operator chip selection
+     across re-renders, returns the probeable card handles. */
+  function marketBoard(rootEl) {
+    const selByOperator = {};   // operator → last picked model
+    let cardData = new Map();   // operator → listing (for click re-renders)
+
+    function priceCell(tier, native) {
+      return (
+        `<div class="ls-price">` +
+        `<span class="tier">${tier}</span>` +
+        `<span class="usd">$${fmtUsdc(native)}</span>` +
+        `<span class="units">${fmtInt(native)} units</span>` +
+        `</div>`
+      );
+    }
+    function priceCells(l, model) {
+      const p = priceFor(l, model);
+      if (!p) return `<div class="ls-prices-empty">no on-chain price for ${esc(model)}</div>`;
+      return priceCell("CACHED IN", p.cachedIn) + priceCell("INPUT", p.input) + priceCell("OUTPUT", p.output);
+    }
+    function cardHTML(l) {
+      const badge = l.active
+        ? `<span class="badge">ACTIVE</span>`
+        : `<span class="badge off">INACTIVE</span>`;
+      const sel = l.models.includes(selByOperator[l.operator]) ? selByOperator[l.operator] : l.models[0];
+      const models = l.models.length
+        ? l.models.map((m) =>
+            `<button type="button" class="mtag msel" aria-pressed="${m === sel}" data-model="${esc(m)}">${esc(m)}</button>`
+          ).join("")
+        : `<span class="mtag">—</span>`;
+      const prices = l.models.length
+        ? `<div class="ls-prices">${priceCells(l, sel)}</div>` +
+          `<div class="ls-prices-cap">USDC per 1M tokens · native 6dp units</div>`
+        : `<div class="ls-prices-empty">no models listed — nothing priced on-chain</div>`;
+      return (
+        `<article class="card listing rv in${l.active ? "" : " inactive"}" data-endpoint="${esc(l.endpoint)}" data-operator="${esc(l.operator)}">` +
+          `<div class="ls-top">` +
+            `<a class="ls-addr" data-copy="${esc(l.operator)}" href="${addrLink(l.operator)}" target="_blank" rel="noopener" title="${esc(l.operator)} — click copies address">${truncAddr(l.operator)}</a>` +
+            `<span class="ls-health" title="relay /health probe pending"><span class="hdot"></span><span class="ls-health-lbl">probing</span></span>` +
+            badge +
+          `</div>` +
+          `<p class="ls-endpoint" title="${esc(l.endpoint)}">${esc(hostOf(l.endpoint))}</p>` +
+          `<div class="ls-models" role="group" aria-label="model selector — pick a model to see its prices">${models}</div>` +
+          prices +
+          `<div class="ls-meta">` +
+            `<span>operator <a href="${addrLink(l.operator)}" target="_blank" rel="noopener" class="ls-link">explorer ↗</a></span>` +
+            `<span class="chip chip-monad">${esc((cfg.chainName || "MONAD").toUpperCase())} · ${cfg.chainId}</span>` +
+          `</div>` +
+        `</article>`
+      );
+    }
+
+    /* delegated chip clicks — survives full re-renders */
+    rootEl.addEventListener("click", (e) => {
+      const btn = e.target.closest(".msel");
+      if (!btn) return;
+      const card = btn.closest(".listing");
+      const l = card && cardData.get(card.dataset.operator);
+      if (!l) return;
+      const model = btn.dataset.model;
+      selByOperator[l.operator] = model;
+      card.querySelectorAll(".msel").forEach((b) =>
+        b.setAttribute("aria-pressed", String(b === btn)));
+      const grid = card.querySelector(".ls-prices");
+      if (grid) grid.innerHTML = priceCells(l, model);
+    });
+
+    return {
+      render(listings) {
+        rootEl.innerHTML = listings.map(cardHTML).join("");
+        cardData = new Map(listings.map((l) => [l.operator, l]));
+        /* match by operator (endpoints may collide across sellers) */
+        return listings.map((l) => ({
+          el: [...rootEl.children].find((c) => c.dataset.operator === l.operator),
+          endpoint: l.endpoint,
+        })).filter((c) => c.el);
+      },
+    };
+  }
+
+  /* probe rendered cards: /health dot + ms, then /info TEE & upstream
+     badges (silent degrade). Returns the online count. */
+  async function probeListings(cards) {
+    let online = 0;
+    await Promise.all(cards.map(async ({ el, endpoint }) => {
+      const slot = el.querySelector(".ls-health");
+      const r = await probeHealth(endpoint);
+      const dot = slot.querySelector(".hdot");
+      const lbl = slot.querySelector(".ls-health-lbl");
+      if (r.ok) {
+        online += 1;
+        dot.classList.add("ok");
+        lbl.textContent = `${r.ms}ms`;
+        slot.title = `relay /health OK · ${r.ms}ms`;
+        /* M7 touchpoint: TEE / upstream-policy badges via GET /info.
+           Silent degrade — unreachable or non-JSON → no badge, no throw. */
+        const info = await probeInfo(endpoint);
+        if (info) {
+          const top = el.querySelector(".ls-top");
+          if (info.teeEnabled) {
+            const a = document.createElement("a");
+            a.className = "badge tee";
+            a.href = joinUrl(endpoint, "/attestation");
+            a.target = "_blank";
+            a.rel = "noopener";
+            a.title = "TEE attested relay — view /attestation quote (derived key, reportData, quoteDigest)";
+            a.textContent = "TEE";
+            top.insertBefore(a, top.querySelector(".badge"));
+          }
+          if (info.upstreamHost) {
+            const meta = el.querySelector(".ls-meta span");
+            meta.innerHTML =
+              `upstream <b class="${info.official ? "ok" : "bad"}">${esc(info.upstreamHost)}${info.official ? " · official" : " · CUSTOM"}</b> · ` +
+              meta.innerHTML;
+          }
+        }
+      } else {
+        dot.classList.add("off");
+        lbl.textContent = "offline";
+        slot.title = "relay unreachable — or CORS not enabled yet (等待 relay CORS 配置)";
+      }
+    }));
+    return online;
+  }
+
+  /* ── multi-seller discovery for market.html (M9) ────────────
+     Sellers are FOUND by scanning Registry.Registered events, then
+     enriched with getListing (freshness + active flag + prices).
+     Event (contracts/src/Registry.sol, v2 keeps the v1 shape):
+       event Registered(address indexed operator, string endpoint, string[] models)
+     → topic0 = keccak256("Registered(address,string,string[])"); the
+     operator sits in topics[1]. Monad caps eth_getLogs at 100 blocks per
+     call → scan in 90-block windows and halve the window on failure.
+     deactivate() deletes nothing: same-operator re-registers resolve by
+     taking the LATEST event; live state always comes from getListing. */
+  const REGISTERED_TOPIC = ethers.id("Registered(address,string,string[])");
+  const SCAN_WINDOW = 90;   /* < Monad's 100-block eth_getLogs cap */
+  const SCAN_FLOOR = 5;     /* give up halving below this → real outage */
+
+  async function scanRegisteredLogs(fromBlock, toBlock, onProgress) {
+    const prov = readProvider();
+    /* precompute windows, then a small worker pool — sequential getLogs
+       measures ~0.7s/window on the public RPC; 4 in flight keeps the
+       first paint honest without hammering the endpoint */
+    const windows = [];
+    for (let s = fromBlock; s <= toBlock; s += SCAN_WINDOW) {
+      windows.push([s, Math.min(toBlock, s + SCAN_WINDOW - 1)]);
+    }
+    const total = windows.length;
+    let done = 0;
+    let next = 0;
+    const latest = new Map(); // lowercase operator → {operator, blockNumber}
+
+    const fetchWindow = async ([s, e]) => {
+      let w = e - s + 1;
+      for (let attempt = 0; attempt < 8; attempt++) {
+        try {
+          return await prov.getLogs({
+            address: cfg.registryAddr,
+            topics: [REGISTERED_TOPIC],
+            fromBlock: s,
+            toBlock: Math.min(e, s + w - 1),
+          });
+        } catch (err) {
+          const nw = Math.floor(w / 2);
+          if (nw < SCAN_FLOOR) throw err; /* tiny window still failing → abort */
+          w = nw;
+        }
+      }
+      throw new Error("scan window failed after retries");
+    };
+
+    const worker = async () => {
+      while (next < windows.length) {
+        const win = windows[next++];
+        const logs = await fetchWindow(win);
+        for (const log of logs) {
+          if (!log.topics || log.topics.length < 2) continue;
+          try {
+            const op = ethers.getAddress("0x" + log.topics[1].slice(26));
+            const blk = Number(log.blockNumber);
+            const prev = latest.get(op.toLowerCase());
+            if (!prev || blk >= prev.blockNumber) latest.set(op.toLowerCase(), { operator: op, blockNumber: blk });
+          } catch { /* malformed topic — skip */ }
+        }
+        done += 1;
+        if (onProgress) onProgress(done, total);
+      }
+    };
+
+    await Promise.all(Array.from({ length: Math.min(4, windows.length) }, worker));
+    return [...latest.values()];
+  }
+
+  /* one bounded scan pass. Default: [head-depth+1 … head] with the floor
+   * at cfg.registryFromBlock. `fromBlock` given → older extension chunk
+   * ending at that block (load-earlier). Never scans below the floor. */
+  async function discoverRange({ depth, fromBlock: earlierTo, onProgress } = {}) {
+    const prov = readProvider();
+    const head = await prov.getBlockNumber();
+    const depthBlocks = Math.max(1, Number(depth ?? cfg.scanDepthBlocks) || 50000);
+    const floorBlock = Math.max(0, Number(cfg.registryFromBlock) || 0);
+    const to = earlierTo != null ? earlierTo : head;
+    const from = Math.max(floorBlock, to - depthBlocks + 1);
+    if (from > to) return { operators: [], from, to, head, floorBlock };
+    const operators = await scanRegisteredLogs(from, to,
+    onProgress ? (done, total) => onProgress(done, total, { from, to }) : undefined);
+  return { operators, from, to, head, floorBlock };
   }
 
   /* PIN minAmount estimate, native units, for ONE model's price triple:
@@ -427,6 +643,7 @@ window.TS = (() => {
     esc, truncAddr, addrLink, txLink, joinUrl, hostOf, sameAddr, isZeroAddr,
     probeHealth, probeInfo, installCopyHandlers, fetchJson, fetchListing, fetchListings,
     priceFor, minAmountEstimate, maxMinAmountEstimate,
+    marketBoard, probeListings, discoverRange, REGISTERED_TOPIC, SCAN_WINDOW,
     RELAY_CHAT_PATH, buildEip191Message,
     RECEIPT_DOMAIN_NAME, RECEIPT_DOMAIN_VERSION, RECEIPT_TYPES,
     decodeReceiptHeader, verifyReceipt,
