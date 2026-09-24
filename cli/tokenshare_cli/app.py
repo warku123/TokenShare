@@ -25,7 +25,7 @@ from . import attestation as attestation_mod
 from . import chain as chain_mod
 from . import disputes as dispute_mod
 from . import signing
-from .config import load_config, load_listings_from_block, load_seller_override
+from .config import load_config, load_seller_override
 from .errors import TokenshareError
 from .receipt import Receipt, ReceiptDecodeError, decode_receipt, verify_receipt
 from .relay_client import post_chat_json, open_chat_stream
@@ -44,7 +44,7 @@ Env vars required by every chain-touching command (no values are ever hardcoded)
 
 Optional env: SELLER_ADDR (default seller for call), PROMPT_TOKEN_CAP / COMPLETION_TOKEN_CAP (default lock sizing, mirrors relay defaults 200000 / 32000), TX_TIMEOUT_S (tx wait timeout).
 
-Commands: deposit (approve + deposit USDC into Escrow); lock (lock(seller, maxAmount, ttl=600) -> prints paymentId); call (pick seller -> lock NEW paymentId, or reuse via --payment-id -> read Registry listing.endpoint -> POST /v1/chat/completions with EIP-191 X-Payment-Id + X-Signature -> prints reply, X-Settle-Status, and verifies the EIP-712 X-Receipt against the Registry listing operator); balance (wallet USDC + withdrawable Escrow); refund (withdraw an expired lock after its TTL); disputes (list locally recorded receipt-verification disputes); verify-attestation (best-effort off-chain parse of a TEE attestation quote + optional on-chain digest comparison); listings (compare ACTIVE Registry listings — per-model tiered prices + estimated per-call cost, cheapest first; sellers discovered via the Registered event, env LISTINGS_FROM_BLOCK tunes the scan start).
+Commands: deposit (approve + deposit USDC into Escrow); lock (lock(seller, maxAmount, ttl=600) -> prints paymentId); call (pick seller -> lock NEW paymentId, or reuse via --payment-id -> read Registry listing.endpoint -> POST /v1/chat/completions with EIP-191 X-Payment-Id + X-Signature -> prints reply, X-Settle-Status, and verifies the EIP-712 X-Receipt against the Registry listing operator); balance (wallet USDC + withdrawable Escrow); refund (withdraw an expired lock after its TTL); disputes (list locally recorded receipt-verification disputes); verify-attestation (best-effort off-chain parse of a TEE attestation quote + optional on-chain digest comparison); listings (compare ACTIVE Registry listings — per-model tiered prices + estimated per-call cost, cheapest first; sellers discovered via the Registry v3 on-chain enumeration sellerCount/getSellers).
 
 Receipt verification (BUILD_SPEC §6.3): a failed X-Receipt check prints a warning and records the paymentId in the dispute ledger (default ~/.tokenshare/disputes.json; override with --disputes-file, review via the `disputes` command).
 
@@ -357,7 +357,7 @@ def verify_attestation_cmd(
 
 
 # ---------------------------------------------------------------------------
-# listings (A-tier multi-seller comparison)
+# listings (multi-seller comparison; M10: Registry v3 enumeration discovery)
 # ---------------------------------------------------------------------------
 
 
@@ -404,11 +404,10 @@ def listings_cmd(
 
     Registry v2 (M9 ABI PIN): prices are PER MODEL — getListing returns
     `models` and a parallel `prices` array, so every row is one
-    (operator, model) price pair. Discovery: the Registry has no on-chain
-    enumeration, so sellers are collected via eth_getLogs over the
-    Registered event (re-registers dedup; per-seller CURRENT state comes
-    from getListing). Set env LISTINGS_FROM_BLOCK to start the scan closer
-    to the Registry deployment block on long chains. Rows are sorted by
+    (operator, model) price pair. Discovery: Registry v3 on-chain
+    enumeration (M10 ABI PIN) — sellerCount() + getSellers(start, count)
+    pagination replaces the old eth_getLogs Registered-event scan; the
+    LISTINGS_FROM_BLOCK env is gone (breaking). Rows are sorted by
     estimated per-call cost (cheapest first); with --model only that model's
     rows are compared. Pick a seller's full address from the list for
     `call --seller` / `lock --seller`.
@@ -417,8 +416,7 @@ def listings_cmd(
         cfg = load_config()
         ctx = chain_mod.open_chain(cfg)
         prompt_cap, completion_cap = _token_caps()
-        from_block = load_listings_from_block()
-        operators = chain_mod.registered_operators(ctx, from_block)
+        operators = chain_mod.get_sellers(ctx.w3, cfg.registry_addr)
 
         rows: list[dict] = []
         seen_operators: set[str] = set()
@@ -470,7 +468,7 @@ def listings_cmd(
                     {
                         "chainId": cfg.chain_id,
                         "registry": cfg.registry_addr,
-                        "fromBlock": from_block,
+                        "sellerCount": len(operators),
                         "activeOnly": True,
                         "model": model,
                         "count": len(rows),
@@ -483,9 +481,8 @@ def listings_cmd(
 
         if not operators:
             typer.echo(
-                f"no Registered events found from block {from_block} — nobody has "
-                "registered a listing yet. If the chain prunes old logs, set "
-                "LISTINGS_FROM_BLOCK to the Registry deployment block."
+                "no registered sellers on-chain (Registry sellerCount() == 0) — "
+                "nobody has registered a listing yet."
             )
             return
         if not rows:
@@ -504,9 +501,8 @@ def listings_cmd(
         suffix = f", model {model!r}" if model is not None else ""
         typer.echo(
             f"Active listings ({len(rows)} model price rows / {len(seen_operators)} "
-            f"seller(s), chainId {cfg.chain_id}{suffix}; Registered events scanned "
-            "from block "
-            f"{from_block}), sorted by estimated per-call cost:"
+            f"seller(s), chainId {cfg.chain_id}{suffix}), sorted by estimated "
+            "per-call cost:"
         )
         typer.echo("")
         header = [

@@ -6,8 +6,8 @@ Extracted verbatim from:
   contracts/out/MockUSDC.sol/MockUSDC.json  (standard OZ ERC-20, 6 decimals)
 
 Only the function/event entries the CLI actually calls are embedded (Registry
-v2 = M9 ABI PIN 「M9 ABI PIN（Registry v2）」, per-model pricing). These are
-public interfaces — NOT configuration — so embedding them does not violate
+v3 = M9 ABI PIN per-model pricing + M10 ABI PIN on-chain enumeration). These
+are public interfaces — NOT configuration — so embedding them does not violate
 the zero-hardcode rule (no addresses, no chain ids appear here).
 """
 
@@ -102,7 +102,8 @@ ESCROW_ABI = [
     },
 ]
 
-# Registry v2 (M9 ABI PIN 「M9 ABI PIN（Registry v2）」, verbatim — no drift):
+# Registry v3 (M9 ABI PIN 「M9 ABI PIN（Registry v2）」 + M10 ABI PIN 「M10」,
+# verbatim — no drift): v2 surface unchanged, v3 ADDS on-chain enumeration.
 #   struct Price { uint256 cachedIn; uint256 input; uint256 output; }
 #   struct Listing { address operator; string endpoint; string[] models;
 #                    Price[] prices; bool active; }   // prices parallel to models
@@ -201,22 +202,30 @@ REGISTRY_ABI = [
         ],
         "stateMutability": "view",
     },
-    # Discovery source for `listings`: the Registry has NO on-chain
-    # enumeration, so sellers are collected via eth_getLogs over this event.
-    # v2 (M9 PIN): the flat price fields are gone (prices are per-model now);
-    # the CLI scanner only consumes the indexed `operator` topic and reads the
-    # CURRENT per-model state via getListing. Signature cross-checked by
-    # tests/test_listings.py against the M9 PIN (and against
-    # contracts/src/Registry.sol once fix-17 lands the v2 source).
+    # M10 Registry v3 on-chain enumeration (ABI PIN 「M10」, verbatim — no
+    # drift). O(1) discovery, replaces the old eth_getLogs Registered scan:
+    #   sellerCount() -> total registered sellers (append-only, never shrinks)
+    #   getSellers(start, count) -> clamp semantics: start >= len -> empty;
+    #     count > 500 -> 500 (公开常量便于测); start+count > len -> truncated.
+    # deactivate -> re-register never re-appends a seller. The Registered
+    # EVENT still exists on-chain (signature unchanged), but the CLI no
+    # longer consumes it — the entry was dropped with the scan path.
     {
-        "type": "event",
-        "name": "Registered",
-        "anonymous": False,
+        "type": "function",
+        "name": "sellerCount",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "uint256", "internalType": "uint256"}],
+        "stateMutability": "view",
+    },
+    {
+        "type": "function",
+        "name": "getSellers",
         "inputs": [
-            {"name": "operator", "type": "address", "indexed": True, "internalType": "address"},
-            {"name": "endpoint", "type": "string", "indexed": False, "internalType": "string"},
-            {"name": "models", "type": "string[]", "indexed": False, "internalType": "string[]"},
+            {"name": "start", "type": "uint256", "internalType": "uint256"},
+            {"name": "count", "type": "uint256", "internalType": "uint256"},
         ],
+        "outputs": [{"name": "", "type": "address[]", "internalType": "address[]"}],
+        "stateMutability": "view",
     },
     {
         "type": "event",

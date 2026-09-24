@@ -1,10 +1,10 @@
-"""Tests for `listings` (multi-seller PER-MODEL comparison, Registry v2 M9).
+"""Tests for `listings` (Registry v3 on-chain enumeration discovery, M10).
 
-open_chain / registered_operators / get_listing are monkeypatched at the
-chain-module level; the Registered-event signature constant is cross-checked
-against the M9 ABI PIN (.slim/deepwork — the authoritative spec) and, once
-the v2 source lands, against contracts/src/Registry.sol — so event drift
-fails loudly.
+open_chain / get_sellers / get_listing are monkeypatched at the chain-module
+level; the sellerCount/getSellers ABI entries are cross-checked against the
+M10 ABI PIN (.slim/deepwork/m3-m5-e2e.md 「M10」 — the authoritative spec)
+and, once the v3 source lands, against contracts/src/Registry.sol — so
+drift fails loudly.
 """
 
 from __future__ import annotations
@@ -15,20 +15,20 @@ import re
 import types
 
 import pytest
-from eth_utils import keccak, to_checksum_address
+from eth_utils import to_checksum_address
 from typer.testing import CliRunner
 
 from tests.conftest import all_output
+from tokenshare_cli import config as config_mod
 from tokenshare_cli import chain as chain_mod
 from tokenshare_cli.app import app
-from tokenshare_cli.chain import REGISTERED_EVENT_SIG
-from tokenshare_cli.config import load_listings_from_block
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 PIN_FILE = REPO_ROOT / ".slim" / "deepwork" / "m3-m5-e2e.md"
 
 SELLER_A = to_checksum_address("0x" + "aa" * 20)
 SELLER_B = to_checksum_address("0x" + "bb" * 20)
+SELLER_C = to_checksum_address("0x" + "cc" * 20)
 REGISTRY_ADDR = "0x" + "99" * 20
 
 # Per-model tiered prices (native USDC per 1M tokens) — M9 Registry v2:
@@ -62,41 +62,38 @@ def runner():
 
 @pytest.fixture()
 def listings_env(monkeypatch):
-    """Full PIN env + scrubbed estimate/scan vars (deterministic caps)."""
+    """Full PIN env + scrubbed estimate vars (deterministic caps)."""
     monkeypatch.setenv("BUYER_PRIVATE_KEY", "0x" + "11" * 32)
     monkeypatch.setenv("RPC_URL", "http://127.0.0.1:8545")
     monkeypatch.setenv("CHAIN_ID", "10143")
     monkeypatch.setenv("ESCROW_ADDR", "0x" + "aa" * 20)
     monkeypatch.setenv("REGISTRY_ADDR", REGISTRY_ADDR)
     monkeypatch.setenv("USDC_ADDR", "0x" + "cc" * 20)
-    for var in ("LISTINGS_FROM_BLOCK", "PROMPT_TOKEN_CAP", "COMPLETION_TOKEN_CAP"):
-        monkeypatch.delenv(var, raising=False)
+    monkeypatch.delenv("PROMPT_TOKEN_CAP", raising=False)
+    monkeypatch.delenv("COMPLETION_TOKEN_CAP", raising=False)
 
 
 class FakeListingsChain:
-    """ChainModule stand-in: canned event order + per-operator listings."""
+    """ChainModule stand-in: canned enumeration order + per-operator listings."""
 
-    def __init__(self, monkeypatch, *, events: list[str], listings: dict):
-        self.events = events
+    def __init__(self, monkeypatch, *, enumerated: list[str], listings: dict):
+        self.enumerated = enumerated
         self.listings = listings
-        self.registered_calls: list[int] = []
+        self.w3 = types.SimpleNamespace()  # app passes ctx.w3 to get_sellers
+        self.get_sellers_calls: list[tuple[str, int]] = []
         self.get_listing_calls: list[str] = []
         ctx = self
         monkeypatch.setattr(chain_mod, "open_chain", lambda cfg: ctx)
         monkeypatch.setattr(
             chain_mod,
-            "registered_operators",
-            lambda c, from_block: ctx._registered(from_block),
+            "get_sellers",
+            lambda w3, addr, page=100: ctx._sellers(w3, addr, page),
         )
         monkeypatch.setattr(chain_mod, "get_listing", lambda c, op: ctx._listing(op))
 
-    def _registered(self, from_block: int) -> list[str]:
-        self.registered_calls.append(from_block)
-        seen: list[str] = []
-        for op in self.events:
-            if op not in seen:
-                seen.append(op)
-        return seen
+    def _sellers(self, w3, addr, page=100) -> list[str]:
+        self.get_sellers_calls.append((str(addr), page))
+        return list(self.enumerated)
 
     def _listing(self, operator: str) -> dict:
         self.get_listing_calls.append(operator)
@@ -104,145 +101,224 @@ class FakeListingsChain:
 
 
 # --------------------------------------------------------------------------
-# ABI / signature correspondence with the M9 ABI PIN (authoritative) and the
-# v2 Registry.sol source once fix-17 lands it
+# ABI / signature correspondence with the M10 ABI PIN (authoritative) and the
+# v3 Registry.sol source once fix-23 lands it
 # --------------------------------------------------------------------------
-def _canonical_from_param_list(params: str) -> str:
+def _canonical_sig(name: str, params: str) -> str:
     param_types = []
     for param in params.split(","):
+        param = param.strip()
+        if not param:
+            continue
         tokens = param.split()
         if tokens[0] == "indexed":  # indexed-ness never enters the signature
             tokens = tokens[1:]
         param_types.append(tokens[0])
-    return "(" + ",".join(param_types) + ")"
+    return f"{name}(" + ",".join(param_types) + ")"
 
 
-def test_registered_event_signature_matches_m9_pin():
-    """M9 ABI PIN is the authoritative spec while contracts/src/Registry.sol
-    is still v1 (fix-17 lane rewrites it in parallel)."""
-    pin_text = PIN_FILE.read_text()
-    match = re.search(r"event\s+Registered\(([^)]+)\)", pin_text, re.S)
-    assert match, "Registered event not found in the M9 ABI PIN"
-    canonical = "Registered" + _canonical_from_param_list(match.group(1))
-    assert canonical == REGISTERED_EVENT_SIG
-    # v2 drops the flat price fields (per-model prices live in getListing).
-    assert canonical == "Registered(address,string,string[])"
-
-
-def test_registered_event_signature_matches_v2_source_once_landed():
-    """Auto-tightens when fix-17 lands: if Registry.sol contains the v2
-    surface (updateModelPrice), its Registered signature must match ours."""
-    source = (REPO_ROOT / "contracts" / "src" / "Registry.sol").read_text()
-    if "updateModelPrice" not in source:
-        pytest.skip(
-            "contracts/src/Registry.sol is still v1 — M9 fix-17 has not landed "
-            "the v2 source yet"
-        )
-    match = re.search(r"event\s+Registered\(([^)]+)\)", source, re.S)
-    assert match, "Registered event not found in Registry.sol"
-    canonical = "Registered" + _canonical_from_param_list(match.group(1))
-    assert canonical == REGISTERED_EVENT_SIG
-
-
-def test_registry_abi_has_v2_surface():
-    """REGISTRY_ABI carries the full M9 v2 surface verbatim."""
+def test_registry_abi_has_v3_enumeration():
+    """REGISTRY_ABI carries the M10 enumeration surface + the full M9 v2
+    surface (v3 keeps the v2 face 100% — only additions, no changes)."""
     from tokenshare_cli.abis import REGISTRY_ABI
 
     by_name = {(e["type"], e["name"]): e for e in REGISTRY_ABI}
     assert {
+        ("function", "sellerCount"),
+        ("function", "getSellers"),
         ("function", "register"),
         ("function", "updateModelPrice"),
         ("function", "deactivate"),
         ("function", "getListing"),
         ("function", "getPrice"),
-        ("event", "Registered"),
         ("event", "PriceUpdated"),
         ("event", "Deactivated"),
     } <= set(by_name)
 
-    price = (
-        {"name": "cachedIn", "type": "uint256", "internalType": "uint256"},
-        {"name": "input", "type": "uint256", "internalType": "uint256"},
-        {"name": "output", "type": "uint256", "internalType": "uint256"},
+    seller_count = by_name[("function", "sellerCount")]
+    assert seller_count["inputs"] == []
+    assert [o["type"] for o in seller_count["outputs"]] == ["uint256"]
+    assert seller_count["stateMutability"] == "view"
+
+    get_sellers = by_name[("function", "getSellers")]
+    assert [i["type"] for i in get_sellers["inputs"]] == ["uint256", "uint256"]
+    assert [o["type"] for o in get_sellers["outputs"]] == ["address[]"]
+    assert get_sellers["stateMutability"] == "view"
+
+
+def test_enumeration_signatures_match_m10_pin():
+    """The M10 ABI PIN (.slim/deepwork 「M10」) is the authoritative spec
+    while contracts/src/Registry.sol may still be v2 (fix-23 lane lands v3
+    in parallel)."""
+    pin_text = PIN_FILE.read_text()
+    match_count = re.search(r"function\s+sellerCount\(\)\s+external\s+view", pin_text)
+    assert match_count, "sellerCount() not found in the M10 ABI PIN"
+
+    match_page = re.search(
+        r"function\s+getSellers\(([^)]*)\)\s+external\s+view", pin_text
     )
+    assert match_page, "getSellers(...) not found in the M10 ABI PIN"
+    canonical = _canonical_sig("getSellers", match_page.group(1))
 
-    get_price = by_name[("function", "getPrice")]
-    assert [i["type"] for i in get_price["inputs"]] == ["address", "string"]
-    assert get_price["outputs"][0]["type"] == "tuple"
-    assert tuple(get_price["outputs"][0]["components"]) == price
-    assert get_price["stateMutability"] == "view"
+    from tokenshare_cli.abis import REGISTRY_ABI
 
-    get_listing = by_name[("function", "getListing")]
-    # solc wraps the single struct return; web3 auto-unwraps via the tuple.
-    assert [o["type"] for o in get_listing["outputs"]] == ["tuple"]
-    comps = get_listing["outputs"][0]["components"]
-    assert [c["type"] for c in comps] == [
-        "address", "string", "string[]", "tuple[]", "bool",
-    ]
-    assert tuple(comps[3]["components"]) == price
+    by_name = {(e["type"], e["name"]): e for e in REGISTRY_ABI}
+    get_sellers = by_name[("function", "getSellers")]
+    on_chain = "getSellers(" + ",".join(i["type"] for i in get_sellers["inputs"]) + ")"
+    assert canonical == on_chain == "getSellers(uint256,uint256)"
 
-    register = by_name[("function", "register")]
-    assert [i["type"] for i in register["inputs"]] == ["string", "string[]", "tuple[]"]
 
-    update_price = by_name[("function", "updateModelPrice")]
-    assert [i["type"] for i in update_price["inputs"]] == ["string", "tuple"]
+def test_enumeration_signatures_match_v3_source_once_landed():
+    """Auto-tightens when fix-23 lands: if Registry.sol contains the v3
+    enumeration surface, its signatures must match ours verbatim."""
+    source = (REPO_ROOT / "contracts" / "src" / "Registry.sol").read_text()
+    if "sellerCount" not in source:
+        pytest.skip(
+            "contracts/src/Registry.sol is still v2 — fix-23 has not landed "
+            "the v3 enumeration source yet"
+        )
+    match_page = re.search(
+        r"function\s+getSellers\(([^)]*)\)\s+external\s+view", source, re.S
+    )
+    assert match_page, "getSellers(...) not found in Registry.sol"
+    canonical = _canonical_sig("getSellers", match_page.group(1))
+    assert canonical == "getSellers(uint256,uint256)"
 
 
 # --------------------------------------------------------------------------
-# chain.registered_operators unit tests (fake w3/registry)
+# chain.get_sellers unit tests (fake w3/registry with clamp semantics)
 # --------------------------------------------------------------------------
-def _fake_ctx(raw_logs: list[dict]):
-    eth = types.SimpleNamespace(
-        get_logs=lambda filter_dict: raw_logs  # logs pre-decoded by fake process_log
-    )
-    registered_event = types.SimpleNamespace(
-        process_log=lambda log: log  # already {"args": {...}} shaped
-    )
-    registry = types.SimpleNamespace(
-        address=REGISTRY_ADDR,
-        events=types.SimpleNamespace(Registered=lambda: registered_event),
-    )
+class FakeRegistryV3:
+    """sellerCount/getSellers over an append-only list.
+
+    Clamp semantics per the M10 PIN: start >= len -> []; start+count > len
+    -> truncated to the end. `lie_total` simulates a sellerCount bigger than
+    what getSellers serves (empty batches); `dup_pages` simulates a
+    misbehaving node echoing the first batch element again.
+    """
+
+    def __init__(self, sellers, *, lie_total=None, dup_pages=False):
+        self.sellers = list(sellers)
+        self.lie_total = lie_total
+        self.dup_pages = dup_pages
+        self.count_calls = 0
+        self.page_calls: list[tuple[int, int]] = []
+
+        registry = self
+
+        def sellerCount():
+            registry.count_calls += 1
+            return types.SimpleNamespace(call=lambda: registry._total())
+
+        def getSellers(start, count):
+            registry.page_calls.append((int(start), int(count)))
+            batch = list(registry.sellers[int(start) : int(start) + int(count)])
+            if registry.dup_pages and batch:
+                batch = batch + batch[:1]
+            return types.SimpleNamespace(call=lambda: batch)
+
+        self.functions = types.SimpleNamespace(
+            sellerCount=sellerCount, getSellers=getSellers
+        )
+
+    def _total(self) -> int:
+        return len(self.sellers) if self.lie_total is None else self.lie_total
+
+
+def _fake_w3(registry: FakeRegistryV3):
     return types.SimpleNamespace(
-        w3=types.SimpleNamespace(eth=eth), registry=registry,
-        cfg=types.SimpleNamespace(rpc_url="http://127.0.0.1:8545"),
+        eth=types.SimpleNamespace(contract=lambda address, abi: registry)
     )
 
 
-def test_registered_operators_wiring_and_dedup(monkeypatch):
-    captured: dict = {}
+def test_get_sellers_paginates_full_set():
+    sellers = [to_checksum_address("0x" + f"{i:02x}" * 20) for i in range(250)]
+    registry = FakeRegistryV3(sellers)
 
-    def fake_get_logs(filter_dict):
-        captured.update(filter_dict)
-        return [
-            {"args": {"operator": SELLER_A}},
-            {"args": {"operator": SELLER_B}},
-            {"args": {"operator": SELLER_A}},  # re-register -> dedup
-        ]
+    result = chain_mod.get_sellers(_fake_w3(registry), REGISTRY_ADDR)
 
-    ctx = _fake_ctx([])
-    ctx.w3.eth.get_logs = fake_get_logs
-
-    operators = chain_mod.registered_operators(ctx, 42)
-
-    assert operators == [SELLER_A, SELLER_B]  # event order, duplicates removed
-    assert captured == {
-        "fromBlock": 42,
-        "toBlock": "latest",
-        "address": REGISTRY_ADDR,
-        "topics": ["0x" + keccak(text=REGISTERED_EVENT_SIG).hex()],
-    }
+    assert result == sellers  # on-chain order preserved
+    assert registry.count_calls == 1
+    assert registry.page_calls == [(0, 100), (100, 100), (200, 100)]
 
 
-def test_registered_operators_wraps_rpc_failure():
-    def boom(filter_dict):
+def test_get_sellers_zero_count_short_circuits():
+    registry = FakeRegistryV3([])
+
+    assert chain_mod.get_sellers(_fake_w3(registry), REGISTRY_ADDR) == []
+    assert registry.count_calls == 1
+    assert registry.page_calls == []  # getSellers never called
+
+
+def test_get_sellers_handles_clamped_tail():
+    """start+count > len -> the contract truncates; the loop must advance by
+    the RETURNED batch length and still collect every seller exactly once."""
+    sellers = [SELLER_A, SELLER_B, SELLER_C]
+    registry = FakeRegistryV3(sellers)
+
+    result = chain_mod.get_sellers(_fake_w3(registry), REGISTRY_ADDR, page=2)
+
+    assert result == sellers
+    assert registry.page_calls == [(0, 2), (2, 2)]  # (2,2) clamps to 1 item
+
+
+def test_get_sellers_empty_batch_breaks():
+    """sellerCount lies (total > 0) but getSellers serves nothing — the
+    helper must return promptly instead of looping forever."""
+    registry = FakeRegistryV3([], lie_total=10)
+
+    assert chain_mod.get_sellers(_fake_w3(registry), REGISTRY_ADDR) == []
+    assert registry.page_calls == [(0, 100)]  # one attempt, then break
+
+
+def test_get_sellers_dedups_preserving_order():
+    registry = FakeRegistryV3([SELLER_A, SELLER_B, SELLER_C], dup_pages=True)
+
+    result = chain_mod.get_sellers(_fake_w3(registry), REGISTRY_ADDR)
+
+    assert result == [SELLER_A, SELLER_B, SELLER_C]  # echoes removed
+
+
+def test_get_sellers_clamps_page_to_500():
+    sellers = [SELLER_A, SELLER_B]
+    registry = FakeRegistryV3(sellers)
+
+    result = chain_mod.get_sellers(_fake_w3(registry), REGISTRY_ADDR, page=1000)
+
+    assert result == sellers
+    assert registry.page_calls == [(0, 500)]  # contract cap applied client-side
+
+
+def test_get_sellers_rejects_nonpositive_page():
+    registry = FakeRegistryV3([SELLER_A])
+    with pytest.raises(chain_mod.TokenshareError, match="page"):
+        chain_mod.get_sellers(_fake_w3(registry), REGISTRY_ADDR, page=0)
+    assert registry.count_calls == 0
+
+
+def test_get_sellers_wraps_rpc_failure():
+    registry = FakeRegistryV3([SELLER_A])
+
+    def boom_count():
         raise ValueError("node says no")
 
-    ctx = _fake_ctx([])
-    ctx.w3.eth.get_logs = boom
+    registry.functions = types.SimpleNamespace(
+        sellerCount=lambda: types.SimpleNamespace(call=boom_count)
+    )
+    with pytest.raises(chain_mod.TokenshareError, match="sellerCount"):
+        chain_mod.get_sellers(_fake_w3(registry), REGISTRY_ADDR)
 
-    with pytest.raises(chain_mod.TokenshareError) as exc:
-        chain_mod.registered_operators(ctx, 0)
-    assert "eth_getLogs" in str(exc.value)
+    registry2 = FakeRegistryV3([SELLER_A])
+
+    def boom_page(start, count):
+        raise ValueError("node says no")
+
+    registry2.functions = types.SimpleNamespace(
+        sellerCount=lambda: types.SimpleNamespace(call=lambda: 1),
+        getSellers=lambda start, count: types.SimpleNamespace(call=boom_page(start, count)),
+    )
+    with pytest.raises(chain_mod.TokenshareError, match="getSellers"):
+        chain_mod.get_sellers(_fake_w3(registry2), REGISTRY_ADDR)
 
 
 # --------------------------------------------------------------------------
@@ -290,19 +366,25 @@ def test_get_price_decodes_three_tiers():
 
 
 # --------------------------------------------------------------------------
-# config: LISTINGS_FROM_BLOCK
+# config: LISTINGS_FROM_BLOCK removed (M10 breaking)
 # --------------------------------------------------------------------------
-def test_load_listings_from_block_default_and_env(monkeypatch):
-    monkeypatch.delenv("LISTINGS_FROM_BLOCK", raising=False)
-    assert load_listings_from_block() == 0
-    monkeypatch.setenv("LISTINGS_FROM_BLOCK", "123")
-    assert load_listings_from_block() == 123
+def test_listings_from_block_env_removed():
+    """Breaking-change guard: the scan-start knob and its loader are gone."""
+    assert not hasattr(config_mod, "LISTINGS_FROM_BLOCK_VAR")
+    assert not hasattr(config_mod, "load_listings_from_block")
 
 
-def test_load_listings_from_block_rejects_garbage(monkeypatch):
-    monkeypatch.setenv("LISTINGS_FROM_BLOCK", "abc")
-    with pytest.raises(Exception):
-        load_listings_from_block()
+def test_stale_listings_from_block_env_is_ignored(runner, listings_env, monkeypatch):
+    """The removed env must not break (or alter) the enumeration path."""
+    monkeypatch.setenv("LISTINGS_FROM_BLOCK", "not-a-number-anymore")
+    FakeListingsChain(
+        monkeypatch, enumerated=[SELLER_A], listings={SELLER_A: make_listing(SELLER_A)}
+    )
+
+    result = runner.invoke(app, ["listings"])
+    out = all_output(result)
+    assert result.exit_code == 0, out
+    assert "Active listings (1 model price rows / 1 seller(s), chainId 10143" in out
 
 
 # --------------------------------------------------------------------------
@@ -311,7 +393,7 @@ def test_load_listings_from_block_rejects_garbage(monkeypatch):
 def test_listings_table_sorted_cheapest_first(runner, listings_env, monkeypatch):
     ctx = FakeListingsChain(
         monkeypatch,
-        events=[SELLER_B, SELLER_A],  # B discovered first, A is cheaper
+        enumerated=[SELLER_B, SELLER_A],  # B enumerated first, A is cheaper
         listings={SELLER_A: make_listing(SELLER_A), SELLER_B: make_listing(SELLER_B, prices=[PRICE_B])},
     )
 
@@ -320,7 +402,7 @@ def test_listings_table_sorted_cheapest_first(runner, listings_env, monkeypatch)
     assert result.exit_code == 0, out
 
     assert "Active listings (2 model price rows / 2 seller(s), chainId 10143" in out
-    assert "from block 0" in out
+    assert "sorted by estimated per-call cost" in out
     # sorted cheapest first: A before B
     assert out.index(_short(SELLER_A)) < out.index(_short(SELLER_B))
     # humanized tiered prices + estimates (units module formatting)
@@ -332,6 +414,8 @@ def test_listings_table_sorted_cheapest_first(runner, listings_env, monkeypatch)
     # full copyable addresses block
     assert "Full seller addresses (for --seller):" in out
     assert SELLER_A in out and SELLER_B in out
+    # discovery went through the v3 enumeration helper at the configured registry
+    assert ctx.get_sellers_calls == [(REGISTRY_ADDR, 100)]
 
 
 def _short(address: str) -> str:
@@ -342,7 +426,7 @@ def test_listings_one_row_per_model(runner, listings_env, monkeypatch):
     """M9: each (operator, model) pair gets its own priced row."""
     FakeListingsChain(
         monkeypatch,
-        events=[SELLER_A],
+        enumerated=[SELLER_A],
         listings={
             SELLER_A: make_listing(
                 SELLER_A,
@@ -366,7 +450,7 @@ def test_listings_blank_models_skipped(runner, listings_env, monkeypatch):
     """M9: blank model entries (relay-side filter rule) never become rows."""
     FakeListingsChain(
         monkeypatch,
-        events=[SELLER_A],
+        enumerated=[SELLER_A],
         listings={
             SELLER_A: make_listing(
                 SELLER_A,
@@ -388,7 +472,7 @@ def test_listings_model_filter(runner, listings_env, monkeypatch):
     """M9: --model restricts the comparison to that model across sellers."""
     FakeListingsChain(
         monkeypatch,
-        events=[SELLER_A, SELLER_B],
+        enumerated=[SELLER_A, SELLER_B],
         listings={
             SELLER_A: make_listing(SELLER_A, models=["kimi-k2.6", "k3"], prices=[PRICE_A, PRICE_CHEAP]),
             SELLER_B: make_listing(SELLER_B, models=["k3"], prices=[PRICE_B]),
@@ -409,7 +493,7 @@ def test_listings_model_filter(runner, listings_env, monkeypatch):
 def test_listings_model_filter_no_match_message(runner, listings_env, monkeypatch):
     FakeListingsChain(
         monkeypatch,
-        events=[SELLER_A],
+        enumerated=[SELLER_A],
         listings={SELLER_A: make_listing(SELLER_A, models=["kimi-k2.6"])},
     )
 
@@ -420,12 +504,14 @@ def test_listings_model_filter_no_match_message(runner, listings_env, monkeypatc
     assert "1 registered operator(s) scanned" in out
 
 
-def test_listings_reregister_calls_getlisting_once_per_operator(
+def test_listings_duplicate_enumeration_calls_getlisting_once_per_operator(
     runner, listings_env, monkeypatch
 ):
+    """Command-level dedup guard: even a discovery layer returning raw
+    duplicates renders each seller once (defense in depth)."""
     ctx = FakeListingsChain(
         monkeypatch,
-        events=[SELLER_A, SELLER_B, SELLER_A, SELLER_A],  # 3 re-registers
+        enumerated=[SELLER_A, SELLER_B, SELLER_A, SELLER_A],
         listings={SELLER_A: make_listing(SELLER_A), SELLER_B: make_listing(SELLER_B)},
     )
 
@@ -433,12 +519,13 @@ def test_listings_reregister_calls_getlisting_once_per_operator(
     out = all_output(result)
     assert result.exit_code == 0, out
     assert ctx.get_listing_calls == [SELLER_A, SELLER_B]
+    assert "Active listings (2 model price rows / 2 seller(s)" in out
 
 
 def test_listings_inactive_filtered(runner, listings_env, monkeypatch):
     FakeListingsChain(
         monkeypatch,
-        events=[SELLER_A, SELLER_B],
+        enumerated=[SELLER_A, SELLER_B],
         listings={SELLER_A: make_listing(SELLER_A, active=False), SELLER_B: make_listing(SELLER_B)},
     )
 
@@ -453,7 +540,7 @@ def test_listings_inactive_filtered(runner, listings_env, monkeypatch):
 def test_listings_all_inactive_message(runner, listings_env, monkeypatch):
     FakeListingsChain(
         monkeypatch,
-        events=[SELLER_A],
+        enumerated=[SELLER_A],
         listings={SELLER_A: make_listing(SELLER_A, active=False)},
     )
 
@@ -463,34 +550,21 @@ def test_listings_all_inactive_message(runner, listings_env, monkeypatch):
     assert "1 registered operator(s), none ACTIVE" in out
 
 
-def test_listings_empty_events_message(runner, listings_env, monkeypatch):
-    FakeListingsChain(monkeypatch, events=[], listings={})
+def test_listings_empty_registry_message(runner, listings_env, monkeypatch):
+    FakeListingsChain(monkeypatch, enumerated=[], listings={})
 
     result = runner.invoke(app, ["listings"])
     out = all_output(result)
     assert result.exit_code == 0, out
-    assert "no Registered events found from block 0" in out
-    assert "LISTINGS_FROM_BLOCK" in out
-
-
-def test_listings_from_block_env_passthrough(runner, listings_env, monkeypatch):
-    monkeypatch.setenv("LISTINGS_FROM_BLOCK", "777")
-    ctx = FakeListingsChain(
-        monkeypatch, events=[SELLER_A], listings={SELLER_A: make_listing(SELLER_A)}
-    )
-
-    result = runner.invoke(app, ["listings"])
-    out = all_output(result)
-    assert result.exit_code == 0, out
-    assert ctx.registered_calls == [777]
-    assert "from block 777" in out
+    assert "sellerCount() == 0" in out
+    assert "nobody has registered a listing yet" in out
 
 
 def test_listings_env_override_caps_changes_estimate(runner, listings_env, monkeypatch):
     monkeypatch.setenv("PROMPT_TOKEN_CAP", "100000")
     monkeypatch.setenv("COMPLETION_TOKEN_CAP", "0")
     FakeListingsChain(
-        monkeypatch, events=[SELLER_A], listings={SELLER_A: make_listing(SELLER_A)}
+        monkeypatch, enumerated=[SELLER_A], listings={SELLER_A: make_listing(SELLER_A)}
     )
 
     result = runner.invoke(app, ["listings"])
@@ -501,7 +575,7 @@ def test_listings_env_override_caps_changes_estimate(runner, listings_env, monke
 
 
 def test_listings_getlisting_failure_is_clean_error(runner, listings_env, monkeypatch):
-    FakeListingsChain(monkeypatch, events=[SELLER_A], listings={})
+    FakeListingsChain(monkeypatch, enumerated=[SELLER_A], listings={})
 
     def boom(c, op):
         raise ValueError("rpc dropped")
@@ -514,31 +588,12 @@ def test_listings_getlisting_failure_is_clean_error(runner, listings_env, monkey
     assert "getListing" in out and "rpc dropped" in out
 
 
-def test_listings_command_guards_duplicate_operators(runner, listings_env, monkeypatch):
-    """Command-level dedup guard: even a discovery layer returning raw
-    duplicate events renders each seller once (defense in depth)."""
-    ctx = types.SimpleNamespace()
-    monkeypatch.setattr(chain_mod, "open_chain", lambda cfg: ctx)
-    monkeypatch.setattr(
-        chain_mod, "registered_operators", lambda c, fb: [SELLER_A, SELLER_A, SELLER_B]
-    )
-    monkeypatch.setattr(
-        chain_mod, "get_listing", lambda c, op: make_listing(op)
-    )
-
-    result = runner.invoke(app, ["listings"])
-    out = all_output(result)
-    assert result.exit_code == 0, out
-    assert "Active listings (2 model price rows / 2 seller(s)" in out
-    assert out.count(_short(SELLER_A)) == 1
-
-
 def test_listings_short_prices_tail_skipped(runner, listings_env, monkeypatch):
     """Malformed listing (prices shorter than models) degrades gracefully:
     priced rows render, the unpriced tail is skipped without crashing."""
     FakeListingsChain(
         monkeypatch,
-        events=[SELLER_A],
+        enumerated=[SELLER_A],
         listings={
             SELLER_A: make_listing(
                 SELLER_A, models=["m1", "m2", "m3"], prices=[PRICE_A]
@@ -559,7 +614,7 @@ def test_listings_short_prices_tail_skipped(runner, listings_env, monkeypatch):
 def test_listings_json_schema(runner, listings_env, monkeypatch):
     FakeListingsChain(
         monkeypatch,
-        events=[SELLER_B, SELLER_A],
+        enumerated=[SELLER_B, SELLER_A],
         listings={
             SELLER_A: make_listing(SELLER_A, models=["kimi-k2.6"]),
             SELLER_B: make_listing(SELLER_B, models=["kimi-k2.6"], prices=[PRICE_B]),
@@ -572,11 +627,11 @@ def test_listings_json_schema(runner, listings_env, monkeypatch):
 
     payload = json.loads(out)
     assert set(payload) == {
-        "chainId", "registry", "fromBlock", "activeOnly", "model", "count", "listings"
+        "chainId", "registry", "sellerCount", "activeOnly", "model", "count", "listings"
     }
     assert payload["chainId"] == 10143
     assert payload["registry"] == REGISTRY_ADDR
-    assert payload["fromBlock"] == 0
+    assert payload["sellerCount"] == 2  # chain enumeration size (pre-filter)
     assert payload["activeOnly"] is True
     assert payload["model"] is None
     assert payload["count"] == 2
@@ -595,7 +650,7 @@ def test_listings_json_schema(runner, listings_env, monkeypatch):
 def test_listings_json_model_filter(runner, listings_env, monkeypatch):
     FakeListingsChain(
         monkeypatch,
-        events=[SELLER_A],
+        enumerated=[SELLER_A],
         listings={
             SELLER_A: make_listing(SELLER_A, models=["kimi-k2.6", "k3"], prices=[PRICE_A, PRICE_CHEAP])
         },
@@ -611,23 +666,14 @@ def test_listings_json_model_filter(runner, listings_env, monkeypatch):
 
 
 def test_listings_json_empty(runner, listings_env, monkeypatch):
-    FakeListingsChain(monkeypatch, events=[], listings={})
+    FakeListingsChain(monkeypatch, enumerated=[], listings={})
 
     result = runner.invoke(app, ["listings", "--json"])
     payload = json.loads(all_output(result))
     assert result.exit_code == 0
+    assert payload["sellerCount"] == 0
     assert payload["count"] == 0
     assert payload["listings"] == []
-
-
-def test_listings_bad_from_block_env_exits_two(runner, listings_env, monkeypatch):
-    monkeypatch.setenv("LISTINGS_FROM_BLOCK", "not-a-number")
-    FakeListingsChain(monkeypatch, events=[SELLER_A], listings={SELLER_A: make_listing(SELLER_A)})
-
-    result = runner.invoke(app, ["listings"])
-    out = all_output(result)
-    assert result.exit_code == 2
-    assert "LISTINGS_FROM_BLOCK" in out
 
 
 # --------------------------------------------------------------------------

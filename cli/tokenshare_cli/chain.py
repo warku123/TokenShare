@@ -10,6 +10,7 @@ import os
 from typing import Any
 
 from eth_account.signers.local import LocalAccount
+from eth_utils import to_checksum_address
 from web3 import Web3
 from web3.contract import Contract
 
@@ -192,55 +193,61 @@ def get_price(ctx: ChainContext, seller: str, model: str) -> dict:
     return _decode_price(ctx.registry.functions.getPrice(seller, model).call())
 
 
-# Registry.Registered event — canonical Solidity signature string (topic0 =
-# keccak256 of it). Registry v2 (M9 ABI PIN): the event carries only
-# (operator, endpoint, models) — per-model prices live in getListing/getPrice.
-# The scanner consumes only the indexed operator topic; current per-model
-# state is read via getListing. tests/test_listings.py cross-checks this
-# constant against the M9 PIN (and the v2 .sol source once it lands).
-REGISTERED_EVENT_SIG = "Registered(address,string,string[])"
+# M10 Registry v3 on-chain enumeration (ABI PIN 「M10」): Uniswap-V2-Factory
+# style O(1) discovery. The contract CLAMPS getSellers count to 500 per call
+# (公开常量便于测) and truncates at the end of the list, so this helper clamps
+# its page size too and advances by the RETURNED batch length — clamped
+# responses may be shorter than the requested count.
+GET_SELLERS_MAX_PAGE = 500
 
 
-def registered_operators(ctx: ChainContext, from_block: int) -> list[str]:
-    """Operators that ever emitted Registry.Registered — event-order dedup.
+def get_sellers(w3: Web3, registry_addr: str, page: int = 100) -> list[str]:
+    """All registered sellers via Registry v3 sellerCount()/getSellers()
+    pagination — replaces the eth_getLogs Registered-event scan (and the
+    LISTINGS_FROM_BLOCK env, removed as breaking in M10).
 
-    The Registry has NO on-chain enumeration (only getListing(address)), so
-    eth_getLogs over the Registered event is the discovery mechanism for
-    `listings`. Re-registers emit the event again — duplicates removed here;
-    each operator's CURRENT state is read separately via getListing (the
-    latest registration overwrites the stored struct on-chain).
-
-    from_block: 0 = whole chain; callers pass LISTINGS_FROM_BLOCK so users
-    can skip a slow full-chain scan on long chains.
+    Order is the on-chain append order (deactivate -> re-register never
+    re-appends). Defensive guards: a sellerCount() of 0 short-circuits to []
+    without calling getSellers; an empty batch breaks the loop (no hang on a
+    misbehaving node); duplicates are removed preserving first-seen order.
     """
-    from eth_utils import keccak
+    registry = w3.eth.contract(address=registry_addr, abi=REGISTRY_ABI)
+    page = int(page)
+    if page < 1:
+        raise TokenshareError(f"get_sellers page must be >= 1, got {page}")
+    page = min(page, GET_SELLERS_MAX_PAGE)  # the contract clamps count to 500
 
-    topic0 = "0x" + keccak(text=REGISTERED_EVENT_SIG).hex()
     try:
-        logs = ctx.w3.eth.get_logs(
-            {
-                "fromBlock": int(from_block),
-                "toBlock": "latest",
-                "address": ctx.registry.address,
-                "topics": [topic0],
-            }
-        )
-        decoded = [ctx.registry.events.Registered().process_log(log) for log in logs]
+        total = int(registry.functions.sellerCount().call())
     except TokenshareError:
         raise
     except Exception as exc:
         raise TokenshareError(
-            f"cannot scan Registered events (eth_getLogs from block {from_block}): "
-            f"{_clean_exc(exc)}"
+            f"Registry sellerCount() failed at {registry_addr}: {_clean_exc(exc)}"
         ) from exc
-    operators: list[str] = []
+
+    sellers: list[str] = []
     seen: set[str] = set()
-    for event in decoded:
-        operator = str(event["args"]["operator"])
-        if operator not in seen:
-            seen.add(operator)
-            operators.append(operator)
-    return operators
+    start = 0
+    while start < total:
+        try:
+            batch = registry.functions.getSellers(start, page).call()
+        except TokenshareError:
+            raise
+        except Exception as exc:
+            raise TokenshareError(
+                f"Registry getSellers({start}, {page}) failed at {registry_addr}: "
+                f"{_clean_exc(exc)}"
+            ) from exc
+        if not batch:  # edge/clamp defense: never loop forever
+            break
+        for addr in batch:
+            normalized = to_checksum_address(str(addr))
+            if normalized not in seen:
+                seen.add(normalized)
+                sellers.append(normalized)
+        start += len(batch)  # advance by RETURNED length (clamp-safe)
+    return sellers
 
 
 def usdc_allowance(ctx: ChainContext) -> int:
