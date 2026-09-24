@@ -19,6 +19,8 @@ base_sepolia local path = EVERYTHING on this machine:
      tiered prices paired with the mock OpenAI usage (exact non-zero
      settle) plus a second model whose price is moved via updateModelPrice;
      afterwards getPrice(operator, model) is asserted verbatim per model.
+     An ACTIVE listing is deactivated first (v2 AlreadyRegistered guard),
+     so reruns on a reused deployment re-register cleanly.
   4. e2e/mock_openai.py serves deterministic non-stream JSON + SSE on a free
      port. NOTE: OPENAI_BASE_URL must be the bare host root WITHOUT /v1 — the
      relay (httpx base_url) appends /v1/chat/completions itself. The mock host
@@ -375,6 +377,13 @@ REGISTRY_ABI = [
     },
     {
         "type": "function",
+        "name": "deactivate",
+        "stateMutability": "nonpayable",
+        "inputs": [],
+        "outputs": [],
+    },
+    {
+        "type": "function",
         "name": "getListing",
         "stateMutability": "view",
         "inputs": [{"name": "operator", "type": "address"}],
@@ -437,12 +446,39 @@ def w3_at(rpc_url: str) -> Any:
     return w3
 
 
-def send_tx(w3: Any, fn: Any, key: str, gas: int = 400_000) -> str:
+# Flat fallback when eth_estimateGas fails (Gate J M3: a multi-model
+# Price[] register measured out-of-gas at this old flat default — estimates
+# are now the primary path; this is only the WARNING fallback).
+DEFAULT_TX_GAS = 400_000
+
+
+def gas_for(w3: Any, fn: Any, sender: str, fallback: int = DEFAULT_TX_GAS) -> int:
+    """Gate J M3: estimate gas for `fn` via web3 (build_transaction's
+    eth_estimateGas), then headroom ×1.3 + 30k buffer. On any estimate
+    failure (e.g. RPC hiccup) fall back to `fallback` with a WARNING —
+    never a silent flat guess."""
+    try:
+        # build_transaction auto-fills nonce/chainId and estimates gas
+        # (eth_estimateGas) when "gas" is absent — a revert at estimate
+        # raises here and lands in the fallback below.
+        probe = fn.build_transaction({"from": sender})
+        estimate = int(probe["gas"])
+    except Exception as exc:  # noqa: BLE001
+        print(f"WARNING: gas estimate failed ({exc}); falling back to {fallback} gas")
+        return fallback
+    return int(estimate * 1.3) + 30_000
+
+
+def send_tx(w3: Any, fn: Any, key: str, gas: int | None = None) -> str:
     """Sign+send+wait a simple function call (anvil auto-mines; real chains
-    wait with a 1s poll / 60s timeout per spec §9)."""
+    wait with a 1s poll / 60s timeout per spec §9). `gas=None` (default)
+    estimates via gas_for() — the flat 400k default out-of-gas-reverted on a
+    multi-model Price[] v2 register (Gate J M3)."""
     from eth_account import Account
 
     acct = Account.from_key(key)
+    if gas is None:
+        gas = gas_for(w3, fn, acct.address)
     tx = fn.build_transaction(
         {
             "from": acct.address,
@@ -566,6 +602,17 @@ def prepare_contracts(rpc_url: str, relay_port: int, deployed: dict[str, Any],
 
     endpoint = os.environ.get("RELAY_PUBLIC_ENDPOINT") or f"http://127.0.0.1:{relay_port}"
     alt_model = served_model + ALT_MODEL_SUFFIX
+    registry = registry_factory(w3, deployed["registry"])
+    # Gate J M2: v2 register reverts AlreadyRegistered while a listing is
+    # ACTIVE — reruns on a reused deployment (e.g. the monad_testnet artifact)
+    # must deactivate first. getListing returns Listing memory (solc wraps
+    # the single struct in an outer tuple; web3 unwraps it to 5 fields).
+    _op, _ep, _models, _prices, listing_active = registry.functions.getListing(
+        checksum(seller_addr)
+    ).call()
+    if listing_active:
+        print("listing ACTIVE — deactivate first (v2 AlreadyRegistered guard)")
+        send_tx(w3, registry.functions.deactivate(), seller_key)
     fn = registry_register(w3, deployed["registry"], endpoint, served_model, alt_model)
     send_tx(w3, fn, seller_key)
     print(
@@ -583,7 +630,6 @@ def prepare_contracts(rpc_url: str, relay_port: int, deployed: dict[str, Any],
 
     # sanity: getListing shape, active flag, parallel per-model prices.
     # (web3 unwraps the single-tuple output — the call yields the 5 fields.)
-    registry = registry_factory(w3, deployed["registry"])
     listing_operator, listing_endpoint, models, prices, active = registry.functions.getListing(
         checksum(seller_addr)
     ).call()

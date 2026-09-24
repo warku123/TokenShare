@@ -27,6 +27,7 @@ Monad testnet (chainId 10143) · Escrow/Registry/USDC 已部署（见 `web/confi
 
 - [ ] 连接卖家钱包 → MY LISTING 显示链上 listing（未登记→空态引导）；PRICES /1M 按模型分组逐行（model + cached/in/out）；已登记且 relay 在线时追加 TEE/UPSTREAM 两行
 - [ ] MODELS 硬化：无自由文本输入；`[ LOAD FROM RELAY ]` 预检 `verify-upstream` → `accessible_models` 渲染为可勾选 chips（默认全选，已有 listing 时预勾 listed∩accessible）；只能勾选 relay 实测模型
+  - 设计决定（Gate J M1，用户已认可）：模型探测用 `GET /verify-upstream`（key 留在 relay、不过浏览器）而非 `POST /preview-models`（key 浏览器输入流）。核心约束「模型仅从 relay 实测面勾选」两种流都满足；现流更安全。`/preview-models` 保留为独立端点（PIN 已达标），生产可另作无 relay 配置场景的消费面。
 - [ ] **每模型三档价（v2）**：勾选模型展开独立价格行（默认继承 BASE 三档）；改某格=该模型覆盖价；改 BASE 时未动过的格子跟随、已覆盖的保留；取消勾选收起该行，重勾恢复继承 BASE；已有 listing 时预填链上各模型价（BASE=首模型价）
 - [ ] 提交门控：未预检 / key 无效 / relay 不可达 / endpoint 改后未复验 → 禁提交并在预览框+红条给明确原因；models 零选 → 红条拒绝；**任一模型**价格非数或 >6 位小数 → 预览框琥珀行列出模型名 + 提交红条拒绝
 - [ ] 预览框实时反映将发的交易：`register(endpoint, models, prices[])`（prices 平行数组逐模型 `(c,i,o)`，**一笔原子 tx**）/ `updateModelPrice(model, (c,i,o))` 逐变更模型多行 / `deactivate()+register` 两笔 / `deactivate()`；按钮文案随路径切换（SUBMIT / UPDATE PRICE·N TX / DEACTIVATE → RE-REGISTER · 2 TX / DEACTIVATE）；价格全与链上一致 → 按钮变 PRICES UNCHANGED，点击仅红条提示不发交易
