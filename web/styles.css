@@ -296,31 +296,24 @@ h1 {
 .mkt-head { margin-top: 34px; }
 .mkt-stats-side dd { font-size: 13px; color: var(--dim); }
 
-/* on-chain discovery status — deliberately quiet: one thin amber line
-   while working, green check when done. Human label first; technical
-   detail (windows/blocks) lives in the faint suffix + strip tooltip. */
-.scan-bar {
-  display: flex; flex-direction: column; gap: 6px;
-  border: 1px solid rgba(232,180,74,0.28); background: rgba(232,180,74,0.03);
-  padding: 8px 12px; margin: 14px 0 6px;
+/* provenance line under the page head */
+.mkt-source {
+  font-family: var(--mono); font-size: 11px; color: var(--faint);
+  margin: 12px 0 4px; letter-spacing: 0.03em; line-height: 1.7; cursor: help;
 }
-.scan-bar.is-ok { border-color: var(--green-dim); background: rgba(61,220,151,0.03); }
-.scan-bar.is-bad { border-color: rgba(224,108,96,0.45); background: rgba(224,108,96,0.05); }
-.scan-track { height: 2px; background: var(--line); overflow: hidden; }
-.scan-fill {
-  height: 100%; width: 0; background: var(--amber);
-  transition: width .25s ease;
+.mkt-source b { color: var(--text); font-weight: 400; }
+.mkt-source.bad { color: var(--red); }
+
+/* skeleton cards while the enumeration eth_calls resolve */
+.listing.skel { gap: 14px; }
+.skel-line {
+  height: 13px; background: var(--bg-2); border: 1px solid var(--line);
+  opacity: 0.7; animation: skelpulse 1.15s ease infinite;
 }
-.scan-bar.is-ok .scan-fill { background: var(--green); }
-.scan-text { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; cursor: help; }
-.scan-lbl { font-family: var(--mono); font-size: 11px; color: var(--dim); letter-spacing: 0.05em; }
-.scan-bar.is-ok .scan-lbl { color: var(--green); }
-.scan-detail { font-family: var(--mono); font-size: 9.5px; color: var(--faint); letter-spacing: 0.04em; }
-.scan-meta { font-family: var(--mono); font-size: 11px; color: var(--faint); margin: 2px 0 6px; line-height: 1.7; }
-.scan-meta b { color: var(--text); font-weight: 400; }
-.scan-meta .ok { color: var(--green); }
-.scan-meta .bad { color: var(--red); }
-.scan-more { margin-bottom: 10px; }
+.skel-line:nth-child(2) { animation-delay: .12s; }
+.skel-line:nth-child(3) { animation-delay: .24s; }
+.skel-line:nth-child(4) { animation-delay: .36s; }
+@keyframes skelpulse { 50% { opacity: 0.32; } }
 
 /* toolbar: search + sort + count + refresh */
 .mkt-toolbar { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin: 14px 0 12px; }
@@ -833,6 +826,7 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
   html.js .rv, .rv { opacity: 1; transform: none; transition: none; }
   .cursor, .badge::before, .ticker-label::before, .hdot.ok, .net-badge.bad,
   .txl.is-pending .txl-dot, .txl-dots i, .pid, .wallet-box .btn.flash,
-  .scan-fill, .market-entry-arrow { animation: none; transition: none; }
+  .market-entry-arrow { animation: none; transition: none; }
+  .skel-line { animation: none; opacity: 0.5; }
   .card, .btn, .sm-node, .edge { transition: none; }
 }

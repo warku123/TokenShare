@@ -107,20 +107,20 @@
       listingsEl.innerHTML = "";
       return;
     }
-    if (!cfg.sellers || cfg.sellers.length === 0) {
-      notice(`<b>sellers 数组为空</b> — 在 <code class="inl">web/config.js</code> 登记 seller operator 地址后展示 listings。`);
-      listingsEl.innerHTML = "";
-      return;
-    }
+    /* sellers array is FALLBACK-ONLY since M10 (enumeration is primary);
+       an empty array no longer blocks the preview */
     if (!board) return;
 
     notice("");
     listingsEl.innerHTML =
-      `<div class="ls-loading"><span class="txl-dot is-pending"></span> reading Registry.getListing on-chain …</div>`;
+      `<div class="ls-loading"><span class="txl-dot is-pending"></span> reading the Registry on-chain …</div>`;
 
+    /* M10: enumerate the seller set on-chain (sellerCount + getSellers);
+       config.js sellers remain the fallback when the enumeration calls
+       are unavailable (pre-v3 Registry / RPC hiccup) */
     let listings;
     try {
-      listings = await T.fetchListings(T.readProvider());
+      listings = (await T.fetchMarketListings(T.readProvider())).listings;
     } catch (e) {
       listingsEl.innerHTML = "";
       notice(
@@ -133,7 +133,7 @@
     const visible = listings.filter((l) => l.registered && !l.error);
     if (visible.length === 0) {
       listingsEl.innerHTML = "";
-      notice(`配置的 ${listings.length} 个 seller 均未在 Registry 登记（或读取失败）。`);
+      notice(`Registry 枚举与 config sellers 均未取得登记 listing — 检查 <code class="inl">registryAddr</code> 指向 v3、RPC 可达，或卖家已完成 register。`);
       return;
     }
 

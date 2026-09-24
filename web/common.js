@@ -48,6 +48,10 @@ window.TS = (() => {
     "function register(string endpoint, string[] models, tuple(uint256 cachedIn, uint256 input, uint256 output)[] prices)",
     "function updateModelPrice(string model, tuple(uint256 cachedIn, uint256 input, uint256 output) price)",
     "function deactivate()",
+    /* M10 v3 enumeration (v2 face unchanged, additions only):
+       append-only seller set — O(1) discovery for market/CLI */
+    "function sellerCount() view returns (uint256)",
+    "function getSellers(uint256 start, uint256 count) view returns (address[] sellers)",
     "event Registered(address indexed operator, string endpoint, string[] models)",
     "event PriceUpdated(address indexed operator, string model, uint256 cachedIn, uint256 input, uint256 output)",
     "event Deactivated(address indexed operator)",
@@ -324,89 +328,54 @@ window.TS = (() => {
     return online;
   }
 
-  /* ── multi-seller discovery for market.html (M9) ────────────
-     Sellers are FOUND by scanning Registry.Registered events, then
-     enriched with getListing (freshness + active flag + prices).
-     Event (contracts/src/Registry.sol, v2 keeps the v1 shape):
-       event Registered(address indexed operator, string endpoint, string[] models)
-     → topic0 = keccak256("Registered(address,string,string[])"); the
-     operator sits in topics[1]. Monad caps eth_getLogs at 100 blocks per
-     call → scan in 90-block windows and halve the window on failure.
-     deactivate() deletes nothing: same-operator re-registers resolve by
-     taking the LATEST event; live state always comes from getListing. */
-  const REGISTERED_TOPIC = ethers.id("Registered(address,string,string[])");
-  const SCAN_WINDOW = 90;   /* < Monad's 100-block eth_getLogs cap */
-  const SCAN_FLOOR = 5;     /* give up halving below this → real outage */
+  /* ── seller enumeration (M10, Registry v3) ──────────────────
+     O(1) on-chain discovery replaces the M9 Registered-event scan
+     (which degraded linearly with chain age + RPC getLogs limits).
+     v3 keeps the whole v2 face and adds:
+       sellerCount() → uint256
+       getSellers(start, count) → address[]   (append-only, clamp:
+         start≥len → [], count>500 → 500, start+count>len → tail)
+     Enumeration order = first-registration order; re-registering after
+     deactivate does NOT re-append. Freshness/active/prices always come
+     from getListing per operator. */
+  const SELLER_PAGE = 100; /* < the contract's 500 clamp — polite pages */
 
-  async function scanRegisteredLogs(fromBlock, toBlock, onProgress) {
-    const prov = readProvider();
-    /* precompute windows, then a small worker pool — sequential getLogs
-       measures ~0.7s/window on the public RPC; 4 in flight keeps the
-       first paint honest without hammering the endpoint */
-    const windows = [];
-    for (let s = fromBlock; s <= toBlock; s += SCAN_WINDOW) {
-      windows.push([s, Math.min(toBlock, s + SCAN_WINDOW - 1)]);
+  async function fetchSellerSet(provider) {
+    const reg = registry(provider);
+    const total = Number(await reg.sellerCount());
+    const out = [];
+    for (let start = 0; start < total; start += SELLER_PAGE) {
+      const batch = await reg.getSellers(start, SELLER_PAGE);
+      if (!batch || batch.length === 0) break; /* defensive clamp */
+      for (const a of batch) out.push(a);
     }
-    const total = windows.length;
-    let done = 0;
-    let next = 0;
-    const latest = new Map(); // lowercase operator → {operator, blockNumber}
-
-    const fetchWindow = async ([s, e]) => {
-      let w = e - s + 1;
-      for (let attempt = 0; attempt < 8; attempt++) {
-        try {
-          return await prov.getLogs({
-            address: cfg.registryAddr,
-            topics: [REGISTERED_TOPIC],
-            fromBlock: s,
-            toBlock: Math.min(e, s + w - 1),
-          });
-        } catch (err) {
-          const nw = Math.floor(w / 2);
-          if (nw < SCAN_FLOOR) throw err; /* tiny window still failing → abort */
-          w = nw;
-        }
-      }
-      throw new Error("scan window failed after retries");
-    };
-
-    const worker = async () => {
-      while (next < windows.length) {
-        const win = windows[next++];
-        const logs = await fetchWindow(win);
-        for (const log of logs) {
-          if (!log.topics || log.topics.length < 2) continue;
-          try {
-            const op = ethers.getAddress("0x" + log.topics[1].slice(26));
-            const blk = Number(log.blockNumber);
-            const prev = latest.get(op.toLowerCase());
-            if (!prev || blk >= prev.blockNumber) latest.set(op.toLowerCase(), { operator: op, blockNumber: blk });
-          } catch { /* malformed topic — skip */ }
-        }
-        done += 1;
-        if (onProgress) onProgress(done, total);
-      }
-    };
-
-    await Promise.all(Array.from({ length: Math.min(4, windows.length) }, worker));
-    return [...latest.values()];
+    return out;
   }
 
-  /* one bounded scan pass. Default: [head-depth+1 … head] with the floor
-   * at cfg.registryFromBlock. `fromBlock` given → older extension chunk
-   * ending at that block (load-earlier). Never scans below the floor. */
-  async function discoverRange({ depth, fromBlock: earlierTo, onProgress } = {}) {
-    const prov = readProvider();
-    const head = await prov.getBlockNumber();
-    const depthBlocks = Math.max(1, Number(depth ?? cfg.scanDepthBlocks) || 50000);
-    const floorBlock = Math.max(0, Number(cfg.registryFromBlock) || 0);
-    const to = earlierTo != null ? earlierTo : head;
-    const from = Math.max(floorBlock, to - depthBlocks + 1);
-    if (from > to) return { operators: [], from, to, head, floorBlock };
-    const operators = await scanRegisteredLogs(from, to,
-    onProgress ? (done, total) => onProgress(done, total, { from, to }) : undefined);
-  return { operators, from, to, head, floorBlock };
+  /* enumerated sellers → enriched listings (_enumIndex = enumeration
+     position, drives the NEWEST-first default sort). Falls back to the
+     config.js sellers array when the enumeration calls are unavailable
+     (pre-v3 Registry / RPC hiccup) — never throws. */
+  async function fetchMarketListings(provider) {
+    let addrs;
+    try {
+      addrs = await fetchSellerSet(provider);
+    } catch (e) {
+      const degraded = (e && (e.shortMessage || e.message)) || "unknown";
+      let fallback = [];
+      try {
+        fallback = (await fetchListings(provider)).filter((l) => l.registered && !l.error);
+      } catch { /* dead RPC — empty market */ }
+      return { listings: fallback, source: "config", degraded };
+    }
+    const listings = [];
+    for (let i = 0; i < addrs.length; i++) {
+      try {
+        const l = await fetchListing(provider, addrs[i]);
+        if (l.registered) { l._enumIndex = i; listings.push(l); }
+      } catch { /* unreadable seller — skip */ }
+    }
+    return { listings, source: "enum", degraded: null };
   }
 
   /* PIN minAmount estimate, native units, for ONE model's price triple:
@@ -643,7 +612,7 @@ window.TS = (() => {
     esc, truncAddr, addrLink, txLink, joinUrl, hostOf, sameAddr, isZeroAddr,
     probeHealth, probeInfo, installCopyHandlers, fetchJson, fetchListing, fetchListings,
     priceFor, minAmountEstimate, maxMinAmountEstimate,
-    marketBoard, probeListings, discoverRange, REGISTERED_TOPIC, SCAN_WINDOW,
+    marketBoard, probeListings, fetchSellerSet, fetchMarketListings, SELLER_PAGE,
     RELAY_CHAT_PATH, buildEip191Message,
     RECEIPT_DOMAIN_NAME, RECEIPT_DOMAIN_VERSION, RECEIPT_TYPES,
     decodeReceiptHeader, verifyReceipt,

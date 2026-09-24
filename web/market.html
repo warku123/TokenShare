@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="TokenShare full market — every seller listing discovered from Registry.Registered events on-chain: per-model three-tier pricing, model filters, search, sort. Read-only, no wallet.">
+<meta name="description" content="TokenShare full market — every seller enumerated directly from the on-chain Registry: per-model three-tier pricing, model filters, search, sort. Read-only, no wallet.">
 <title>TokenShare — Full Market</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="styles.css">
@@ -27,8 +27,8 @@
   <section class="con-head mkt-head">
     <div>
       <h1 class="con-title">MARKET<span class="cursor" aria-hidden="true"></span></h1>
-      <p class="con-sub">Every seller here was <b>discovered directly on-chain</b> — from the Registry
-        contract's own registration records — and is refreshed live with current per-model prices.
+      <p class="con-sub">Every seller here is <b>read directly from the Registry</b> — the contract
+        enumerates its own seller set on-chain — and prices refresh live per model.
         Pick a model chip to see its tier prices. Read-only, no wallet needed.</p>
     </div>
     <dl class="mkt-stats mkt-stats-side">
@@ -36,14 +36,7 @@
     </dl>
   </section>
 
-  <!-- ══ DISCOVERY STATUS (technical detail on hover) ══ -->
-  <div class="scan-bar" id="scan-bar" role="status" aria-live="polite" title="on-chain discovery — Registry.Registered event scan" hidden>
-    <div class="scan-track"><div class="scan-fill" id="scan-fill"></div></div>
-    <span class="scan-text" id="scan-text"><span class="scan-lbl">connecting …</span></span>
-  </div>
-  <div class="scan-meta" id="scan-meta"></div>
-  <button class="btn btn-sm btn-ghost" id="scan-more" type="button" hidden>[ LOOK FURTHER BACK ]</button>
-
+  <p class="mkt-source" id="mkt-source" hidden>…</p>
   <div class="mkt-notice" id="mkt-notice" hidden></div>
 
   <!-- ══ TOOLBAR ══ -->
@@ -68,7 +61,7 @@
 
   <!-- ══ LISTINGS ══ -->
   <div class="listings listings-full" id="listings">
-    <noscript><p class="mock-note">listings render via JavaScript — enable JS to scan the Registry on-chain</p></noscript>
+    <noscript><p class="mock-note">listings render via JavaScript — enable JS to read the Registry on-chain</p></noscript>
   </div>
 
   <!-- ══ PAGER ══ -->
@@ -82,7 +75,7 @@
 
 <footer class="footer">
   <div class="wrap">
-    <p class="foot-fine">Discovery via Registered events · freshness via getListing · deactivate() never deletes history — the active flag governs.</p>
+    <p class="foot-fine">Sellers enumerated on-chain via sellerCount + getSellers · details live via getListing · deactivate() never deletes — the active flag governs.</p>
   </div>
 </footer>
 
