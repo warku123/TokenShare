@@ -786,7 +786,10 @@ def verify_remove_model(w3: Any, registry: Any, seller_addr: str, seller_key: st
          family — the raw ModelNotFound custom-error face),
       3. every SURVIVOR's getPrice stays verbatim,
       4. the v3 seller enumeration is untouched (sellerCount still 1).
-    Then RESTORES the exact pre-probe listing via the M2 guard path
+    Then retires BOTH probe models (by name — the first swap-and-pop
+    reordered the array) and asserts the LAST survivor's removal reverts with
+    the RemoveLastModel guard (selector 0x9cf7b72b), before RESTORING the
+    exact pre-probe listing via the M2 guard path
     (deactivate → re-register; alt returns with its UPDATED triple), so every
     later step (relay start, CLI call, refund) sees the complete listing.
     """
@@ -861,6 +864,29 @@ def verify_remove_model(w3: Any, registry: Any, seller_addr: str, seller_key: st
         fail_all(f"getSellers(0, 1) = {first_page} != [{seller_addr}] after removeModel")
     print("seller enumeration untouched: sellerCount=1 getSellers(0,1)=["
           f"{seller_addr}]")
+
+    # --- v4 RemoveLastModel guard: retire BOTH probe models (BY NAME — the
+    # first swap-and-pop reordered the array), then removing the LAST
+    # survivor (served) must revert with RemoveLastModel.
+    for probe in reversed(probe_models):
+        send_tx(w3, registry.functions.removeModel(probe), seller_key)
+    print(f"removeModel OK: probes retired ({', '.join(reversed(probe_models))}); "
+          f"1 model remains ({served_model})")
+    remove_last_selector = w3.keccak(text="RemoveLastModel()")[:4].hex()
+    try:
+        registry.functions.removeModel(served_model).call({"from": checksum(seller_addr)})
+    except ContractLogicError as exc:
+        revert_text = f"{type(exc).__name__} {exc} {getattr(exc, 'data', '')}"
+        if (remove_last_selector not in revert_text.replace("0x", "")
+                and "RemoveLastModel" not in revert_text):
+            fail_all(f"removeModel({served_model!r}) on the last survivor reverted with an "
+                     f"unexpected face: {revert_text} (expected RemoveLastModel selector "
+                     f"{remove_last_selector})")
+    else:
+        fail_all(f"removeModel({served_model!r}) on the last survivor did NOT revert "
+                 "(RemoveLastModel guard missing)")
+    print(f"RemoveLastModel guard OK: removeModel of the last survivor "
+          f"({served_model!r}) reverts (selector {remove_last_selector})")
 
     # --- restore: M2 guard semantics (deactivate → re-register). The alt
     # model returns with its UPDATED triple (updateModelPrice ran before the
