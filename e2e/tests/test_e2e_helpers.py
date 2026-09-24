@@ -289,3 +289,48 @@ def test_registry_abi_is_v2_per_model() -> None:
     page = fn("getSellers")
     assert [i["type"] for i in page["inputs"]] == ["uint256", "uint256"]
     assert [o["type"] for o in page["outputs"]] == ["address[]"]
+
+
+# ------------------------------- env pins vs reused artifact (rev-3 C1)
+
+
+def test_env_artifact_addresses_agree_passes() -> None:
+    """env==artifact (case-insensitive) must NOT exit — reuse proceeds."""
+    from run import assert_env_artifact_addresses_agree
+
+    assert_env_artifact_addresses_agree(
+        {"escrow": "0xAAA", "registry": "0xBBB", "usdc": "0xCCC"},
+        {"escrow": "0xaaa", "registry": "0xbbb", "usdc": "0xccc"},
+        "monad_testnet",
+    )
+
+
+def test_env_artifact_address_mismatch_fails(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """env!=artifact on the same chainId must fail_all with both addresses."""
+    from run import assert_env_artifact_addresses_agree
+
+    with pytest.raises(SystemExit) as ei:
+        assert_env_artifact_addresses_agree(
+            {"escrow": "0xAAA", "registry": "0xBBB", "usdc": "0xCCC"},
+            {"escrow": "0xAAA", "registry": "0xFFF", "usdc": "0xCCC"},
+            "monad_testnet",
+        )
+    assert ei.value.code == 1  # fail() prints the reason, exits 1
+    msg = capsys.readouterr().out
+    assert "E2E FAILED" in msg
+    assert "REGISTRY_ADDR=0xBBB" in msg
+    assert "registry=0xFFF" in msg
+    assert "deployed.json" in msg
+
+
+def test_unset_env_pin_defers_to_artifact() -> None:
+    """No env pin for a field → no comparison; the artifact value is kept."""
+    from run import assert_env_artifact_addresses_agree
+
+    assert_env_artifact_addresses_agree(
+        {"escrow": "0xAAA", "registry": None, "usdc": ""},
+        {"escrow": "0xaaa", "registry": "0xDDD", "usdc": "0xCCC"},
+        "monad_testnet",
+    )

@@ -529,6 +529,32 @@ def send_tx(w3: Any, fn: Any, key: str, gas: int | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 
+# rev-3 C1: env pins vs reused deployment artifact — (artifact field, env name).
+_ENV_ADDR_KEYS: tuple[tuple[str, str], ...] = (
+    ("escrow", "ESCROW_ADDR"),
+    ("registry", "REGISTRY_ADDR"),
+    ("usdc", "USDC_ADDR"),
+)
+
+
+def assert_env_artifact_addresses_agree(env_pins: dict[str, str | None],
+                                        artifact: dict[str, Any], network: str) -> None:
+    """rev-3 C1: when env pins contract addresses, a same-network reused
+    deployment artifact must name the SAME contracts (case-insensitive) —
+    a mismatch would otherwise be silently overridden by the artifact and
+    the run would retarget the wrong deployment yet print E2E PASSED.
+    Unset env fields are skipped (no pin → artifact value wins)."""
+    for key, env_name in _ENV_ADDR_KEYS:
+        pin = (env_pins.get(key) or "").strip()
+        in_artifact = str(artifact.get(key) or "").strip()
+        if pin and in_artifact and pin.lower() != in_artifact.lower():
+            fail_all(
+                f"{network}: {env_name}={pin} disagrees with deployed.json "
+                f"{key}={in_artifact} (same chainId) — refusing to silently "
+                "retarget the run; fix .env or redeploy"
+            )
+
+
 def deploy_contracts(network: str, rpc_url: str, deployer_addr: str,
                      deployer_key: str, is_fork: bool) -> dict[str, Any]:
     step("[2/8] Deploying contracts via forge script "
@@ -1173,11 +1199,20 @@ def run(network: str) -> str | None:
         buyer_addr = _Account.from_key(buyer_key).address
         deployer_key = seller_key  # deployer on real chains = seller account
         deployed_path = CONTRACTS_DIR / "deployed.json"
-        if base_env.get("ESCROW_ADDR") and base_env.get("REGISTRY_ADDR"):
+        # rev-3 C1: explicit env pins must never be silently overridden by
+        # the deployment artifact (neither by reuse below nor by a fresh
+        # deploy) — every path that would supersede a pin fail-fasts instead.
+        env_pins: dict[str, str | None] = {
+            "escrow": base_env.get("ESCROW_ADDR"),
+            "registry": base_env.get("REGISTRY_ADDR"),
+            "usdc": base_env.get("USDC_ADDR"),
+        }
+        env_pinned = bool(env_pins["escrow"] and env_pins["registry"])
+        if env_pinned:
             deployed = {
-                "escrow": base_env["ESCROW_ADDR"],
-                "registry": base_env["REGISTRY_ADDR"],
-                "usdc": base_env.get("USDC_ADDR", cfg["usdc_official"]),
+                "escrow": env_pins["escrow"],
+                "registry": env_pins["registry"],
+                "usdc": env_pins["usdc"] or cfg["usdc_official"],
                 "usdcIsMock": False,
             }
         else:
@@ -1211,8 +1246,14 @@ def run(network: str) -> str | None:
         except (OSError, json.JSONDecodeError):
             existing = {}
         if existing.get("network") == network and existing.get("escrow"):
+            if env_pinned:
+                # rev-3 C1: the same-chainId artifact is about to be reused —
+                # it must name the SAME contracts the env pinned, else the
+                # reuse below would silently retarget the run.
+                assert_env_artifact_addresses_agree(env_pins, existing, network)
             if (
                 not cfg["anvil"]
+                and not env_pinned  # C1: env pins are never superseded by a redeploy
                 and existing.get("usdcIsMock")
                 and os.environ.get("USDC_ADDR")
             ):
