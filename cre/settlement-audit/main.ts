@@ -41,7 +41,7 @@
  * Monad testnet facts (verified 2026-09-23):
  *   chain id 10143, rpc https://testnet-rpc.monad.xyz (project.yaml)
  *   escrow   0x654c83F23669908C867f02EF3E20B2126c4753De
- *   registry 0x27c7128F7290653f104E3080cf17576706F6b77A (Registry v2)
+ *   registry 0x7e8223BD2824F6dd7694739eAc03556CE307c363 (Registry v2)
  * The authoritative source for these addresses is always
  * contracts/deployed.monad.json — refresh this header + both config.*.json
  * files after any redeployment (the M10 v3 deployment chain will).
