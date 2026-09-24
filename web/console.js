@@ -238,8 +238,12 @@
   /* ═══ SELLER tab ══════════════════════════════════════════ */
 
   /* — my listing card — */
+  const deactBtn = $("s-deactivate");
+  const myTx = $("s-my-tx");
+
   async function loadMyListing({ prefill = true } = {}) {
     const box = $("s-my-listing");
+    deactBtn.hidden = true; /* until fresh chain truth says active */
     if (!state.address || !T.cfgReady()) {
       box.innerHTML = `<p class="empty-hint">连接钱包后展示你的 Registry listing。</p>`;
       return;
@@ -265,10 +269,16 @@
           `</div>`;
       }).join("");
       box.innerHTML =
-        `<div class="kv"><span>STATUS</span><b class="${l.active ? "ok" : "dim"}">${l.active ? "ACTIVE" : "INACTIVE"}</b></div>` +
+        `<div class="kv"><span>STATUS</span><b>${l.active
+          ? `<span class="badge">ACTIVE</span>`
+          : `<span class="badge off">INACTIVE</span>`}</b></div>` +
         `<div class="kv"><span>ENDPOINT</span><b class="mono wrap-anywhere">${T.esc(l.endpoint)}</b></div>` +
         `<div class="kv"><span>MODELS</span><b>${l.models.map((m) => `<span class="mtag">${T.esc(m)}</span>`).join(" ") || "—"}</b></div>` +
-        `<div class="kv"><span>PRICES /1M</span><b>${priceRows || "—"}</b></div>`;
+        `<div class="kv"><span>PRICES /1M</span><b class="${l.active ? "" : "weak"}">${priceRows || "—"}</b></div>` +
+        (l.active ? "" :
+          `<p class="empty-hint deact-note">已停用 — 市场页转 INACTIVE 灰态、买家不可再锁单；在途（Locked）payment 仍可正常 settle。` +
+          `右侧表单勾选 LISTING ACTIVE 并提交 <code class="inl">register</code> 即可恢复。</p>`);
+      deactBtn.hidden = !l.active;
       /* M7 touchpoint: TEE / upstream-policy rows via GET /info — silent degrade */
       T.probeInfo(l.endpoint).then((info) => {
         if (!info) return;
@@ -786,6 +796,102 @@
     el.innerHTML = `<span class="txl-dot"></span><span class="txl-label">form</span><span class="txl-state">${T.esc(msg)}</span>`;
     box.appendChild(el);
   };
+
+  /* — deactivate: confirm dialog (self-drawn on the wsel chrome —
+       createElement + textContent only, zero innerHTML, zero external
+       links; same injection discipline as the M11 wallet selector) — */
+  function confirmDeactivate() {
+    return new Promise((resolve) => {
+      const overlay = document.createElement("div");
+      overlay.className = "wsel-overlay";
+      const box = document.createElement("div");
+      box.className = "wsel cnf";
+      box.setAttribute("role", "alertdialog");
+      box.setAttribute("aria-modal", "true");
+      box.setAttribute("aria-label", "confirm deactivate");
+
+      const bar = document.createElement("div");
+      bar.className = "wsel-bar";
+      for (let i = 0; i < 3; i++) { const d = document.createElement("span"); d.className = "tdot"; bar.appendChild(d); }
+      const title = document.createElement("span");
+      title.className = "wsel-title";
+      title.textContent = "confirm — registry.deactivate()";
+      bar.appendChild(title);
+      box.appendChild(bar);
+
+      const body = document.createElement("div");
+      body.className = "cnf-body";
+      const copy = document.createElement("p");
+      copy.className = "cnf-copy";
+      copy.textContent =
+        "下线后：市场页 ACTIVE 展示即刻撤下（卡转 INACTIVE 灰态，买家不可再锁单）；" +
+        "已在途（Locked）的 payment 仍可正常 settle；随时可在右侧表单重新 register 恢复 ACTIVE。";
+      const det = document.createElement("p");
+      det.className = "cnf-det";
+      det.textContent = "deactivate() → active=false · 枚举条目保留（append-only，链上可审计）· 1 tx · 钱包签名";
+      body.append(copy, det);
+      box.appendChild(body);
+
+      const foot = document.createElement("div");
+      foot.className = "wsel-foot";
+      const hint = document.createElement("span");
+      hint.className = "wsel-hint";
+      hint.textContent = "esc / click outside to cancel";
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.className = "wsel-cancel";
+      cancel.textContent = "[ CANCEL ]";
+      const go = document.createElement("button");
+      go.type = "button";
+      go.className = "btn btn-danger btn-sm";
+      go.textContent = "[ SIGN DEACTIVATE ]";
+      foot.append(hint, cancel, go);
+      box.appendChild(foot);
+
+      const prevOverflow = document.body.style.overflow;
+      const done = (v) => {
+        document.removeEventListener("keydown", onKey, true);
+        document.body.style.overflow = prevOverflow;
+        overlay.remove();
+        resolve(v);
+      };
+      const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); done(false); } };
+      cancel.addEventListener("click", () => done(false));
+      go.addEventListener("click", () => done(true));
+      document.addEventListener("keydown", onKey, true);
+      overlay.addEventListener("click", (e) => { if (e.target === overlay) done(false); });
+
+      document.body.style.overflow = "hidden";
+      overlay.appendChild(box);
+      document.body.appendChild(overlay);
+      cancel.focus(); /* destructive action never takes the default focus */
+    });
+  }
+
+  /* [ DEACTIVATE ] — one-tap offboarding from the MY LISTING card.
+     Signer comes from finishConnect (the M11 wallet layer) — never
+     window.ethereum directly. */
+  deactBtn.addEventListener("click", () => guard(deactBtn, async () => {
+    if (needWallet() || needConfig()) return;
+    const mine = state.myListing;
+    if (!mine || !mine.active) return; /* stale card — nothing to deactivate */
+    if (!(await confirmDeactivate())) return;
+    myTx.innerHTML = "";
+    try {
+      const rcpt = await T.runTx(T.txLine(myTx, "deactivate()"), T.registry(state.signer).deactivate());
+      if (rcpt) {
+        /* optimistic flip, then chain-truth refresh: card → INACTIVE 徽章 +
+           价格区弱化, buyer selects → this seller disabled; market pages read
+           getListing live and annotate INACTIVE on their next render */
+        state.myListing.active = false;
+        await Promise.all([loadMyListing(), loadListingsIntoSelects()]);
+      } else {
+        /* revert/reject (e.g. NotActive from a stale-active card) — resync
+           the card without clobbering form edits */
+        await loadMyListing({ prefill: false });
+      }
+    } catch (e) { formErr(myTx, e.shortMessage || e.message); }
+  }));
 
   /* — upstream precheck card — shares runVerify with the register form:
        a successful run feeds accessible_models into the form chips (联动) */

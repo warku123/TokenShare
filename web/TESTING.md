@@ -62,6 +62,12 @@ Monad testnet (chainId 10143) · Escrow/Registry/USDC 已部署（见 `web/confi
 - [ ] UPSTREAM PRECHECK 与表单联动：表单侧预检会回填 `p-base` 并渲染结果卡；卡侧 RUN 成功同样刷新表单 chips；渲染 key_valid、upstream_host、accessible_models、listed_models、mismatches（逐条 model+原因）；relay 不可达→RETRY 提示+表单侧同步失败态
 - [ ] 提交：MetaMask 弹窗前先 `staticCall` 预演，revert 人话化（AlreadyRegistered→提示 deactivate→register 唯一路径并给一键两步按钮；NotActive/ModelNotFound/EmptyModels/LengthMismatch 各有文案）；tx 行 pending(amber)→hash（可点 explorer)→confirmed（绿）/reverted（红）；成功后 MY LISTING 刷新 + 预检自动复验
 - [ ] 按钮防重：交易 pending / 预检进行中期间按钮 disabled
+- [ ] **DEACTIVATE（MY LISTING 卡一键下线）**：仅 active listing 显示 `[ DEACTIVATE ]`（红系细边框危险按钮，卡底）；未连接 / 未登记 / 已停用 / 读卡期间均不出现
+- [ ] 确认弹窗：终端风 alertdialog（红标题 `confirm — registry.deactivate()`），一句后果=市场页 ACTIVE 展示即刻撤下（卡转 INACTIVE 灰态、买家不可再锁单）＋在途 Locked payment 仍可 settle＋可随时 register 恢复；Esc / 点遮罩 / `[ CANCEL ]` 关闭且**不发交易**、按钮复位；默认焦点在 CANCEL
+- [ ] 确认后：钱包弹一笔 `deactivate()` 签名；卡内 tx 行 pending(amber)→hash（可点 explorer)→confirmed（绿）；全程按钮 disabled 防重
+- [ ] 成功后：MY LISTING STATUS 变 INACTIVE 灰徽章（pulse 停止）+ PRICES 区弱化 + 停用说明行（指引回表单重注册）；买家下拉该 seller 变 `(inactive)` disabled；market.html 刷新后该卡 INACTIVE 灰态、首页 ACTIVE 统计减一（append-only 枚举不删条目）
+- [ ] **deactivate → 重注册回环**：下线后表单勾 LISTING ACTIVE → 预览**直走** `register(…)` 单笔（**不**进 deactivate→register 两步）→ 一笔签名 → STATUS 回 ACTIVE、市场页恢复可购；反向 stale（链上已 active 而本地不知）时 AlreadyRegistered 红条 + 一键两步按钮依旧生效
+- [ ] deactivate 失败兜底：链上已 inactive 而本地 stale 时点 `[ DEACTIVATE ]` → tx 行红（NotActive revert），卡片自动重读链上真值并收起按钮，表单内容不被清
 
 ## Buyer tab
 
