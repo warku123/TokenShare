@@ -281,3 +281,11 @@ def test_registry_abi_is_v2_per_model() -> None:
     assert [c["type"] for c in listing["outputs"][0]["components"]] == [
         "address", "string", "string[]", "tuple[]", "bool",
     ]
+
+    # Registry v3 enumeration (M10): on-chain seller directory.
+    count = fn("sellerCount")
+    assert count["inputs"] == []
+    assert [o["type"] for o in count["outputs"]] == ["uint256"]
+    page = fn("getSellers")
+    assert [i["type"] for i in page["inputs"]] == ["uint256", "uint256"]
+    assert [o["type"] for o in page["outputs"]] == ["address[]"]

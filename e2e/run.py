@@ -353,6 +353,9 @@ _PRICE_COMPONENTS = [
 # Registry v2 (M9 per-model pricing): register takes a Price[] array PARALLEL
 # to models[]; per-model reads go through getPrice(operator, model); an
 # existing model's price changes via updateModelPrice (operator = caller).
+# Registry v3 (M10) adds the on-chain seller directory: sellerCount() +
+# getSellers(start, count) (clamped page: start>=len -> empty, count>500 ->
+# 500, tail-truncated; append-only, deduped across re-registrations).
 REGISTRY_ABI = [
     {
         "type": "function",
@@ -381,6 +384,23 @@ REGISTRY_ABI = [
         "stateMutability": "nonpayable",
         "inputs": [],
         "outputs": [],
+    },
+    {
+        "type": "function",
+        "name": "sellerCount",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "count", "type": "uint256"}],
+    },
+    {
+        "type": "function",
+        "name": "getSellers",
+        "stateMutability": "view",
+        "inputs": [
+            {"name": "start", "type": "uint256"},
+            {"name": "count", "type": "uint256"},
+        ],
+        "outputs": [{"name": "sellers", "type": "address[]"}],
     },
     {
         "type": "function",
@@ -649,8 +669,19 @@ def prepare_contracts(rpc_url: str, relay_port: int, deployed: dict[str, Any],
         got = decode_price_tuple(registry.functions.getPrice(checksum(seller_addr), model).call())
         if got != expected:
             fail_all(f"getPrice({model!r}) = {got} != expected {expected}")
+
+    # Registry v3 enumeration (M10): the seller directory must hold exactly
+    # the seller — and STAY at one entry even when the M2 guard took the
+    # deactivate→re-register path (append-only, deduped on re-registration).
+    seller_count = int(registry.functions.sellerCount().call())
+    first_page = [str(a) for a in registry.functions.getSellers(0, 1).call()]
+    if seller_count != 1:
+        fail_all(f"sellerCount() = {seller_count} != 1 after register")
+    if not first_page or first_page[0].lower() != checksum(seller_addr).lower():
+        fail_all(f"getSellers(0, 1) = {first_page} != [{seller_addr}]")
     print(f"listing verified: active endpoint={listing_endpoint_safe(listing_endpoint)} "
           f"getPrice verbatim for {len(expected_models)} models")
+    print(f"seller directory verified: sellerCount=1 getSellers(0,1)=[{seller_addr}]")
 
 
 def listing_endpoint_safe(endpoint: str) -> str:
