@@ -9,8 +9,9 @@ import {Registry} from "../src/Registry.sol";
  * @title RegistryTest
  * @notice Behavioral suite for the Registry listing contract (BUILD_SPEC
  *         v1.1 §3 M2 + M9 per-model pricing PIN + M10 v3 seller
- *         enumeration). Plain anvil/local EVM, no fork. All prices are USDC
- *         6-decimal native units per 1M tokens (1 USDC = 1e6).
+ *         enumeration + M12 v4 model-level delisting). Plain anvil/local
+ *         EVM, no fork. All prices are USDC 6-decimal native units per 1M
+ *         tokens (1 USDC = 1e6).
  *
  * IMPLEMENTATION NOTE: unlike v1's 7-tuple (which needed raw returndata
  * decoding to dodge "Stack too deep"), v2 `getListing` returns a single
@@ -367,6 +368,238 @@ contract RegistryTest is Test {
         pb = registry.getPrice(operatorB, "gpt-4o");
         assertEq(pb.cachedIn, 4e6, "B updated its own price");
         assertFalse(registry.getListing(operatorA).active, "A still inactive");
+    }
+
+    // =====================================================================
+    // removeModel (v4 / M12)
+    // =====================================================================
+
+    /// @dev Three-model listing with distinct per-model prices:
+    ///      m-alpha=(1,2,3)e6, m-beta=(4,5,6)e6, m-gamma=(7,8,9)e6.
+    function _registerThreeModels(address who) internal {
+        string[] memory models = new string[](3);
+        models[0] = "m-alpha";
+        models[1] = "m-beta";
+        models[2] = "m-gamma";
+        Registry.Price[] memory prices = new Registry.Price[](3);
+        prices[0] = Registry.Price({cachedIn: 1e6, input: 2e6, output: 3e6});
+        prices[1] = Registry.Price({cachedIn: 4e6, input: 5e6, output: 6e6});
+        prices[2] = Registry.Price({cachedIn: 7e6, input: 8e6, output: 9e6});
+        _register(who, ENDPOINT, models, prices);
+    }
+
+    /// @dev Assert every survivor keeps ITS OWN price and getListing stays a
+    ///      consistent parallel array (models.length == prices.length, and
+    ///      prices[i] == getPrice(operator, models[i]) for every i).
+    function _assertParallelShape(address who) internal view {
+        Registry.Listing memory listing = registry.getListing(who);
+        assertEq(listing.prices.length, listing.models.length, "parallel lengths");
+        for (uint256 i = 0; i < listing.models.length; i++) {
+            Registry.Price memory p = registry.getPrice(who, listing.models[i]);
+            assertEq(listing.prices[i].cachedIn, p.cachedIn, "parallel cachedIn");
+            assertEq(listing.prices[i].input, p.input, "parallel input");
+            assertEq(listing.prices[i].output, p.output, "parallel output");
+        }
+    }
+
+    /// @dev Removing a MIDDLE model: swap-and-pop moves the last element into
+    ///      the hole (survivor ORDER may change), but the price travels with
+    ///      its model — every survivor's price is exactly its pre-removal
+    ///      triple, verified both via getListing and via getPrice.
+    function test_RemoveModel_MiddleSwapAndPop() public {
+        _registerThreeModels(operatorA);
+
+        vm.prank(operatorA);
+        registry.removeModel("m-beta");
+
+        Registry.Listing memory listing = registry.getListing(operatorA);
+        assertEq(listing.models.length, 2, "models shortened by one");
+        assertEq(listing.prices.length, 2, "prices shortened in lockstep");
+
+        // swap-and-pop: "m-gamma" (former last) fills the hole at index 1
+        assertEq(listing.models[0], "m-alpha", "models[0] untouched");
+        assertEq(listing.models[1], "m-gamma", "models[1] = former last");
+
+        // price followed its model across the swap
+        assertEq(listing.prices[1].cachedIn, 7e6, "gamma cachedIn followed model");
+        assertEq(listing.prices[1].input, 8e6, "gamma input followed model");
+        assertEq(listing.prices[1].output, 9e6, "gamma output followed model");
+        assertEq(listing.prices[0].cachedIn, 1e6, "alpha cachedIn unchanged");
+        assertEq(listing.prices[0].input, 2e6, "alpha input unchanged");
+        assertEq(listing.prices[0].output, 3e6, "alpha output unchanged");
+
+        _assertParallelShape(operatorA);
+        // removed model is gone from the listing
+        assertFalse(
+            keccak256(bytes(listing.models[0])) == keccak256(bytes("m-beta"))
+                || keccak256(bytes(listing.models[1])) == keccak256(bytes("m-beta")),
+            "m-beta fully removed"
+        );
+        assertTrue(listing.active, "removal is not deactivation");
+    }
+
+    /// @dev Removing the LAST element is a plain pop: survivor order AND all
+    ///      survivor prices are bit-identical to before.
+    function test_RemoveModel_LastElement() public {
+        _registerThreeModels(operatorA);
+
+        vm.prank(operatorA);
+        registry.removeModel("m-gamma");
+
+        Registry.Listing memory listing = registry.getListing(operatorA);
+        assertEq(listing.models.length, 2, "models shortened by one");
+        assertEq(listing.models[0], "m-alpha", "order kept (pure pop)");
+        assertEq(listing.models[1], "m-beta", "order kept (pure pop)");
+        assertEq(listing.prices[0].cachedIn, 1e6, "alpha cachedIn intact");
+        assertEq(listing.prices[0].input, 2e6, "alpha input intact");
+        assertEq(listing.prices[0].output, 3e6, "alpha output intact");
+        assertEq(listing.prices[1].cachedIn, 4e6, "beta cachedIn intact");
+        assertEq(listing.prices[1].input, 5e6, "beta input intact");
+        assertEq(listing.prices[1].output, 6e6, "beta output intact");
+
+        _assertParallelShape(operatorA);
+    }
+
+    /// @dev The LAST remaining model cannot be removed — RemoveLastModel
+    ///      steers the operator to {deactivate}. Removing down from two works
+    ///      and the resulting one-model listing is fully functional
+    ///      (getPrice / updateModelPrice still operate on the survivor).
+    function test_RevertRemoveModel_RemoveLastModel() public {
+        _registerDefault(operatorA); // 2 models
+
+        vm.prank(operatorA);
+        registry.removeModel("gpt-4o-mini");
+
+        // down to one model: removing the survivor reverts RemoveLastModel
+        // (guard order is ModelNotFound first, so this uses the REAL survivor
+        // name; an unknown name on a one-model listing is ModelNotFound —
+        // covered in test_RevertRemoveModel_ModelNotFound)
+        vm.prank(operatorA);
+        vm.expectRevert(Registry.RemoveLastModel.selector);
+        registry.removeModel("gpt-4o");
+
+        // the one-model listing keeps working
+        Registry.Price memory p = registry.getPrice(operatorA, "gpt-4o");
+        assertEq(p.cachedIn, 1e6, "survivor price intact");
+        vm.prank(operatorA);
+        registry.updateModelPrice("gpt-4o", Registry.Price({cachedIn: 9e6, input: 9e6, output: 9e6}));
+        assertEq(registry.getPrice(operatorA, "gpt-4o").cachedIn, 9e6, "update still works");
+
+        // same guard on a fresh single-model listing
+        _register(operatorB, ENDPOINT, _oneModel("solo"), _onePrice(1, 2, 3));
+        vm.prank(operatorB);
+        vm.expectRevert(Registry.RemoveLastModel.selector);
+        registry.removeModel("solo");
+    }
+
+    /// @dev Unknown model (never listed, or already removed, or on a
+    ///      never-registered operator's empty listing) reverts ModelNotFound.
+    function test_RevertRemoveModel_ModelNotFound() public {
+        _registerThreeModels(operatorA);
+
+        // never existed
+        vm.prank(operatorA);
+        vm.expectRevert(Registry.ModelNotFound.selector);
+        registry.removeModel("unknown-model");
+
+        // on a single-model listing, an UNKNOWN name is ModelNotFound (not
+        // RemoveLastModel) — the model lookup happens first
+        _register(operatorB, ENDPOINT, _oneModel("solo"), _onePrice(1, 2, 3));
+        vm.prank(operatorB);
+        vm.expectRevert(Registry.ModelNotFound.selector);
+        registry.removeModel("not-solo");
+
+        // never-registered operator: empty listing => nothing to find
+        vm.prank(stranger);
+        vm.expectRevert(Registry.ModelNotFound.selector);
+        registry.removeModel("m-alpha");
+    }
+
+    /// @dev No `active` requirement: a DEACTIVATED listing can still be
+    ///      cleaned up model by model; the flag stays false and other fields
+    ///      are retained.
+    function test_RemoveModel_InactiveListing() public {
+        _registerThreeModels(operatorA);
+        vm.prank(operatorA);
+        registry.deactivate();
+
+        vm.prank(operatorA);
+        registry.removeModel("m-beta"); // must NOT revert NotActive
+
+        Registry.Listing memory listing = registry.getListing(operatorA);
+        assertFalse(listing.active, "still inactive");
+        assertEq(listing.models.length, 2, "model removed while inactive");
+        assertEq(listing.prices.length, 2, "prices parallel while inactive");
+        assertEq(listing.endpoint, ENDPOINT, "endpoint retained");
+        // NB: no getPrice here — it correctly reverts NotActive while
+        // inactive; assert the parallel arrays directly instead.
+        assertEq(listing.models[0], "m-alpha", "survivor order (gamma filled hole)");
+        assertEq(listing.models[1], "m-gamma", "survivor order");
+        assertEq(listing.prices[1].cachedIn, 7e6, "gamma price followed model");
+    }
+
+    /// @dev After removal, `getPrice` reverts ModelNotFound for the removed
+    ///      model (this is exactly the hook that makes an in-flight settle
+    ///      fail and pushes the buyer to the refund path), while survivors
+    ///      still price normally.
+    function test_RemoveModel_GetPriceReverts() public {
+        _registerThreeModels(operatorA);
+
+        vm.prank(operatorA);
+        registry.removeModel("m-beta");
+
+        vm.prank(stranger);
+        vm.expectRevert(Registry.ModelNotFound.selector);
+        registry.getPrice(operatorA, "m-beta");
+
+        // survivors unaffected
+        Registry.Price memory pa = registry.getPrice(operatorA, "m-alpha");
+        assertEq(pa.input, 2e6, "alpha still priced");
+        Registry.Price memory pg = registry.getPrice(operatorA, "m-gamma");
+        assertEq(pg.input, 8e6, "gamma still priced");
+    }
+
+    /// @dev Emits ModelRemoved(operator, model) with the operator indexed.
+    function test_RemoveModel_Event() public {
+        _registerThreeModels(operatorA);
+
+        vm.expectEmit(true, false, false, true, address(registry));
+        emit Registry.ModelRemoved(operatorA, "m-beta");
+
+        vm.prank(operatorA);
+        registry.removeModel("m-beta");
+    }
+
+    /// @dev Re-add path: after removing a model (then deactivating, since
+    ///      register requires an inactive listing) the same model name can be
+    ///      registered again with a fresh price and prices normally.
+    function test_RemoveModel_ReRegisterSameModel() public {
+        _registerThreeModels(operatorA);
+
+        vm.prank(operatorA);
+        registry.removeModel("m-beta");
+
+        vm.prank(operatorA);
+        registry.deactivate();
+
+        // re-register WITH the removed model back in the set
+        string[] memory models = new string[](2);
+        models[0] = "m-alpha";
+        models[1] = "m-beta"; // re-added
+        Registry.Price[] memory prices = new Registry.Price[](2);
+        prices[0] = Registry.Price({cachedIn: 1e6, input: 2e6, output: 3e6});
+        prices[1] = Registry.Price({cachedIn: 40e6, input: 50e6, output: 60e6}); // new price
+        _register(operatorA, ENDPOINT, models, prices);
+
+        Registry.Listing memory listing = registry.getListing(operatorA);
+        assertTrue(listing.active, "re-registered");
+        assertEq(listing.models.length, 2, "model set restored");
+        assertEq(listing.models[1], "m-beta", "m-beta back in the set");
+        Registry.Price memory p = registry.getPrice(operatorA, "m-beta");
+        assertEq(p.cachedIn, 40e6, "fresh cachedIn");
+        assertEq(p.input, 50e6, "fresh input");
+        assertEq(p.output, 60e6, "fresh output");
+        _assertParallelShape(operatorA);
     }
 
     // =====================================================================

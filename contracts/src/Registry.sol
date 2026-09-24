@@ -8,7 +8,9 @@ pragma solidity ^0.8.24;
  *         pricing — prices move from one triple per seller to one triple per
  *         model, keyed by the listing's `models` array; v3 = M10 on-chain
  *         seller enumeration — `sellerCount()`/`getSellers()` replace
- *         consumer-side `Registered` log scanning).
+ *         consumer-side `Registered` log scanning; v4 = M12 model-level
+ *         delisting — `removeModel` retires ONE model without touching the
+ *         rest of the listing).
  *
  * Each seller (relay operator) maintains exactly one listing:
  *   operator --register(endpoint, models, prices)--> listing active
@@ -16,7 +18,8 @@ pragma solidity ^0.8.24;
  *   operator --deactivate()--> listing kept, inactive; re-register replaces it
  *
  * `prices` is a PARALLEL array to `models`: prices[i] applies to models[i].
- * Changing the model set = deactivate + re-register.
+ * Adding models = deactivate + re-register; removing one model = `removeModel`
+ * (v4).
  *
  * The buyer CLI / relay reads `getListing(operator)` and, per request model,
  * `getPrice(operator, model)` for tiered per-token pricing; callers must check
@@ -90,6 +93,10 @@ contract Registry {
     /// @notice The requested model is not in the operator's `models` list.
     error ModelNotFound();
 
+    /// @notice The caller's listing has only one model left, so it cannot be
+    ///         removed — deactivate the whole listing instead ({deactivate}).
+    error RemoveLastModel();
+
     /// @notice The models list must contain at least one model name.
     error EmptyModels();
 
@@ -110,6 +117,11 @@ contract Registry {
 
     /// @notice The operator deactivated its listing; data is retained on-chain.
     event Deactivated(address indexed operator);
+
+    /// @notice The operator removed ONE model from its listing (stopped
+    ///         serving it). The `models`/`prices` parallel arrays were both
+    ///         shortened by one entry; survivors keep their own prices.
+    event ModelRemoved(address indexed operator, string model);
 
     /*//////////////////////////////////////////////////////////////////////////
                                       STORAGE
@@ -190,8 +202,9 @@ contract Registry {
 
     /**
      * @notice Update the tiered price of ONE existing model. The endpoint and
-     *         the model set are unchanged (adding/removing models = deactivate
-     *         + re-register). Requires an active listing.
+     *         the model set are unchanged (adding a model = deactivate +
+     *         re-register; removing ONE model = {removeModel}). Requires an
+     *         active listing.
      * @param model Model name already present in the caller's listing.
      * @param price New tiered price for `model` (zero entries are legal).
      */
@@ -205,6 +218,48 @@ contract Registry {
         listing.prices[idx] = price;
 
         emit PriceUpdated(msg.sender, model, price.cachedIn, price.input, price.output);
+    }
+
+    /**
+     * @notice Remove ONE model from the caller's listing — from now on the
+     *         operator does NOT serve that model. The `models` and `prices`
+     *         parallel arrays are shortened by one entry at the SAME index
+     *         (the price travels with its model): the removed index is filled
+     *         with the former last element (swap-and-pop) and both arrays are
+     *         popped, keeping the arrays dense and parallel. The relative
+     *         order of the surviving models is therefore unspecified —
+     *         consumers must read `getListing` instead of caching indices.
+     *
+     * No `active` requirement: an inactive listing may also be cleaned up
+     * model by model.
+     *
+     * SETTLEMENT SEMANTICS: removal only stops FUTURE service. A payment
+     * already locked against this model is settled by the relay via
+     * `getPrice`, which now reverts with `ModelNotFound` — the settle tx
+     * fails (`settle-failed`, no receipt) and the buyer takes the normal
+     * refund path after TTL. No escrow state is touched here (Escrow is a
+     * separate contract).
+     *
+     * @param model Model name currently present in the caller's listing.
+     */
+    function removeModel(string calldata model) external {
+        Listing storage listing = _listings[msg.sender];
+
+        uint256 idx = _modelIndex(listing, model);
+        if (idx == NOT_FOUND) revert ModelNotFound();
+
+        // idx is a hit => length >= 1; last == 0 means it is the ONLY model.
+        uint256 last = listing.models.length - 1;
+        if (last == 0) revert RemoveLastModel();
+
+        // Swap-and-pop, BOTH arrays at the same index. When idx == last the
+        // assignments are self-assign no-ops and this is a plain pop.
+        listing.models[idx] = listing.models[last];
+        listing.prices[idx] = listing.prices[last];
+        listing.models.pop();
+        listing.prices.pop();
+
+        emit ModelRemoved(msg.sender, model);
     }
 
     /**
