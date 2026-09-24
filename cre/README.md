@@ -2,11 +2,12 @@
 
 **Bounty: Chainlink "Best workflow with CRE" ($3k).** A CRE workflow that turns
 every `TokenShare Escrow.Settled` event into a **DON-audited, on-chain-anchored
-settlement record**: it cross-checks the seller relay's EIP-712 signed receipt
-against the amount actually settled on Monad, and writes the verdict (plus the
-receipt hash) to a consumer contract via `writeReport`. This closes the one
-trust gap a relay can never close by itself — *"did the seller charge exactly
-what the buyer was told?"* — and makes the answer permanent and on-chain.
+settlement record**: it re-prices the receipt's model from the on-chain
+Registry, cross-checks the seller relay's EIP-712 signed receipt against that
+estimate, and writes the DON verdict (plus the receipt hash) to a consumer
+contract via `writeReport`. This closes the one trust gap a relay can never
+close by itself — *"did the seller charge exactly what the buyer was told?"* —
+and makes the answer permanent and on-chain.
 
 > **Scope note (official position):** per Chainlink's official Discord —
 > *"simulation is fine! our team will deploy it"* — **simulate-only delivery
@@ -34,9 +35,10 @@ what the buyer was told?"* — and makes the answer permanent and on-chain.
 │         ({{.receipts_bearer}}; simulation value from .env,                  │
 │          deployed value from the Vault DON — never in node memory)          │
 │  4. Verify     receipt.actualAmount  vs  per-model on-chain estimate        │
-│                (getPrice(model) / listing parallel arrays, ±1 unit)         │
+│                (getPrice @ trigger block / listing fallback, ±1 unit)       │
 │  5. writeReport → ReceiptAnchor.onReport via Keystone forwarder             │
-│       — DON-consensus signed report; verdict MATCH / MISMATCH               │
+│       — DON-consensus signed report; verdict carried IN the report and      │
+│         anchored verbatim by the consumer (MATCH / MISMATCH)                │
 └──────────────────────────────────────────────┬──────────────────────────────┘
                                                ▼
                      ┌──────────────────────────────────────────────────┐
@@ -50,10 +52,48 @@ what the buyer was told?"* — and makes the answer permanent and on-chain.
 **Network facts (verified 2026-09-23):** Monad testnet chain id `10143`,
 RPC `https://testnet-rpc.monad.xyz`; Escrow
 `0x654c83F23669908C867f02EF3E20B2126c4753De`; Registry
-`0x3a44dB7696306DFB08266721aE660C2334FCAA93` (snapshot
-`contracts/deployed.monad.json`, M5b). Relay receipt endpoint:
+`0x27c7128F7290653f104E3080cf17576706F6b77A` (Registry v2).
+
+> **Registry address — authoritative source:** always take the Registry (and
+> Escrow) address from `contracts/deployed.monad.json` at the repo root; this
+> README, the `main.ts` header comment, and both
+> `settlement-audit/config.*.json` files are snapshots of it. The v1 Registry
+> (`0x3a44dB…CA93`) is deprecated — its old 7-component `getListing` ABI makes
+> the workflow's v2 5-component decode throw out-of-bounds. **After the M10 v3
+> deployment chain redeploys the Registry, refresh all four places** (snapshot
+> is authoritative; the orchestrator's deploy chain does this).
+
+Relay receipt endpoint:
 `GET /receipt/{paymentId}` (see `relay/app/receipt.py` — EIP-712
 `{domain, message, signature}` JSON).
+
+## Verdict semantics
+
+The verdict is computed **once**, by the workflow, as
+`receipt.actualAmount` vs the per-model on-chain estimate
+(`getPrice` at the **trigger block** / listing fallback, ±1 native-unit
+tolerance), and is carried **inside the report** as `uint8 verdict`
+(1 = Match, 2 = Mismatch). `ReceiptAnchor` anchors it verbatim — it validates
+the value and never recomputes `settled-vs-receipt` on-chain.
+
+Why the contract must not derive the verdict from `settledAmount` vs
+`receiptAmount` (the two would contradict the DON in real flows):
+
+1. **Escrow clamping.** `Escrow.settle` clamps the settled amount
+   (`min(actual, maxAmount)`) while the relay receipt's `actualAmount` is
+   unclamped. A fair charge can therefore anchor with
+   `settledAmount < receiptAmount`; a naive on-chain comparison would flag
+   MISMATCH for a receipt the DON just confirmed as correctly priced.
+2. **Price finality race.** The DON prices at the trigger
+   (`Escrow.Settled`) block. Reading prices at last-finalized instead would
+   let a `Registry.updateModelPrice` landing inside the ~600 ms finality
+   window after settle fabricate a MISMATCH — permanently anchored on-chain.
+
+Consequently `settledAmount` and `receiptAmount` in the anchored
+`AuditRecord` are **observational fields**, not verdict inputs: consumers who
+care about clamping compare them directly. Real pricing discrepancies still
+anchor as MISMATCH and emit `DiscrepancyFlagged` — anchoring a dispute is the
+trust-gap signal; refusing to anchor it would hide the gap.
 
 ## Files (Chainlink CRE template inventory)
 
@@ -70,7 +110,7 @@ This directory mirrors the `cre init` TypeScript "Hello World" template layout:
 | `settlement-audit/config.staging.json` / `config.production.json` | Addresses + relay URL injected into the workflow via `runtime.config` |
 | `settlement-audit/package.json` / `tsconfig.json` | Per-workflow deps (`@chainlink/cre-sdk`, `viem`, `zod`) and TS config |
 | `contracts/src/ReceiptAnchor.sol` | Consumer contract: `onReport(bytes metadata, bytes report)`, forwarder set in constructor, anchors `ReceiptAnchored` / `DiscrepancyFlagged` |
-| `contracts/test/ReceiptAnchor.t.sol` | Foundry tests (7) for the consumer |
+| `contracts/test/ReceiptAnchor.t.sol` | Foundry tests (10) for the consumer |
 | `contracts/foundry.toml` | Solc 0.8.26; `libs` includes the repo-wide forge-std |
 
 ## Quickstart (6 steps)
@@ -100,7 +140,7 @@ cre workflow supported-chains   # confirm monad-testnet is enabled for your tena
 
 ```bash
 cd cre/contracts
-forge build && forge test          # 7/7 pass
+forge build && forge test          # 10/10 pass
 forge create src/ReceiptAnchor.sol:ReceiptAnchor \
   --constructor-args 0xB9F79d863261869B234c481D1f9A7af84AeAd192 \
   --rpc-url https://testnet-rpc.monad.xyz \
@@ -125,6 +165,12 @@ cp ../.env.example ../.env         # then fill in:
 Edit `config.staging.json`:
 
 - `anchorAddress` → the ReceiptAnchor address from Step 1
+- `registryAddress` → already set from the authoritative
+  `contracts/deployed.monad.json` snapshot (Registry v2,
+  `0x27c7128F…6b77A`); refresh it after any redeployment — the M10 v3
+  deployment chain will re-point this. Never point it at the deprecated v1
+  Registry: the workflow decodes the v2 5-component `getListing` ABI and the
+  v1 shape makes the read throw out-of-bounds
 - `relayBaseUrl` → the relay base URL from the Registry listing
   (M5b demo used `http://127.0.0.1:8787`)
 - `workflowOwner` → your CRE workflow owner address (from `cre whoami`)
@@ -153,10 +199,10 @@ Expected console shape: `Settled: paymentId=2 …`, `getPayment: …`,
 `getListing: models=4 active=true …`, `Receipt: actualAmount=730 …`,
 `Compare: model=… expected=730 receipt=730 → MATCH`, then the dry-run write
 with `0x` tx hash. The price is resolved per the receipt's model (Registry
-v2 `getPrice(operator, model)`, falling back to the Listing models/prices
-parallel arrays). If the model is missing on-chain (getPrice reverts
-ModelNotFound and it is absent from listing.models), the workflow returns
-`MODEL MISSING …` instead of anchoring.
+v2 `getPrice(operator, model)` read at the **trigger block**, falling back to
+the Listing models/prices parallel arrays). If the model is missing on-chain
+(getPrice reverts ModelNotFound and it is absent from listing.models), the
+workflow returns `MODEL MISSING …` instead of anchoring.
 
 ### Step 4 — Broadcast the anchor and assert it on-chain
 
@@ -215,7 +261,7 @@ point `relayBaseUrl` at the public endpoint).
 | `tsc --noEmit --strict --noUnusedLocals` (workflow) | **0 errors** |
 | `cre-compile` (bun → JS → javy → WASM 2.7 MB) | **success** |
 | `forge build` (ReceiptAnchor, solc 0.8.26) | **success** |
-| `forge test` (7 consumer tests) | **7/7 pass** |
+| `forge test` (10 consumer tests) | **10/10 pass** |
 | M5b settle tx + Settled log verified on Monad testnet | `cast receipt` (1 log, paymentId=2, actual=730) |
 | `cre workflow simulate` live run | **blocked by CRE login wall** (requires `cre login` / `CRE_API_KEY`; browser-less environment). Follow Step 0 → Step 3. |
 

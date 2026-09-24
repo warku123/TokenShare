@@ -20,10 +20,13 @@
  *                Listing models/prices parallel arrays as fallback; expected =
  *                (cached*cachedIn + (prompt-cached)*input + completion*output)
  *                // 1e6, ±1 native-unit tolerance (0.000001 USDC rounding
- *                slop). A receipt model missing on-chain ⇒ MODEL MISSING
- *                conclusion (logged, nothing anchored) instead of a crash.
- *                The anchored record still carries the on-chain Escrow
- *                settled amount in settledAmount (ReceiptAnchor schema).
+ *                slop). Price is read at the TRIGGER block (log.blockNumber)
+ *                to avoid the last-finalized updateModelPrice race. A receipt
+ *                model missing on-chain ⇒ MODEL MISSING conclusion (logged,
+ *                nothing anchored) instead of a crash. The verdict is
+ *                receipt-vs-estimate; the anchored record still carries the
+ *                on-chain Escrow settled amount in settledAmount (see
+ *                README "Verdict semantics" for the clamping divergence).
  *                This closes the trust gap a relay can never self-close —
  *                the DON, not the seller, adjudicates the settlement.
  *   5. WRITE   : evm.writeReport → ReceiptAnchor.onReport via the Keystone
@@ -38,9 +41,13 @@
  * Monad testnet facts (verified 2026-09-23):
  *   chain id 10143, rpc https://testnet-rpc.monad.xyz (project.yaml)
  *   escrow   0x654c83F23669908C867f02EF3E20B2126c4753De
- *   registry 0x3a44dB7696306DFB08266721aE660C2334FCAA93
+ *   registry 0x27c7128F7290653f104E3080cf17576706F6b77A (Registry v2)
+ * The authoritative source for these addresses is always
+ * contracts/deployed.monad.json — refresh this header + both config.*.json
+ * files after any redeployment (the M10 v3 deployment chain will).
  */
 import {
+  bigintToProtoBigInt,
   bytesToHex,
   ConfidentialHTTPClient,
   EVMClient,
@@ -52,6 +59,7 @@ import {
   logTriggerConfig,
   ok,
   prepareReportRequest,
+  protoBigIntToBigint,
   Runner,
   TxStatus,
   type EVMLog,
@@ -256,6 +264,15 @@ const onSettled = (runtime: Runtime<Config>, log: EVMLog): string => {
     throw new Error(`Receipt amount ${receiptAmount} exceeds sanity ceiling ${ceiling} — refusing to anchor`)
   }
   const model = receipt.message.model
+  // Price is read AT THE TRIGGER BLOCK (log.blockNumber), not at
+  // LAST_FINALIZED_BLOCK_NUMBER: the Escrow.Settled log block is the exact
+  // state the settlement priced against. Reading at last-finalized instead
+  // opens a finality race — a Registry.updateModelPrice landing inside the
+  // ~600ms finality window after settle would silently change the estimate
+  // and fabricate a MISMATCH that gets anchored permanently on-chain.
+  const triggerBlockNumber = log.blockNumber
+    ? bigintToProtoBigInt(protoBigIntToBigint(log.blockNumber))
+    : LAST_FINALIZED_BLOCK_NUMBER
   let price: Price | undefined
   try {
     price = decodeAbiParameters(
@@ -267,7 +284,7 @@ const onSettled = (runtime: Runtime<Config>, log: EVMLog): string => {
             to: config.registryAddress as Address,
             data: encodeFunctionData({ abi: registryAbi, functionName: "getPrice", args: [seller, model] }),
           }),
-          blockNumber: LAST_FINALIZED_BLOCK_NUMBER,
+          blockNumber: triggerBlockNumber,
         })
         .result().data,
     )[0]
@@ -304,9 +321,13 @@ const onSettled = (runtime: Runtime<Config>, log: EVMLog): string => {
   // 5. WRITE — ABI-encoded audit payload routed to ReceiptAnchor.onReport
   //    through the CRE writeReport consensus path: DON signs the report
   //    (runtime.report), then the EVM capability submits it to the forwarder.
+  //    The DON verdict (step 4) is carried IN the report; ReceiptAnchor
+  //    anchors it verbatim instead of recomputing settled-vs-receipt, because
+  //    those two comparisons legitimately diverge — see cre/README.md
+  //    "Verdict semantics" (Escrow clamping + price-finality race).
   const report: Hex = encodeAbiParameters(
     parseAbiParameters(
-      "uint256 paymentId, uint256 settledAmount, uint256 receiptAmount, bytes32 receiptHash, string upstreamHost, string model",
+      "uint256 paymentId, uint256 settledAmount, uint256 receiptAmount, bytes32 receiptHash, string upstreamHost, string model, uint8 verdict",
     ),
     [
       paymentId,
@@ -315,6 +336,7 @@ const onSettled = (runtime: Runtime<Config>, log: EVMLog): string => {
       keccak256(receipt.signature as Hex),
       receipt.message.upstreamHost,
       receipt.message.model,
+      verdict,
     ],
   )
   const metadata: Hex = encodeAbiParameters(parseAbiParameters("uint256 workflowVersion"), [1n])

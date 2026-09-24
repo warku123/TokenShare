@@ -83,7 +83,7 @@ contract ReceiptAnchor {
     /// @param report   ABI-encoded payload from the workflow:
     ///                 (uint256 paymentId, uint256 settledAmount,
     ///                  uint256 receiptAmount, bytes32 receiptHash,
-    ///                  string upstreamHost, string model, bytes signature)
+    ///                  string upstreamHost, string model, uint8 verdict)
     function onReport(bytes calldata metadata, bytes calldata report) external {
         if (msg.sender != forwarder) revert Unauthorized(msg.sender, forwarder);
         if (report.length == 0) revert BadReport();
@@ -94,10 +94,11 @@ contract ReceiptAnchor {
             uint256 receiptAmount,
             bytes32 receiptHash,
             string memory upstreamHost,
-            string memory model
+            string memory model,
+            uint8 rawVerdict
         ) = _decodeReport(report);
 
-        Verdict verdict = _verdict(settledAmount, receiptAmount);
+        Verdict verdict = _verdict(rawVerdict);
 
         records[paymentId] = AuditRecord({
             paymentId: paymentId,
@@ -136,21 +137,28 @@ contract ReceiptAnchor {
             uint256 receiptAmount,
             bytes32 receiptHash,
             string memory upstreamHost,
-            string memory model
+            string memory model,
+            uint8 verdict
         )
     {
-        // The workflow encodes exactly 6 fields; the signature is folded into
-        // receiptHash upstream, so the tail here is (string, string).
-        if (report.length < 6 * 32) revert BadReport();
-        (paymentId, settledAmount, receiptAmount, receiptHash, upstreamHost, model) =
-            abi.decode(report, (uint256, uint256, uint256, bytes32, string, string));
+        // The workflow encodes exactly 7 fields; the signature is folded into
+        // receiptHash upstream, so the tail here is (string, string, uint8).
+        if (report.length < 7 * 32) revert BadReport();
+        (paymentId, settledAmount, receiptAmount, receiptHash, upstreamHost, model, verdict) =
+            abi.decode(report, (uint256, uint256, uint256, bytes32, string, string, uint8));
     }
 
-    function _verdict(uint256 settledAmount, uint256 receiptAmount) internal pure returns (Verdict) {
-        if (settledAmount == receiptAmount) return Verdict.Match;
-        // 1 native-unit tolerance (0.000001 USDC) for rounding drift.
-        uint256 delta = settledAmount > receiptAmount ? settledAmount - receiptAmount : receiptAmount - settledAmount;
-        if (delta <= 1) return Verdict.Match;
-        return Verdict.Mismatch;
+    /// @dev Trusts the DON verdict carried inside the report (1 = Match,
+    ///      2 = Mismatch) instead of recomputing settled-vs-receipt on-chain.
+    ///      The two comparisons legitimately diverge: (1) Escrow settlement
+    ///      can clamp actualAmount to maxAmount while the relay receipt stays
+    ///      unclamped, and (2) the DON prices at the trigger block, so a
+    ///      Registry.updateModelPrice landing after settle must not flip the
+    ///      verdict. See cre/README.md "Verdict semantics".
+    function _verdict(uint8 raw) internal pure returns (Verdict) {
+        if (raw == uint8(Verdict.Match) || raw == uint8(Verdict.Mismatch)) {
+            return Verdict(raw);
+        }
+        revert BadReport();
     }
 }
