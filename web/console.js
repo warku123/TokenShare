@@ -213,7 +213,7 @@
   /* ═══ SELLER tab ══════════════════════════════════════════ */
 
   /* — my listing card — */
-  async function loadMyListing() {
+  async function loadMyListing({ prefill = true } = {}) {
     const box = $("s-my-listing");
     if (!state.address || !T.cfgReady()) {
       box.innerHTML = `<p class="empty-hint">连接钱包后展示你的 Registry listing。</p>`;
@@ -227,7 +227,7 @@
 
     if (!l.registered) {
       box.innerHTML =
-        `<p class="empty-hint">尚未登记。填写下方表单完成 <code class="inl">Registry.register</code>，` +
+        `<p class="empty-hint">尚未登记。先预检加载 relay 真实模型面，再完成 <code class="inl">Registry.register</code>，` +
         `listing 即刻出现在市场页。</p>`;
     } else {
       box.innerHTML =
@@ -247,57 +247,190 @@
             : "");
         box.insertAdjacentHTML("beforeend", rows);
       }).catch(() => {});
-      /* prefill form */
-      $("s-endpoint").value = l.endpoint;
-      setTimeout(() => {
-        for (const m of l.models) addModelChip(m);
-        syncModelChecks();
-      }, 0);
-      $("s-price-cached").value = T.fmtUsdc(l.priceCachedIn);
-      $("s-price-input").value = T.fmtUsdc(l.priceInput);
-      $("s-price-output").value = T.fmtUsdc(l.priceOutput);
-      $("s-active").checked = l.active;
+      /* prefill form (skipped when refreshing for the AlreadyRegistered
+         two-step retry — user edits must survive) */
+      if (prefill) {
+        $("s-endpoint").value = l.endpoint;
+        $("s-price-cached").value = T.fmtUsdc(l.priceCachedIn);
+        $("s-price-input").value = T.fmtUsdc(l.priceInput);
+        $("s-price-output").value = T.fmtUsdc(l.priceOutput);
+        $("s-active").checked = l.active;
+        renderModelNote(); /* endpoint changed → re-evaluate precheck-source match */
+      }
     }
     updatePreview();
   }
 
-  /* — models multi-select (presets + custom) — */
-  const PRESET_MODELS = ["kimi-for-coding", "kimi-for-coding-highspeed", "k3", "k3-256k"];
-  const chosenCustom = new Set();
+  /* — models: verified via relay /verify-upstream, chips-only selection —
+       the seller can only register models the relay's upstream key can
+       actually call; no free-text, no phantom model kinds. */
+  const modelsState = {
+    status: "idle",   // idle | loading | ok | error
+    base: null,       // endpoint the accessible set was verified against
+    accessible: [],   // relay-tested model face (upstream /v1/models)
+    checked: new Set(), // authoritative user picks — survives loading re-renders
+    reason: "",       // human reason when status === "error"
+  };
 
   function selectedModels() {
-    const checked = [...document.querySelectorAll("input[name=s-model]:checked")].map((i) => i.value);
-    return [...checked, ...chosenCustom];
+    return [...document.querySelectorAll("#s-model-checks input[name=s-model]:checked")].map((i) => i.value);
   }
 
-  function renderCustomChips() {
-    $("s-custom-list").innerHTML = [...chosenCustom].map((m) =>
-      `<span class="mtag chip-x" data-model="${T.esc(m)}">${T.esc(m)} <button type="button" aria-label="remove">×</button></span>`
-    ).join("") || `<span class="dim mono" style="font-size:11px">no custom models</span>`;
-    updatePreview();
+  /* submit gate: models must come from a successful precheck of the
+     endpoint currently in the form */
+  const modelsGateOk = (endpoint) =>
+    modelsState.status === "ok" && modelsState.base === endpoint && modelsState.accessible.length > 0;
+  function gateReason() {
+    if (modelsState.status === "loading") return "模型预检进行中 — 等结果出来再提交";
+    if (modelsState.status === "error") return `模型预检失败（${modelsState.reason}）— 修复后点 LOAD FROM RELAY 重试`;
+    if (modelsState.status === "ok") return `endpoint 与预检来源（${modelsState.base}）不一致 — 对当前 endpoint 重新预检`;
+    return "先点 LOAD FROM RELAY 预检 — 只有 relay 实测可调的模型才能登记，杜绝虚空模型";
   }
-  $("s-custom-list").addEventListener("click", (e) => {
-    const chip = e.target.closest(".chip-x");
-    if (chip) { chosenCustom.delete(chip.dataset.model); renderCustomChips(); }
-  });
-  function addModelChip(m) {
-    m = (m || "").trim();
-    if (!m) return;
-    if (PRESET_MODELS.includes(m)) {
-      const box = document.querySelector(`input[name=s-model][value="${m}"]`);
-      if (box) box.checked = true;
-    } else if (!chosenCustom.has(m)) {
-      chosenCustom.add(m); renderCustomChips();
+
+  function renderModelNote() {
+    const note = $("s-models-note");
+    const endpoint = $("s-endpoint").value.trim();
+    if (modelsState.status === "loading") {
+      note.className = "model-verify-note";
+      note.textContent = `GET ${modelsState.base}/verify-upstream …`;
+    } else if (modelsState.status === "error") {
+      note.className = "model-verify-note err";
+      note.textContent = `✗ ${modelsState.reason} — 修复后重新预检`;
+    } else if (modelsState.status === "ok") {
+      if (endpoint !== modelsState.base) {
+        note.className = "model-verify-note warn";
+        note.textContent = `⚠ endpoint 已改（预检来源 ${T.hostOf(modelsState.base)}）— 提交前需重新预检`;
+      } else {
+        note.className = "model-verify-note ok";
+        note.textContent = `✓ ${T.hostOf(modelsState.base)} 实测可调 ${modelsState.accessible.length} 个模型 — 只能从中勾选`;
+      }
+    } else {
+      note.className = "model-verify-note";
+      note.textContent = "未预检 — 提交前必须先从 relay 拉取真实可调模型面";
     }
   }
-  $("s-add-model").addEventListener("click", () => {
-    addModelChip($("s-custom-model").value);
-    $("s-custom-model").value = "";
-  });
-  function syncModelChecks() {
-    /* checks already applied by addModelChip */ updatePreview();
+
+  function renderModelZone() {
+    const zone = $("s-model-checks");
+    $("s-load-models").disabled = modelsState.status === "loading";
+    if (modelsState.status === "ok") {
+      zone.innerHTML = modelsState.accessible.map((m) =>
+        `<label class="mcheck"><input type="checkbox" name="s-model" value="${T.esc(m)}"${modelsState.checked.has(m) ? " checked" : ""}><span>${T.esc(m)}</span></label>`
+      ).join("");
+    } else {
+      zone.innerHTML = "";
+    }
+    renderModelNote();
+    updatePreview();
   }
-  document.querySelectorAll("input[name=s-model]").forEach((i) => i.addEventListener("change", updatePreview));
+
+  /* successful precheck → chips = accessible_models; check-state rules:
+       re-verify (wasOk): keep user picks, newly-discovered models default on
+       first verify with listing: pre-check listed ∩ accessible
+       otherwise: 默认全选
+       (wasOk must be captured by the caller BEFORE flipping to "loading") */
+  function applyVerified(base, accessible, wasOk) {
+    const prevChecked = modelsState.checked;
+    const prevAccessible = modelsState.accessible;
+    modelsState.status = "ok";
+    modelsState.base = base;
+    modelsState.accessible = accessible.slice();
+    modelsState.reason = "";
+    let checked;
+    if (wasOk) {
+      checked = new Set();
+      for (const m of accessible) {
+        if (prevChecked.has(m) || !prevAccessible.includes(m)) checked.add(m);
+      }
+    } else if (state.myListing && state.myListing.models.length) {
+      checked = new Set(accessible.filter((m) => state.myListing.models.includes(m)));
+    } else {
+      checked = new Set(accessible);
+    }
+    modelsState.checked = checked;
+    renderModelZone();
+  }
+
+  function failVerify(reason) {
+    modelsState.status = "error";
+    modelsState.reason = reason;
+    modelsState.accessible = [];
+    renderModelZone();
+  }
+
+  /* shared precheck: one fetch drives BOTH the precheck card and the
+     register-form chips (联动) */
+  async function runVerify(base, origin) {
+    const out = $("p-result");
+    base = (base || "").trim().replace(/\/+$/, "");
+    if (!base) {
+      out.innerHTML = `<p class="empty-hint err">enter the relay base URL first</p>`;
+      if (origin === "form") failVerify("endpoint 为空 — 先填 RELAY ENDPOINT");
+      return;
+    }
+    if (origin === "form") { $("s-endpoint").value = base; $("p-base").value = base; }
+    const wasOk = modelsState.status === "ok"; /* before the loading flip */
+    modelsState.status = "loading";
+    modelsState.base = base;
+    renderModelZone();
+    out.innerHTML = `<p class="empty-hint">GET ${T.esc(T.joinUrl(base, "/verify-upstream"))} …</p>`;
+    const r = await T.fetchJson(T.joinUrl(base, "/verify-upstream"), {}, 20000);
+    if (r.corsOrNetwork) {
+      out.innerHTML =
+        `<p class="empty-hint err">relay 不可达（${r.error === "timeout" ? "超时" : "网络或 CORS 未开启"}）。` +
+        `<button class="btn btn-sm" id="p-retry" type="button">[ RETRY ]</button></p>`;
+      $("p-retry").addEventListener("click", () => runVerify($("p-base").value, "card"));
+      failVerify("relay 不可达（网络/CORS）");
+      return;
+    }
+    if (!r.ok || !r.body) {
+      out.innerHTML = `<p class="empty-hint err">HTTP ${r.status} — verify-upstream unavailable</p>`;
+      failVerify(`verify-upstream HTTP ${r.status}`);
+      return;
+    }
+    const b = r.body;
+    const accessible = Array.isArray(b.accessible_models) ? b.accessible_models : [];
+    /* relay shape: mismatches = [{model, reason}] (objects, not strings) */
+    const mismatches = (b.mismatches || []).map((m) =>
+      (m && typeof m === "object") ? `${m.model} — ${m.reason}` : String(m));
+
+    if (!b.key_valid) {
+      failVerify("上游 key 无效（key_valid=false）— relay 拿不到真实模型面");
+      renderPrecheckCard(b, accessible, mismatches);
+      return;
+    }
+    if (!accessible.length) {
+      failVerify("relay 返回空模型面（accessible_models 为空）");
+      renderPrecheckCard(b, accessible, mismatches);
+      return;
+    }
+    applyVerified(base, accessible, wasOk);
+    renderPrecheckCard(b, accessible, mismatches);
+  }
+
+  function renderPrecheckCard(b, accessible, mismatches) {
+    const want = new Set(selectedModels());
+    const diffExtra = [...want].filter((m) => !accessible.includes(m));
+    $("p-result").innerHTML =
+      `<div class="kv"><span>KEY</span><b class="${b.key_valid ? "ok" : "bad"}">${b.key_valid ? "✓ valid" : "✗ INVALID"}</b></div>` +
+      `<div class="kv"><span>UPSTREAM</span><b class="mono">${T.esc(b.upstream_host || "—")}</b></div>` +
+      (b.error ? `<div class="kv"><span>ERROR</span><b class="bad mono wrap-anywhere">${T.esc(b.error)}</b></div>` : "") +
+      `<div class="kv"><span>ACCESSIBLE</span><b>${accessible.length ? accessible.map((m) => `<span class="mtag">${T.esc(m)}</span>`).join(" ") : "—"}</b></div>` +
+      `<div class="kv"><span>LISTING ON-CHAIN</span><b class="${b.listing_ok ? "ok" : "dim"}">${b.listing_ok ? "✓ consistent" : "✗ mismatch / not registered"}</b></div>` +
+      (b.listed_models && b.listed_models.length ? `<div class="kv"><span>LISTED</span><b>${b.listed_models.map((m) => `<span class="mtag">${T.esc(m)}</span>`).join(" ")}</b></div>` : "") +
+      (mismatches.length ? `<div class="kv"><span>MISMATCHES</span><b class="bad">${mismatches.map((m) => `<span class="mtag">${T.esc(m)}</span>`).join(" ")}</b></div>` : "") +
+      (diffExtra.length ? `<div class="kv"><span>FORM vs KEY</span><b class="bad">selected but not accessible: ${diffExtra.map((m) => `<span class="mtag">${T.esc(m)}</span>`).join(" ")}</b></div>` : "");
+  }
+
+  $("s-load-models").addEventListener("click", () => guard($("s-load-models"), () => runVerify($("s-endpoint").value, "form")));
+  /* chips are rendered dynamically → delegated change listener keeps the
+     authoritative checked set in sync */
+  $("s-model-checks").addEventListener("change", (e) => {
+    if (!e.target.matches("input[name=s-model]")) return;
+    if (e.target.checked) modelsState.checked.add(e.target.value);
+    else modelsState.checked.delete(e.target.value);
+    updatePreview();
+  });
 
   /* — register / update form — */
   function readPrice(id) {
@@ -307,6 +440,12 @@
   }
   const PRICE_ERR = "amounts must be non-negative numbers, ≤6 decimals (USDC)";
 
+  /* shape comparison must be order-insensitive — chips render in relay
+     order, chain keeps register order; same set ≠ "changed" */
+  const sameShape = (l, endpoint, models) =>
+    l.endpoint === endpoint &&
+    JSON.stringify([...l.models].sort()) === JSON.stringify([...models].sort());
+
   function updatePreview() {
     const endpoint = $("s-endpoint").value.trim();
     const models = selectedModels();
@@ -314,15 +453,22 @@
     const active = $("s-active").checked;
     const lines = [];
     const mine = state.myListing;
+    const btn = $("s-submit");
+    if (active && !modelsGateOk(endpoint)) {
+      lines.push(`<span class="t-a">! ${T.esc(gateReason())}</span>`);
+      lines.push("");
+    }
     if (mine && mine.active && !active) {
       lines.push(`<span class="t-a">deactivate()</span> <span class="t-d">// listing stays auditable, stops serving</span>`);
+      btn.textContent = "[ DEACTIVATE ]";
     } else if (mine && mine.active) {
-      const sameShape = mine.endpoint === endpoint && JSON.stringify(mine.models) === JSON.stringify(models);
-      if (sameShape) {
+      if (sameShape(mine, endpoint, models)) {
         lines.push(`<span class="t-a">updatePrice(${pc ?? "?"}, ${pi ?? "?"}, ${po ?? "?"})</span> <span class="t-d">// prices only</span>`);
+        btn.textContent = "[ UPDATE PRICE ]";
       } else {
-        lines.push(`<span class="t-a">deactivate()</span> <span class="t-d">// step 1 — endpoint/models changed</span>`);
-        lines.push(`<span class="t-g">register(endpoint, models, prices)</span> <span class="t-d">// step 2 — re-register</span>`);
+        lines.push(`<span class="t-a">deactivate()</span> <span class="t-d">// step 1/2 — active listing can't be re-registered (AlreadyRegistered)</span>`);
+        lines.push(`<span class="t-g">register(endpoint, models, prices)</span> <span class="t-d">// step 2/2 — new shape takes over</span>`);
+        btn.textContent = "[ DEACTIVATE → RE-REGISTER · 2 TX ]";
       }
     } else if (active) {
       lines.push(`<span class="t-g">register(</span>`);
@@ -330,14 +476,57 @@
       lines.push(`  models: <span class="t-s">[${models.map((m) => `"${T.esc(m)}"`).join(", ") || "…"}]</span>,`);
       lines.push(`  prices: <span class="t-n">${pc ?? "?"}, ${pi ?? "?"}, ${po ?? "?"}</span> <span class="t-d">// native 6dp, per 1M tokens</span>`);
       lines.push(`<span class="t-g">)</span>`);
+      btn.textContent = "[ SUBMIT TO REGISTRY ]";
     } else {
       lines.push(`<span class="t-d">// nothing to do — listing inactive and toggle off</span>`);
+      btn.textContent = "[ SUBMIT TO REGISTRY ]";
     }
     $("s-preview").innerHTML = lines.join("\n");
   }
   ["s-endpoint", "s-price-cached", "s-price-input", "s-price-output"].forEach((id) =>
-    $(id).addEventListener("input", updatePreview));
+    $(id).addEventListener("input", () => { if (id === "s-endpoint") renderModelNote(); updatePreview(); }));
   $("s-active").addEventListener("change", updatePreview);
+
+  /* human-readable copy for the Registry custom errors (frozen contract) */
+  const REGISTRY_ERR_COPY = {
+    AlreadyRegistered: "链上已存在 active listing，register 必 revert。唯一改形路径：deactivate → 重新 register（两笔交易）",
+    NotRegistered: "链上尚无 listing（NotRegistered）",
+    ListingInactive: "listing 当前 inactive — 改价需先重新 register 激活",
+    EmptyEndpoint: "endpoint 为空（EmptyEndpoint）",
+    EmptyModels: "models 为空（EmptyModels）— 至少勾选一个",
+  };
+  function humanizeRegistryErr(e) {
+    let key = (e && e.revert && e.revert.name && REGISTRY_ERR_COPY[e.revert.name]) ? e.revert.name : null;
+    const raw = (e && (e.data || (e.info && e.info.error && e.info.error.data))) || "";
+    if (!key && typeof raw === "string" && raw.startsWith("0x")) {
+      for (const k of Object.keys(REGISTRY_ERR_COPY)) {
+        try { if (raw.slice(0, 10) === ethers.id(`${k}()`).slice(0, 10)) { key = k; break; } } catch { /* ignore */ }
+      }
+    }
+    const msg = String((e && (e.shortMessage || e.reason || e.message)) || "");
+    if (!key) key = Object.keys(REGISTRY_ERR_COPY).find((k) => msg.toLowerCase().includes(k.toLowerCase())) || null;
+    if (!key) return null;
+    return { kind: key, text: REGISTRY_ERR_COPY[key] };
+  }
+  /* simulate before wallet popup → revert reason in human words, no wasted signature */
+  async function preflight(call) {
+    try { await call(); return null; }
+    catch (e) {
+      return humanizeRegistryErr(e) ||
+        { kind: "revert", text: `链上预演 revert — ${T.esc(e.shortMessage || e.reason || e.message || "unknown")}` };
+    }
+  }
+  function offerTwoStepFix(txbox) {
+    const btn = document.createElement("button");
+    btn.className = "btn";
+    btn.type = "button";
+    btn.textContent = "[ 一键修复：DEACTIVATE → REGISTER · 依次签两笔 ]";
+    btn.addEventListener("click", () => $("s-submit").click());
+    txbox.appendChild(btn);
+  }
+  /* after a successful register/updatePrice: refresh listing + re-run the
+     verify so chips & precheck card reflect the new on-chain truth */
+  const reverifyAfterTx = (endpoint) => { runVerify(endpoint, "form").catch(() => {}); };
 
   $("s-submit").addEventListener("click", () => guard($("s-submit"), async () => {
     if (needWallet() || needConfig()) return;
@@ -350,7 +539,8 @@
 
     if (active) {
       if (!endpoint) return formErr(txbox, "endpoint required (https://…:8787)");
-      if (!models.length) return formErr(txbox, "select at least one model");
+      if (!modelsGateOk(endpoint)) return formErr(txbox, gateReason());
+      if (!models.length) return formErr(txbox, "至少勾选一个实测可调的模型");
       if (pc === null || pi === null || po === null) return formErr(txbox, PRICE_ERR + " — prices are USDC per 1M tokens");
     }
 
@@ -363,25 +553,40 @@
         return;
       }
       if (mine && mine.active) {
-        const sameShape = mine.endpoint === endpoint && JSON.stringify(mine.models) === JSON.stringify(models);
-        if (sameShape) {
+        if (sameShape(mine, endpoint, models)) {
+          const pf = await preflight(() => reg.updatePrice.staticCall(pc, pi, po));
+          if (pf) return formErr(txbox, pf.text);
           const rcpt = await T.runTx(T.txLine(txbox, "updatePrice(…)"), reg.updatePrice(pc, pi, po));
-          if (rcpt) await loadMyListing();
+          if (rcpt) { await loadMyListing(); reverifyAfterTx(endpoint); }
           return;
         }
-        /* endpoint/models changed → deactivate then re-register */
+        /* shape changed → the ONLY contract path: deactivate, then re-register */
         const rcpt1 = await T.runTx(T.txLine(txbox, "deactivate() — step 1/2"), reg.deactivate());
         if (!rcpt1) return;
+        const pf = await preflight(() => reg.register.staticCall(endpoint, models, pc, pi, po));
+        if (pf) { formErr(txbox, pf.text); return; }
         const rcpt2 = await T.runTx(T.txLine(txbox, "register(…) — step 2/2"), reg.register(endpoint, models, pc, pi, po));
-        if (rcpt2) await loadMyListing();
+        if (rcpt2) { await loadMyListing(); reverifyAfterTx(endpoint); }
         return;
       }
       if (active) {
+        const pf = await preflight(() => reg.register.staticCall(endpoint, models, pc, pi, po));
+        if (pf) {
+          formErr(txbox, pf.text);
+          if (pf.kind === "AlreadyRegistered") {
+            /* local state was stale: refresh WITHOUT clobbering the form,
+               then the same submit click takes the two-step path */
+            await loadMyListing({ prefill: false });
+            offerTwoStepFix(txbox);
+          }
+          return;
+        }
         const rcpt = await T.runTx(T.txLine(txbox, "register(…)"), reg.register(endpoint, models, pc, pi, po));
-        if (rcpt) await loadMyListing();
+        if (rcpt) { await loadMyListing(); reverifyAfterTx(endpoint); }
       }
     } catch (e) {
-      formErr(txbox, e.shortMessage || e.message);
+      const hz = humanizeRegistryErr(e);
+      formErr(txbox, hz ? hz.text : (e.shortMessage || e.message));
     }
   }));
   const formErr = (box, msg) => {
@@ -391,41 +596,9 @@
     box.appendChild(el);
   };
 
-  /* — upstream precheck — */
-  $("p-run").addEventListener("click", () => guard($("p-run"), async () => {
-    const base = $("p-base").value.trim();
-    const out = $("p-result");
-    if (!base) { out.innerHTML = `<p class="empty-hint err">enter the relay base URL first</p>`; return; }
-    out.innerHTML = `<p class="empty-hint">GET ${T.esc(T.joinUrl(base, "/verify-upstream"))} …</p>`;
-    const r = await T.fetchJson(T.joinUrl(base, "/verify-upstream"), {}, 20000);
-    if (r.corsOrNetwork) {
-      out.innerHTML =
-        `<p class="empty-hint err">relay 不可达（或 CORS 未开启 — 等待 relay CORS 配置）。` +
-        `<button class="btn btn-sm" id="p-retry" type="button">[ RETRY ]</button></p>`;
-      $("p-retry").addEventListener("click", () => $("p-run").click());
-      return;
-    }
-    if (!r.ok || !r.body) {
-      out.innerHTML = `<p class="empty-hint err">HTTP ${r.status} — verify-upstream unavailable</p>`;
-      return;
-    }
-    const b = r.body;
-    const want = new Set(selectedModels());
-    const accessible = b.accessible_models || [];
-    /* relay shape: mismatches = [{model, reason}] (objects, not strings) */
-    const mismatches = (b.mismatches || []).map((m) =>
-      (m && typeof m === "object") ? `${m.model} — ${m.reason}` : String(m));
-    const diffExtra = [...want].filter((m) => !accessible.includes(m));
-    out.innerHTML =
-      `<div class="kv"><span>KEY</span><b class="${b.key_valid ? "ok" : "bad"}">${b.key_valid ? "✓ valid" : "✗ INVALID"}</b></div>` +
-      `<div class="kv"><span>UPSTREAM</span><b class="mono">${T.esc(b.upstream_host || "—")}</b></div>` +
-      (b.error ? `<div class="kv"><span>ERROR</span><b class="bad mono wrap-anywhere">${T.esc(b.error)}</b></div>` : "") +
-      `<div class="kv"><span>ACCESSIBLE</span><b>${accessible.length ? accessible.map((m) => `<span class="mtag">${T.esc(m)}</span>`).join(" ") : "—"}</b></div>` +
-      `<div class="kv"><span>LISTING ON-CHAIN</span><b class="${b.listing_ok ? "ok" : "dim"}">${b.listing_ok ? "✓ consistent" : "✗ mismatch / not registered"}</b></div>` +
-      (b.listed_models && b.listed_models.length ? `<div class="kv"><span>LISTED</span><b>${b.listed_models.map((m) => `<span class="mtag">${T.esc(m)}</span>`).join(" ")}</b></div>` : "") +
-      (mismatches.length ? `<div class="kv"><span>MISMATCHES</span><b class="bad">${mismatches.map((m) => `<span class="mtag">${T.esc(m)}</span>`).join(" ")}</b></div>` : "") +
-      (diffExtra.length ? `<div class="kv"><span>FORM vs KEY</span><b class="bad">selected but not accessible: ${diffExtra.map((m) => `<span class="mtag">${T.esc(m)}</span>`).join(" ")}</b></div>` : "");
-  }));
+  /* — upstream precheck card — shares runVerify with the register form:
+       a successful run feeds accessible_models into the form chips (联动) */
+  $("p-run").addEventListener("click", () => guard($("p-run"), () => runVerify($("p-base").value, "card")));
 
   /* ═══ BUYER tab ═══════════════════════════════════════════ */
 
@@ -708,7 +881,7 @@
 
   /* ── boot ────────────────────────────────────────────────── */
   T.installCopyHandlers();
-  renderCustomChips();
+  renderModelZone();
   renderSessionLocks();
   renderDisputes();
   updatePreview();

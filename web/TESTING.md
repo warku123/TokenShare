@@ -1,7 +1,7 @@
 # TokenShare Web — 完整功能测试清单
 
 Monad testnet (chainId 10143) · Escrow/Registry/USDC 已部署（见 `web/config.js`)。
-纯静态页：本地 `python3 -m http.server -d web` → http://localhost:8000（控制台 `/console.html`）。
+纯静态页：本地 `python3 -m http.server 8080 -d web` → http://localhost:8080（控制台 `/console.html`）。若 8080 被占换任意空闲端口。
 
 ## 前置条件
 
@@ -22,11 +22,12 @@ Monad testnet (chainId 10143) · Escrow/Registry/USDC 已部署（见 `web/confi
 ## Seller tab
 
 - [ ] 连接卖家钱包 → MY LISTING 显示链上 listing（未登记→空态引导）；已登记且 relay 在线时追加 TEE/UPSTREAM 两行
-- [ ] 表单校验：endpoint 空 / models 零选 / 价格非数或 >6 位小数 → 红条拒绝，不发交易
-- [ ] 预览框实时反映将发的交易：`register(...)` / `updatePrice(...)` / `deactivate()+register` 两笔 / `deactivate()`
-- [ ] UPSTREAM PRECHECK：填 relay base URL → RUN → 渲染 key_valid、upstream_host、accessible_models、listed_models、mismatches（逐条 model+原因）、表单勾选 vs 可服务集差异；relay 不可达→RETRY 提示
-- [ ] 提交：MetaMask 弹窗 → tx 行 pending(amber)→hash（可点 explorer)→confirmed（绿）/reverted（红）；成功后 MY LISTING 刷新
-- [ ] 按钮防重：交易 pending 期间按钮 disabled
+- [ ] MODELS 硬化：无自由文本输入；`[ LOAD FROM RELAY ]` 预检 `verify-upstream` → `accessible_models` 渲染为可勾选 chips（默认全选，已有 listing 时预勾 listed∩accessible）；只能勾选 relay 实测模型
+- [ ] 提交门控：未预检 / key 无效 / relay 不可达 / endpoint 改后未复验 → 禁提交并在预览框+红条给明确原因；models 零选 / 价格非数或 >6 位小数 → 红条拒绝
+- [ ] 预览框实时反映将发的交易：`register(...)` / `updatePrice(...)` / `deactivate()+register` 两笔 / `deactivate()`；按钮文案随路径切换（SUBMIT / UPDATE PRICE / DEACTIVATE → RE-REGISTER · 2 TX / DEACTIVATE）
+- [ ] UPSTREAM PRECHECK 与表单联动：表单侧预检会回填 `p-base` 并渲染结果卡；卡侧 RUN 成功同样刷新表单 chips；渲染 key_valid、upstream_host、accessible_models、listed_models、mismatches（逐条 model+原因）；relay 不可达→RETRY 提示+表单侧同步失败态
+- [ ] 提交：MetaMask 弹窗前先 `staticCall` 预演，revert 人话化（AlreadyRegistered→提示 deactivate→register 唯一路径并给一键两步按钮；NotRegistered/ListingInactive/EmptyEndpoint/EmptyModels 各有文案）；tx 行 pending(amber)→hash（可点 explorer)→confirmed（绿）/reverted（红）；成功后 MY LISTING 刷新 + 预检自动复验
+- [ ] 按钮防重：交易 pending / 预检进行中期间按钮 disabled
 
 ## Buyer tab
 

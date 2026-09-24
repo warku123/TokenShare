@@ -560,6 +560,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--green-dim); box-
 input::placeholder, textarea::placeholder { color: var(--faint); }
 
 .model-checks { display: flex; flex-wrap: wrap; gap: 8px; }
+.model-checks:empty { display: none; }
 .mcheck {
   display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
   font-family: var(--mono); font-size: 12px; color: var(--dim);
@@ -568,14 +569,15 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
 }
 .mcheck input { accent-color: var(--green); width: 12px; height: 12px; margin: 0; }
 .mcheck:has(input:checked) { color: var(--green); border-color: var(--green-dim); background: rgba(61,220,151,0.06); }
-.custom-add { display: flex; gap: 8px; margin-top: 8px; }
-.custom-add input { flex: 1; }
-.custom-add .btn { flex: none; }
-.custom-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
-.chip-x button {
-  background: none; border: none; color: var(--red); font-family: var(--mono);
-  font-size: 12px; cursor: pointer; padding: 0 0 0 4px; line-height: 1;
+.model-verify { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.model-verify .btn { flex: none; }
+.model-verify-note {
+  font-family: var(--mono); font-size: 11px; color: var(--faint);
+  line-height: 1.5; min-width: 0; overflow-wrap: anywhere; flex: 1;
 }
+.model-verify-note.ok { color: var(--green); }
+.model-verify-note.err { color: var(--red); }
+.model-verify-note.warn { color: var(--amber); }
 
 .mswitch { display: flex; align-items: flex-start; gap: 10px; cursor: pointer; }
 .mswitch input { accent-color: var(--green); width: 14px; height: 14px; margin-top: 1px; }

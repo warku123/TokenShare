@@ -71,18 +71,12 @@
           </label>
 
           <div class="fld">
-            <span class="fld-lbl">MODELS <i>official-plan models only — relay enforces prefix/host consistency</i></span>
-            <div class="model-checks">
-              <label class="mcheck"><input type="checkbox" name="s-model" value="kimi-for-coding" checked><span>kimi-for-coding</span></label>
-              <label class="mcheck"><input type="checkbox" name="s-model" value="kimi-for-coding-highspeed"><span>kimi-for-coding-highspeed</span></label>
-              <label class="mcheck"><input type="checkbox" name="s-model" value="k3"><span>k3</span></label>
-              <label class="mcheck"><input type="checkbox" name="s-model" value="k3-256k"><span>k3-256k</span></label>
+            <span class="fld-lbl">MODELS <i>verified via relay /verify-upstream — 只登记真实可调的模型面</i></span>
+            <div class="model-verify">
+              <button class="btn btn-sm btn-ghost" id="s-load-models" type="button">[ ↺ LOAD FROM RELAY ]</button>
+              <span class="model-verify-note" id="s-models-note"></span>
             </div>
-            <div class="custom-add">
-              <input type="text" id="s-custom-model" placeholder="custom model, e.g. moonshot-v1-128k" spellcheck="false" autocomplete="off">
-              <button class="btn btn-sm btn-ghost" id="s-add-model" type="button">[ + ADD ]</button>
-            </div>
-            <div class="custom-list" id="s-custom-list"></div>
+            <div class="model-checks" id="s-model-checks"></div>
           </div>
 
           <div class="fld-row">
@@ -115,7 +109,7 @@
           <button class="btn" id="p-run" type="button">[ RUN PRECHECK ]</button>
         </div>
         <p class="fld-hint">Relay 用配置的官方平台 key 打 <code class="inl">/v1/models</code>，再与链上 listing 交叉核验。
-          与上方表单勾选对比，差异即时可见。</p>
+          预检成功的 <code class="inl">accessible_models</code> 会同步为上方表单的勾选面——无法勾选relay实测之外的模型。</p>
         <div class="precheck-result" id="p-result"><p class="empty-hint">precheck result renders here — key validity, accessible models, listing consistency.</p></div>
       </div>
     </article>

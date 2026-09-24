@@ -40,6 +40,13 @@ window.TS = (() => {
     "function register(string endpoint, string[] models, uint256 priceCachedIn, uint256 priceInput, uint256 priceOutput)",
     "function updatePrice(uint256 priceCachedIn, uint256 priceInput, uint256 priceOutput)",
     "function deactivate()",
+    /* custom errors (contracts/src/Registry.sol) — declared so ethers
+       decodes reverts into e.revert.name for human-readable UI copy */
+    "error AlreadyRegistered()",
+    "error NotRegistered()",
+    "error ListingInactive()",
+    "error EmptyEndpoint()",
+    "error EmptyModels()",
   ];
 
   const ERC20_ABI = [

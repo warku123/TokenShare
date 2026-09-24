@@ -222,7 +222,7 @@ Live demo: Vercel deployment link — *coming soon*. Screenshots of the live mar
 
 Zero-framework static pages — market (live Registry listings + relay health) and a Seller/Buyer console (register, deposit, lock, signed call, receipt verify, refund).
 
-- **Local:** `python3 -m http.server -d web` → open http://localhost:8000 (console at `/console.html`).
+- **Local:** `python3 -m http.server 8080 -d web` → open http://localhost:8080 (console at `/console.html`). Any free port works.
 - **Deploy:** point Vercel at the `web/` directory — no build step, zero runtime external references (ethers is vendored).
 - **Config:** `web/config.js` is the only chain-facts surface — fill `escrowAddr` / `registryAddr` / `sellers` from `contracts/deployed.monad.json` after a redeploy.
 - **Demo:** MetaMask required for the console; the page guides adding Monad testnet (chainId 10143) via `wallet_addEthereumChain`.
