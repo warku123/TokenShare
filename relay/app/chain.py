@@ -11,6 +11,7 @@ RELAY_SELLER_KEY account (the seller designated in the payment).
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +72,38 @@ def _load_artifact(path: Path) -> dict[str, Any]:
     if "abi" not in artifact:
         raise RuntimeError(f"Foundry artifact {path} has no 'abi' field")
     return artifact
+
+
+# ---------------------------------------------------------------------------
+# Settle nonce serialization
+#
+# Settles run on asyncio.to_thread workers (relay/app/main.py), so two settle
+# calls can race on the shared seller account: both fetch the same nonce, and
+# the node rejects/replaces one tx — surfacing as a false settle-failed. A
+# module-level lock serializes the fetch-nonce → build → sign → send →
+# receipt-wait window. The receipt wait stays INSIDE the lock because
+# eth_getTransactionCount is queried with the default 'latest' block: until
+# the previous tx is mined, the next settle would read a stale nonce.
+# Read-only paths (call/getPayment/...) are never taken under this lock.
+# ---------------------------------------------------------------------------
+_SETTLE_LOCK = threading.Lock()
+
+# Text fragments identifying a same-nonce rejection across node clients and
+# web3 versions (web3 v7 surfaces node errors as Web3RPCError; some versions
+# raise TransactionAlready* exceptions client-side — matched by name below).
+_NONCE_CONFLICT_MARKERS: tuple[str, ...] = (
+    "nonce too low",
+    "nonce has already been used",
+    "already known",
+    "replacement transaction underpriced",
+    "transactionalready",  # TransactionAlreadySent/Pending/Replacement names
+)
+
+
+def _is_nonce_conflict(exc: BaseException) -> bool:
+    """True when the exception is a same-nonce send rejection."""
+    text = f"{type(exc).__name__} {exc}".lower()
+    return any(marker in text for marker in _NONCE_CONFLICT_MARKERS)
 
 
 class ChainClient:
@@ -200,10 +233,9 @@ class ChainClient:
 
     # ------------------------------------------------------------------ write
 
-    def settle(self, payment_id: int, actual_amount: int) -> TxReceipt:
-        """Send Escrow.settle(paymentId, actual) from the seller account and
-        wait for the receipt. Raises on revert/send failure — callers treat
-        ANY exception as settle-failed (never swallow the LLM response)."""
+    def _build_sign_send_settle(self, payment_id: int, actual_amount: int) -> TxReceipt:
+        """One fetch-nonce → build → sign → send → receipt-wait pass. Caller
+        must hold _SETTLE_LOCK (see settle)."""
         chain_id = self._w3.eth.chain_id
         tx: dict[str, Any] = self.escrow.functions.settle(
             payment_id, actual_amount
@@ -229,3 +261,23 @@ class ChainClient:
         raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
         tx_hash = self._w3.eth.send_raw_transaction(raw)
         return self._w3.eth.wait_for_transaction_receipt(tx_hash)
+
+    def settle(self, payment_id: int, actual_amount: int) -> TxReceipt:
+        """Send Escrow.settle(paymentId, actual) from the seller account and
+        wait for the receipt. Raises on revert/send failure — callers treat
+        ANY exception as settle-failed (never swallow the LLM response).
+
+        Concurrent settles share the seller nonce: the module-level lock
+        serializes the fetch-nonce → build → sign → send → receipt window so
+        two settles can never grab the same nonce (concurrency fix C1). A
+        node-side same-nonce rejection that still slips through (e.g. an
+        out-of-band sender on the same account) triggers exactly ONE
+        refetch-nonce → re-sign → resend attempt before failing."""
+        with _SETTLE_LOCK:
+            try:
+                return self._build_sign_send_settle(payment_id, actual_amount)
+            except Exception as exc:
+                if not _is_nonce_conflict(exc):
+                    raise
+            # Nonce conflicted anyway: retry once with a freshly fetched nonce.
+            return self._build_sign_send_settle(payment_id, actual_amount)
