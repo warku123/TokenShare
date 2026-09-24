@@ -7,10 +7,10 @@ import {Registry} from "../src/Registry.sol";
 
 /**
  * @title RegistryTest
- * @notice Behavioral suite for the Registry v2 listing contract (BUILD_SPEC
- *         v1.1 §3 M2 + M9 per-model pricing PIN). Plain anvil/local EVM, no
- *         fork. All prices are USDC 6-decimal native units per 1M tokens
- *         (1 USDC = 1e6).
+ * @notice Behavioral suite for the Registry listing contract (BUILD_SPEC
+ *         v1.1 §3 M2 + M9 per-model pricing PIN + M10 v3 seller
+ *         enumeration). Plain anvil/local EVM, no fork. All prices are USDC
+ *         6-decimal native units per 1M tokens (1 USDC = 1e6).
  *
  * IMPLEMENTATION NOTE: unlike v1's 7-tuple (which needed raw returndata
  * decoding to dodge "Stack too deep"), v2 `getListing` returns a single
@@ -367,5 +367,180 @@ contract RegistryTest is Test {
         pb = registry.getPrice(operatorB, "gpt-4o");
         assertEq(pb.cachedIn, 4e6, "B updated its own price");
         assertFalse(registry.getListing(operatorA).active, "A still inactive");
+    }
+
+    // =====================================================================
+    // seller enumeration (v3 / M10)
+    // =====================================================================
+
+    /// @dev Register `who` with a minimal one-model listing (model "m").
+    function _registerOneModel(address who) internal {
+        vm.prank(who);
+        registry.register("https://relay.example.com", _oneModel("m"), _onePrice(1e6, 2e6, 3e6));
+    }
+
+    /// @dev Fresh directory: count 0, any page query returns an empty array
+    ///      (no revert).
+    function test_SellerEnumeration_InitiallyEmpty() public view {
+        assertEq(registry.sellerCount(), 0, "initial count");
+        address[] memory sellers = registry.getSellers(0, 10);
+        assertEq(sellers.length, 0, "initial page empty");
+    }
+
+    /// @dev One registration -> directory of one, correct entry, order stable
+    ///      with an oversized `count` request.
+    function test_SellerEnumeration_RegisterAdds() public {
+        _registerOneModel(operatorA);
+
+        assertEq(registry.sellerCount(), 1, "count after register");
+        address[] memory sellers = registry.getSellers(0, 10);
+        assertEq(sellers.length, 1, "page length (count>len truncates)");
+        assertEq(sellers[0], operatorA, "sellers[0]");
+    }
+
+    /// @dev Deactivate -> re-register does NOT duplicate the directory entry:
+    ///      the `_sellerIndex` guard makes the append a no-op.
+    function test_SellerEnumeration_ReRegisterNoDuplicate() public {
+        _registerDefault(operatorA);
+        vm.prank(operatorA);
+        registry.deactivate();
+        _register(operatorA, "https://relay2.example.com", _oneModel("o1-preview"), _onePrice(0, 1, 2));
+
+        assertEq(registry.sellerCount(), 1, "still one seller");
+        address[] memory sellers = registry.getSellers(0, 10);
+        assertEq(sellers.length, 1, "page length");
+        assertEq(sellers[0], operatorA, "same single entry");
+    }
+
+    /// @dev Three sellers: first-registration order is preserved and any
+    ///      single-entry window is addressable.
+    function test_SellerEnumeration_ThreeSellersPagination() public {
+        _registerOneModel(operatorA);
+        _registerOneModel(operatorB);
+        _registerOneModel(stranger);
+
+        assertEq(registry.sellerCount(), 3, "three sellers");
+
+        address[] memory second = registry.getSellers(1, 1);
+        assertEq(second.length, 1, "window length");
+        assertEq(second[0], operatorB, "second seller");
+
+        address[] memory first = registry.getSellers(0, 1);
+        assertEq(first[0], operatorA, "first seller");
+
+        address[] memory third = registry.getSellers(2, 1);
+        assertEq(third[0], stranger, "third seller");
+    }
+
+    /// @dev `start >= sellerCount()` returns an empty array — never reverts —
+    ///      for any `count`.
+    function test_SellerEnumeration_StartOutOfBounds() public {
+        _registerOneModel(operatorA);
+
+        address[] memory past = registry.getSellers(1, 10);
+        assertEq(past.length, 0, "start==len -> empty");
+
+        address[] memory far = registry.getSellers(10_000, 1);
+        assertEq(far.length, 0, "start>>len -> empty");
+
+        // start==len-1 still yields the last entry
+        address[] memory last = registry.getSellers(0, 1);
+        assertEq(last.length, 1, "start==0 fine");
+        assertEq(last[0], operatorA, "last entry reachable");
+    }
+
+    /// @dev Page-limit constant is 500 (ABI-facing, clients read it) and the
+    ///      clamp semantics hold on small data: an oversized `count` returns
+    ///      min(limit, len - start) entries.
+    function test_SellerEnumeration_CountClamp_SmallData() public {
+        // via the ABI getter (instance call): solc 0.8.24 rejects bare
+        // contract-type constant access (`Registry.SELLER_PAGE_LIMIT`) with
+        // error 9582 even in assignment context, so tests read the public
+        // constant the way clients do — through the deployed getter.
+        uint256 limit = registry.SELLER_PAGE_LIMIT();
+        assertEq(limit, 500, "public page limit");
+
+        _registerOneModel(operatorA);
+        _registerOneModel(operatorB);
+
+        // count far above the limit: clamped to 500, then truncated to len
+        address[] memory page = registry.getSellers(0, limit + 1);
+        assertEq(page.length, 2, "clamp+truncate -> all sellers");
+        assertEq(page[0], operatorA, "order kept");
+        assertEq(page[1], operatorB, "order kept");
+
+        // count exactly at the limit on tiny data behaves as plain truncation
+        address[] memory atLimit = registry.getSellers(0, limit);
+        assertEq(atLimit.length, 2, "at-limit page truncated to len");
+    }
+
+    /// @dev The ONLY way to observe the count clamp in isolation (without
+    ///      len-truncation masking it): 501 sellers, request 1000 ->
+    ///      exactly 500 entries, and the 501st seller is reachable via the
+    ///      next window.
+    function test_SellerEnumeration_CountClamp_AtLimit() public {
+        uint256 limit = registry.SELLER_PAGE_LIMIT(); // ABI getter, see small-data test
+        for (uint256 i = 1; i <= limit + 1; i++) {
+            _registerOneModel(vm.addr(i));
+        }
+        assertEq(registry.sellerCount(), limit + 1, "501 registered");
+
+        address[] memory page = registry.getSellers(0, 1000);
+        assertEq(page.length, limit, "count clamped to 500 (not truncated to 501)");
+        assertEq(page[0], vm.addr(1), "page starts at first");
+        assertEq(page[limit - 1], vm.addr(limit), "page ends at 500th");
+
+        address[] memory tail = registry.getSellers(limit, 10);
+        assertEq(tail.length, 1, "tail window");
+        assertEq(tail[0], vm.addr(limit + 1), "501st reachable");
+    }
+
+    /// @dev Paginated fetch concatenates to the full directory: no gaps, no
+    ///      duplicates, last short page handled.
+    function test_SellerEnumeration_PaginationConcatenation() public {
+        uint256 n = 7;
+        for (uint256 i = 1; i <= n; i++) {
+            _registerOneModel(vm.addr(i));
+        }
+
+        address[] memory p0 = registry.getSellers(0, 3);
+        address[] memory p1 = registry.getSellers(3, 3);
+        address[] memory p2 = registry.getSellers(6, 3); // short final page
+
+        assertEq(p0.length, 3, "page 0 full");
+        assertEq(p1.length, 3, "page 1 full");
+        assertEq(p2.length, 1, "page 2 short");
+
+        for (uint256 i = 0; i < 3; i++) {
+            assertEq(p0[i], vm.addr(i + 1), "p0 entry");
+            assertEq(p1[i], vm.addr(i + 4), "p1 entry");
+        }
+        assertEq(p2[0], vm.addr(7), "p2 entry");
+    }
+
+    /// @dev Directory is append-only and never pruned: deactivation keeps the
+    ///      entry in place; a later registration appends after it; the
+    ///      consumer filters activeness via `getListing(seller).active`.
+    function test_SellerEnumeration_DeactivateKeepsEntry() public {
+        _registerOneModel(operatorA);
+        vm.prank(operatorA);
+        registry.deactivate();
+        _registerOneModel(operatorB);
+
+        assertEq(registry.sellerCount(), 2, "deactivated seller still counted");
+        address[] memory sellers = registry.getSellers(0, 10);
+        assertEq(sellers.length, 2, "directory length");
+        assertEq(sellers[0], operatorA, "inactive seller retained");
+        assertEq(sellers[1], operatorB, "new seller appended after");
+
+        assertFalse(registry.getListing(operatorA).active, "A inactive (consumer filters)");
+        assertTrue(registry.getListing(operatorB).active, "B active");
+
+        // A re-registers: directory unchanged, order preserved
+        _registerOneModel(operatorA);
+        assertEq(registry.sellerCount(), 2, "no duplicate after re-register");
+        sellers = registry.getSellers(0, 10);
+        assertEq(sellers[0], operatorA, "order preserved");
+        assertEq(sellers[1], operatorB, "order preserved");
     }
 }

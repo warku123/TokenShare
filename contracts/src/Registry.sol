@@ -6,7 +6,9 @@ pragma solidity ^0.8.24;
  * @notice On-chain directory of seller relay listings for the TokenShare
  *         API-quota rental market (BUILD_SPEC v1.1 §3 M2; v2 = M9 per-model
  *         pricing — prices move from one triple per seller to one triple per
- *         model, keyed by the listing's `models` array).
+ *         model, keyed by the listing's `models` array; v3 = M10 on-chain
+ *         seller enumeration — `sellerCount()`/`getSellers()` replace
+ *         consumer-side `Registered` log scanning).
  *
  * Each seller (relay operator) maintains exactly one listing:
  *   operator --register(endpoint, models, prices)--> listing active
@@ -121,6 +123,24 @@ contract Registry {
     /// @dev Sentinel returned by {_modelIndex} when the model is absent.
     uint256 private constant NOT_FOUND = type(uint256).max;
 
+    /// @notice Maximum number of sellers returned by a single {getSellers}
+    ///         call. Public so clients (and tests) can read the real page
+    ///         limit instead of hardcoding it. Requests larger than this are
+    ///         clamped down to it (see {getSellers}).
+    uint256 public constant SELLER_PAGE_LIMIT = 500;
+
+    /// @notice Every operator that has EVER registered, in first-registration
+    ///         order. Append-only: entries are never removed — deactivation
+    ///         keeps the seller in the directory (callers filter via
+    ///         `getListing(seller).active` themselves). Enables O(1) on-chain
+    ///         discovery instead of event scanning.
+    address[] private _sellers;
+
+    /// @notice operator => 1-based position in {_sellers}; 0 = never
+    ///         registered. Makes re-registration after deactivation a no-op
+    ///         on the array (no duplicates, no index churn).
+    mapping(address => uint256) private _sellerIndex;
+
     /*//////////////////////////////////////////////////////////////////////////
                                   REGISTRATION ACTIONS
     //////////////////////////////////////////////////////////////////////////*/
@@ -155,6 +175,15 @@ contract Registry {
             listing.prices.push(Price({cachedIn: prices[i].cachedIn, input: prices[i].input, output: prices[i].output}));
         }
         listing.active = true;
+
+        // v3 enumeration: first-ever registration appends the operator to the
+        // seller directory (one-time ~23k gas SSTORE). Deactivate ->
+        // re-register hits the `_sellerIndex` guard and is NOT appended again:
+        // the directory is append-only and duplicate-free.
+        if (_sellerIndex[msg.sender] == 0) {
+            _sellerIndex[msg.sender] = _sellers.length + 1;
+            _sellers.push(msg.sender);
+        }
 
         emit Registered(msg.sender, endpoint, models);
     }
@@ -218,6 +247,54 @@ contract Registry {
         if (idx == NOT_FOUND) revert ModelNotFound();
 
         return listing.prices[idx];
+    }
+
+    /**
+     * @notice Number of sellers in the on-chain directory — every operator
+     *         that has EVER called {register}, in first-registration order.
+     * @dev Append-only and never pruned: deactivated sellers stay counted.
+     *      Consumers filter for activeness via `getListing(seller).active`.
+     */
+    function sellerCount() external view returns (uint256) {
+        return _sellers.length;
+    }
+
+    /**
+     * @notice Slice of the seller directory: `{getSellers(start, count)}`
+     *         returns `_sellers[start .. start+count)` with clamping, never
+     *         reverting:
+     *         - `start >= sellerCount()`  -> empty array
+     *         - `count > {SELLER_PAGE_LIMIT}` -> clamped to the limit (500)
+     *         - `start + count > sellerCount()` -> truncated to the end
+     *
+     * WHY ON-CHAIN ENUMERATION (v3 economics): storing each seller costs one
+     * ~23k-gas SSTORE at first registration — a one-time, seller-paid fee.
+     * The alternative is every consumer (web market page, CLI `listings`)
+     * reconstructing the directory by scanning `Registered` logs from block
+     * zero: an O(chain-age) `eth_getLogs` walk that gets slower every day and
+     * trips public-RPC range limits (Monad caps windows at 100-1000 blocks).
+     * This is the standard Uniswap V2 Factory `allPairs`/`allPairsLength` and
+     * Curve `pool_list`/`pool_count` pattern: a tiny constant write at
+     * registration buys every reader an O(page) `eth_call` instead of an
+     * unbounded log scan. gas-for-latency trade is strictly favourable at
+     * market scale (thousands of reads per single 23k-gas write).
+     *
+     * @param start Directory index to begin at (0-based).
+     * @param count Maximum entries to return (clamped as above).
+     */
+    function getSellers(uint256 start, uint256 count) external view returns (address[] memory) {
+        uint256 len = _sellers.length;
+        if (start >= len) return new address[](0);
+        if (count > SELLER_PAGE_LIMIT) count = SELLER_PAGE_LIMIT;
+
+        uint256 end = start + count; // no overflow: start < len (array len ≤ 2^64-1), count ≤ 500
+        if (end > len) end = len;
+
+        address[] memory page = new address[](end - start);
+        for (uint256 i = start; i < end; i++) {
+            page[i - start] = _sellers[i];
+        }
+        return page;
     }
 
     /*//////////////////////////////////////////////////////////////////////////
