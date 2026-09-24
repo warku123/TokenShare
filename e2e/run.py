@@ -13,9 +13,12 @@ base_sepolia local path = EVERYTHING on this machine:
      (+ MockUSDC, since fork accounts hold no real testnet USDC) and writes
      contracts/deployed.json.
   3. Direct web3 (deepwork decision 4: "contract prep via direct web3"):
-     deployer mints MockUSDC for the buyer; seller registers a listing with
-     endpoint http://127.0.0.1:<relay_port> and tiered prices paired with the
-     mock OpenAI usage so the settled amount is exact and non-zero.
+     deployer mints MockUSDC for the buyer; seller registers a Registry v2
+     listing (M9 per-model pricing: Price[] parallel to models[]) with
+     endpoint http://127.0.0.1:<relay_port>, the SERVED model FIRST with
+     tiered prices paired with the mock OpenAI usage (exact non-zero
+     settle) plus a second model whose price is moved via updateModelPrice;
+     afterwards getPrice(operator, model) is asserted verbatim per model.
   4. e2e/mock_openai.py serves deterministic non-stream JSON + SSE on a free
      port. NOTE: OPENAI_BASE_URL must be the bare host root WITHOUT /v1 — the
      relay (httpx base_url) appends /v1/chat/completions itself. The mock host
@@ -59,6 +62,7 @@ import argparse
 import atexit
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -100,14 +104,22 @@ NETWORKS: dict[str, dict[str, Any]] = {
     },
 }
 
-# Model served by the mock OpenAI AND registered in the seller listing.
+# Model served by the mock OpenAI AND registered FIRST in the seller listing.
 MOCK_MODEL = "gpt-4o-mini-tokenshare"
 # Usage the mock OpenAI always reports (paired with LISTING_PRICES below).
 MOCK_USAGE = {"prompt_tokens": 5000, "cached_tokens": 1000, "completion_tokens": 800}
-# Seller listing prices: USDC native units per 1M tokens, 6dp (1 USDC = 1e6).
-# actual = (cached*PC + (prompt-cached)*PI + completion*PO) // 1e6
-#        = (1000*1e6 + 4000*2e6 + 800*3e6) // 1e6 = 11,400 native = 0.0114 USDC
+# SERVED model's listing prices (Registry v2, M9: prices are PER MODEL).
+# USDC native units per 1M tokens, 6dp (1 USDC = 1e6). PIN formula (verbatim
+# relay/app/pricing.py): actual = (cached*PC + (prompt-cached)*PI +
+# completion*PO) // 1e6 = (1000*1e6 + 4000*2e6 + 800*3e6) // 1e6
+# = 11,400 native = 0.0114 USDC.
 LISTING_PRICES = {"cached": 1_000_000, "input": 2_000_000, "output": 3_000_000}
+# Second listing model (Registry v2 per-model pricing proof): registered
+# alongside the served model with a DIFFERENT triple, then moved via
+# updateModelPrice — the buyer never calls it, so it costs only register gas.
+ALT_MODEL_SUFFIX = "-alt"
+ALT_MODEL_PRICES_INITIAL = {"cached": 500_000, "input": 700_000, "output": 900_000}
+ALT_MODEL_PRICES_UPDATED = {"cached": 1_500_000, "input": 2_500_000, "output": 3_500_000}
 # Relay minAmount estimate caps (match relay/CLI defaults; same formula):
 # (2e6*200000 + 3e6*32000)//1e6 = 496,000 native = 0.496 USDC <= lock maxAmount.
 PROMPT_TOKEN_CAP = 200_000
@@ -123,12 +135,37 @@ CALL_MAX_USDC = "5"
 # Short lock for the refund path: lock 1 USDC with ttl=3s, then refund.
 REFUND_MAX_USDC = "1"
 REFUND_TTL_S = 3
-# settle amount expected from MOCK_USAGE x LISTING_PRICES (PIN formula).
-EXPECTED_ACTUAL = (
-    MOCK_USAGE["cached_tokens"] * LISTING_PRICES["cached"]
-    + (MOCK_USAGE["prompt_tokens"] - MOCK_USAGE["cached_tokens"]) * LISTING_PRICES["input"]
-    + MOCK_USAGE["completion_tokens"] * LISTING_PRICES["output"]
-) // 10**6
+def pin_actual(prices: dict[str, int], prompt_tokens: int, cached_tokens: int,
+               completion_tokens: int) -> int:
+    """PIN actual — verbatim relay/app/pricing.py compute_actual:
+    (cached*priceCachedIn + (prompt-cached)*priceInput + completion*priceOutput)
+    // 1e6; all values are USDC native 6dp integers, prices are the REQUESTED
+    model's Registry v2 triple."""
+    non_cached_prompt = max(0, prompt_tokens - cached_tokens)
+    return (
+        cached_tokens * prices["cached"]
+        + non_cached_prompt * prices["input"]
+        + completion_tokens * prices["output"]
+    ) // 10**6
+
+
+def pin_settle_amount(actual: int, max_amount: int) -> int:
+    """PIN settle — verbatim relay/app/pricing.py clamp_settle_amount:
+    min(actual, maxAmount)."""
+    return min(actual, max_amount)
+
+
+# settle amount expected from MOCK_USAGE x the SERVED model's Registry v2
+# triple (LISTING_PRICES), PIN formula clamped by the explicit call lock cap.
+EXPECTED_ACTUAL = pin_settle_amount(
+    pin_actual(
+        LISTING_PRICES,
+        MOCK_USAGE["prompt_tokens"],
+        MOCK_USAGE["cached_tokens"],
+        MOCK_USAGE["completion_tokens"],
+    ),
+    int(CALL_MAX_USDC) * 10**6,
+)
 
 # ---------------------------------------------------------------------------
 # anvil PUBLIC default accounts (mnemonic "test test ... junk"). Well-known
@@ -303,6 +340,17 @@ MOCK_MINT_ABI = [
     },
 ]
 
+# Price tuple components — Registry v2 struct Price { uint256 cachedIn;
+# uint256 input; uint256 output; } (contracts/src/Registry.sol, M9).
+_PRICE_COMPONENTS = [
+    {"name": "cachedIn", "type": "uint256"},
+    {"name": "input", "type": "uint256"},
+    {"name": "output", "type": "uint256"},
+]
+
+# Registry v2 (M9 per-model pricing): register takes a Price[] array PARALLEL
+# to models[]; per-model reads go through getPrice(operator, model); an
+# existing model's price changes via updateModelPrice (operator = caller).
 REGISTRY_ABI = [
     {
         "type": "function",
@@ -311,9 +359,17 @@ REGISTRY_ABI = [
         "inputs": [
             {"name": "endpoint", "type": "string"},
             {"name": "models", "type": "string[]"},
-            {"name": "priceCachedIn", "type": "uint256"},
-            {"name": "priceInput", "type": "uint256"},
-            {"name": "priceOutput", "type": "uint256"},
+            {"name": "prices", "type": "tuple[]", "components": _PRICE_COMPONENTS},
+        ],
+        "outputs": [],
+    },
+    {
+        "type": "function",
+        "name": "updateModelPrice",
+        "stateMutability": "nonpayable",
+        "inputs": [
+            {"name": "model", "type": "string"},
+            {"name": "price", "type": "tuple", "components": _PRICE_COMPONENTS},
         ],
         "outputs": [],
     },
@@ -322,15 +378,29 @@ REGISTRY_ABI = [
         "name": "getListing",
         "stateMutability": "view",
         "inputs": [{"name": "operator", "type": "address"}],
+        # v2 returns Listing memory = ONE struct → solc encodes the return as
+        # a single (dynamic) outer tuple: outputs must be the wrapped tuple,
+        # NOT the five fields flat (flat heads misread the outer offset).
         "outputs": [
-            {"name": "listingOperator", "type": "address"},
-            {"name": "endpoint", "type": "string"},
-            {"name": "models", "type": "string[]"},
-            {"name": "priceCachedIn", "type": "uint256"},
-            {"name": "priceInput", "type": "uint256"},
-            {"name": "priceOutput", "type": "uint256"},
-            {"name": "active", "type": "bool"},
+            {
+                "name": "listing",
+                "type": "tuple",
+                "components": [
+                    {"name": "operator", "type": "address"},
+                    {"name": "endpoint", "type": "string"},
+                    {"name": "models", "type": "string[]"},
+                    {"name": "prices", "type": "tuple[]", "components": _PRICE_COMPONENTS},
+                    {"name": "active", "type": "bool"},
+                ],
+            }
         ],
+    },
+    {
+        "type": "function",
+        "name": "getPrice",
+        "stateMutability": "view",
+        "inputs": [{"name": "operator", "type": "address"}, {"name": "model", "type": "string"}],
+        "outputs": [{"name": "price", "type": "tuple", "components": _PRICE_COMPONENTS}],
     },
 ]
 
@@ -495,18 +565,46 @@ def prepare_contracts(rpc_url: str, relay_port: int, deployed: dict[str, Any],
         print(f"minted MockUSDC for buyer {buyer_addr}")
 
     endpoint = os.environ.get("RELAY_PUBLIC_ENDPOINT") or f"http://127.0.0.1:{relay_port}"
-    fn = registry_register(w3, deployed["registry"], endpoint, served_model)
+    alt_model = served_model + ALT_MODEL_SUFFIX
+    fn = registry_register(w3, deployed["registry"], endpoint, served_model, alt_model)
     send_tx(w3, fn, seller_key)
-    print(f"registered listing: operator={seller_addr} endpoint={endpoint} model={served_model}")
+    print(
+        f"registered v2 listing: operator={seller_addr} endpoint={endpoint} "
+        f"models=[{served_model}, {alt_model}] (Price[] parallel to models[])"
+    )
 
-    # sanity: listing readable, active, endpoint matches
-    listing = w3.eth.contract(
-        address=checksum(deployed["registry"]), abi=REGISTRY_ABI
-    ).functions.getListing(checksum(seller_addr)).call()
-    listing_operator, listing_endpoint, _models, _pc, _pi, _po, active = listing
+    # Registry v2 per-model update: move ONLY the alt model's triple; the
+    # served model's price must stay exactly LISTING_PRICES (M9 semantics).
+    send_tx(
+        w3,
+        registry_update_model_price(w3, deployed["registry"], alt_model, ALT_MODEL_PRICES_UPDATED),
+        seller_key,
+    )
+
+    # sanity: getListing shape, active flag, parallel per-model prices.
+    # (web3 unwraps the single-tuple output — the call yields the 5 fields.)
+    registry = registry_factory(w3, deployed["registry"])
+    listing_operator, listing_endpoint, models, prices, active = registry.functions.getListing(
+        checksum(seller_addr)
+    ).call()
+    expected_models = [served_model, alt_model]
+    expected_prices = [LISTING_PRICES, ALT_MODEL_PRICES_UPDATED]
     if not active or listing_operator.lower() != checksum(seller_addr).lower():
         fail_all("seller listing not active / operator mismatch after register")
-    print(f"listing verified: active endpoint={listing_endpoint_safe(listing_endpoint)}")
+    if list(models) != expected_models:
+        fail_all(f"listing models {list(models)} != registered {expected_models}")
+    decoded_prices = [decode_price_tuple(p) for p in prices]
+    if decoded_prices != expected_prices:
+        fail_all(f"listing per-model prices {decoded_prices} != expected {expected_prices}")
+
+    # getPrice(operator, model) must return each model's triple VERBATIM
+    # (Registry v2 view; reverts ModelNotFound for an unlisted model).
+    for model, expected in zip(expected_models, expected_prices):
+        got = decode_price_tuple(registry.functions.getPrice(checksum(seller_addr), model).call())
+        if got != expected:
+            fail_all(f"getPrice({model!r}) = {got} != expected {expected}")
+    print(f"listing verified: active endpoint={listing_endpoint_safe(listing_endpoint)} "
+          f"getPrice verbatim for {len(expected_models)} models")
 
 
 def listing_endpoint_safe(endpoint: str) -> str:
@@ -517,14 +615,38 @@ def registry_factory(w3: Any, addr: str) -> Any:
     return w3.eth.contract(address=w3.to_checksum_address(addr), abi=REGISTRY_ABI)
 
 
-def registry_register(w3: Any, addr: str, endpoint: str, served_model: str) -> Any:
+def price_tuple(prices: dict[str, int]) -> dict[str, int]:
+    """Prices dict {"cached","input","output"} → Registry.Price web3 tuple
+    (contract field names, 6dp native integers)."""
+    return {
+        "cachedIn": int(prices["cached"]),
+        "input": int(prices["input"]),
+        "output": int(prices["output"]),
+    }
+
+
+def decode_price_tuple(raw: Any) -> dict[str, int]:
+    """Registry.Price tuple → {"cached","input","output"} native ints (6dp)."""
+    cached_in, price_input, price_output = raw
+    return {"cached": int(cached_in), "input": int(price_input), "output": int(price_output)}
+
+
+def registry_register(w3: Any, addr: str, endpoint: str, served_model: str,
+                      alt_model: str) -> Any:
+    """Registry v2 register: Price[] parallel to models[] — the SERVED model
+    first with LISTING_PRICES, the alt model with its own initial triple."""
     return registry_factory(w3, addr).functions.register(
         endpoint,
-        [served_model],
-        LISTING_PRICES["cached"],
-        LISTING_PRICES["input"],
-        LISTING_PRICES["output"],
+        [served_model, alt_model],
+        [price_tuple(LISTING_PRICES), price_tuple(ALT_MODEL_PRICES_INITIAL)],
     )
+
+
+def registry_update_model_price(w3: Any, addr: str, model: str,
+                                prices: dict[str, int]) -> Any:
+    """Registry v2 updateModelPrice: per-model triple change (operator=caller,
+    model must already be listed, listing must be active)."""
+    return registry_factory(w3, addr).functions.updateModelPrice(model, price_tuple(prices))
 
 
 # ---------------------------------------------------------------------------
@@ -629,6 +751,61 @@ def parse_cli_value(cli_output: str, key: str) -> str:
     fail_all(f"no {key!r} line in CLI output:\n{cli_output}")
 
 
+def parse_receipt_fields(call_out: str) -> dict[str, Any]:
+    """Parse the CLI's `Receipt: …` line (printed after successful receipt
+    verification; shape from cli/tokenshare_cli/app.py):
+
+        Receipt: paymentId=<pid> prompt=<n> cached=<n> completion=<n>
+                 actual=<n> native (= <h> USDC) seller=<addr>
+                 upstreamHost=<host> model=<model>
+    """
+    for line in call_out.splitlines():
+        if not line.startswith("Receipt: "):
+            continue
+
+        def field(name: str, line: str = line) -> str:
+            m = re.search(rf"{name}=([^ ]+)", line)
+            if not m:
+                fail_all(f"Receipt line missing {name}=: {line}")
+            return m.group(1)
+
+        return {
+            "payment_id": int(field("paymentId")),
+            "prompt": int(field("prompt")),
+            "cached": int(field("cached")),
+            "completion": int(field("completion")),
+            "actual": int(field("actual")),
+            "model": field("model"),
+        }
+    fail_all(f"CLI call output has no Receipt: line:\n{call_out}")
+
+
+def assert_receipt_amount(receipt: dict[str, Any], model_prices: dict[str, int],
+                          max_amount: int, served_model: str) -> None:
+    """Receipt actualAmount must equal the PIN settle amount recomputed from
+    the receipt's OWN usage x the SERVED model's Registry v2 price triple
+    (relay/app/pricing.py: compute_actual + clamp_settle_amount). Valid on the
+    mock path AND on a real upstream — the formula is deterministic given the
+    reported usage."""
+    expected = pin_settle_amount(
+        pin_actual(
+            model_prices, receipt["prompt"], receipt["cached"], receipt["completion"]
+        ),
+        max_amount,
+    )
+    if receipt["actual"] != expected:
+        fail_all(
+            f"receipt actual {receipt['actual']} != PIN settle {expected} "
+            f"(usage p={receipt['prompt']} c={receipt['cached']} "
+            f"o={receipt['completion']} modelPrices={model_prices} "
+            f"maxAmount={max_amount})"
+        )
+    if receipt["model"] != served_model:
+        fail_all(f"receipt model {receipt['model']!r} != served model {served_model!r}")
+    print(f"OK: receipt actualAmount {receipt['actual']} native == PIN settle "
+          f"of model {served_model} prices (maxAmount {max_amount})")
+
+
 def assert_call_output(out: str, prompt: str, expect_mock: bool = True) -> None:
     """CLI output must contain the model reply, settle status and a verified
     receipt (acceptance per BUILD_SPEC §7 M4/M5). The reply-content asserts
@@ -647,7 +824,7 @@ def assert_call_output(out: str, prompt: str, expect_mock: bool = True) -> None:
 def onchain_settle_asserts(rpc_url: str, deployed: dict[str, Any], payment_id: int,
                            before: dict[str, int], after: dict[str, int],
                            buyer_addr: str, seller_addr: str,
-                           expected_actual: int | None = EXPECTED_ACTUAL) -> None:
+                           expected_actual: int | None = EXPECTED_ACTUAL) -> dict[str, Any]:
     step("[7/8] On-chain asserts: Escrow Settled + balance direction")
     payment = escrow_payment(rpc_url, deployed, payment_id)
     if payment["state"] != 2:
@@ -676,6 +853,7 @@ def onchain_settle_asserts(rpc_url: str, deployed: dict[str, Any], payment_id: i
         f"OK: payment {payment_id} Settled, actual={actual} native "
         f"({actual / 1e6:.6f} USDC) <= maxAmount {payment['maxAmount']}"
     )
+    return payment
 
 
 # ---------------------------------------------------------------------------
@@ -828,14 +1006,25 @@ def buyer_flow(deployed: dict[str, Any], rpc_url: str, chain_id: int,
     assert_call_output(call_out, prompt, expect_mock=upstream_is_mock)
     settle_pid = int(parse_cli_value(call_out, "paymentId"))
     print(f"call used paymentId {settle_pid} (auto-locked, settled)")
+    receipt = parse_receipt_fields(call_out)
 
     # On-chain asserts for the settled payment. Exact EXPECTED_ACTUAL equality
     # only applies to the deterministic mock usage; a real official upstream
     # settles from its real usage (still asserted: Settled, buyer->seller flow).
-    onchain_settle_asserts(rpc_url, deployed, settle_pid, before,
-                           escrow_balances(rpc_url, deployed, buyer_addr, seller_addr),
-                           buyer_addr, seller_addr,
-                           expected_actual=EXPECTED_ACTUAL if upstream_is_mock else None)
+    payment = onchain_settle_asserts(rpc_url, deployed, settle_pid, before,
+                                     escrow_balances(rpc_url, deployed, buyer_addr, seller_addr),
+                                     buyer_addr, seller_addr,
+                                     expected_actual=EXPECTED_ACTUAL if upstream_is_mock else None)
+
+    # Receipt actualAmount (M9 v2): recompute the PIN settle from the receipt's
+    # own usage x the SERVED model's Registry v2 triple and demand equality.
+    assert_receipt_amount(receipt, LISTING_PRICES, payment["maxAmount"], served_model)
+    if upstream_is_mock:
+        expected_usage = (MOCK_USAGE["prompt_tokens"], MOCK_USAGE["cached_tokens"],
+                          MOCK_USAGE["completion_tokens"])
+        got_usage = (receipt["prompt"], receipt["cached"], receipt["completion"])
+        if got_usage != expected_usage:
+            fail_all(f"mock receipt usage {got_usage} != deterministic {expected_usage}")
 
     # Refund path (M4): the CLI pre-check uses wall-clock time, the contract
     # uses block.timestamp — and an anvil FORK's chain clock lags the host

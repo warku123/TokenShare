@@ -185,3 +185,99 @@ def test_precheck_non_200_warns_and_continues(
     _RelayStub.next_status = 500
     _precheck(f"http://127.0.0.1:{relay_stub.server_port}", ["kimi-k2.6"])
     assert "WARNING" in capsys.readouterr().out
+
+
+# --------------------------------------------- register_listing v2 price book
+# Registry v2 (M9): register takes Price[] parallel to models[] — the parser
+# below is the e2e-side helper that assembles those parallel arrays.
+
+
+def _book(
+    model_flags: list[str],
+    model_price_flags: list[str],
+    first_prices: dict[str, int] | None = None,
+) -> tuple[list[str], list[dict[str, int]]]:
+    import register_listing as rl
+
+    return rl.build_price_book(model_flags, model_price_flags, first_prices)
+
+
+def test_price_book_default_model_gets_first_triple() -> None:
+    models, prices = _book([], [], {"cached": 1, "input": 2, "output": 3})
+    assert models == ["gpt-4o-mini-tokenshare"]
+    assert prices == [{"cached": 1, "input": 2, "output": 3}]
+
+
+def test_price_book_per_model_prices_parallel() -> None:
+    models, prices = _book(
+        ["kimi-k2.6"], ["kimi-k2.0:5:6:7"], {"cached": 1, "input": 2, "output": 3}
+    )
+    assert models == ["kimi-k2.6", "kimi-k2.0"]  # first-seen order, --model first
+    assert prices == [  # parallel to models (Registry v2 PIN)
+        {"cached": 1, "input": 2, "output": 3},
+        {"cached": 5, "input": 6, "output": 7},
+    ]
+
+
+def test_price_book_explicit_first_price_wins_over_triple() -> None:
+    models, prices = _book(["m1"], ["m1:9:9:9"], {"cached": 1, "input": 2, "output": 3})
+    assert models == ["m1"]
+    assert prices == [{"cached": 9, "input": 9, "output": 9}]
+
+
+def test_price_book_model_price_appends_new_model_in_order() -> None:
+    models, prices = _book(
+        [], ["a:1:1:1", "b:2:2:2", "a:3:3:3"], None
+    )
+    assert models == ["a", "b"]  # a appended once, override keeps position
+    assert prices == [{"cached": 3, "input": 3, "output": 3}, {"cached": 2, "input": 2, "output": 2}]
+
+
+def test_price_book_rejects_unpriced_model() -> None:
+    with pytest.raises(SystemExit) as ei:
+        _book(["m1", "m2"], [], {"cached": 1, "input": 2, "output": 3})
+    assert "m2" in str(ei.value.code)
+
+
+def test_price_book_rejects_bad_spec() -> None:
+    with pytest.raises(SystemExit):
+        _book([], ["nope"], None)  # wrong field count
+    with pytest.raises(SystemExit):
+        _book([], ["m:x:2:3"], None)  # non-integer price
+    with pytest.raises(SystemExit):
+        _book([], ["m:-1:2:3"], None)  # negative price
+
+
+# --------------------------------------------- run.REGISTRY_ABI is Registry v2
+
+
+def test_registry_abi_is_v2_per_model() -> None:
+    """run.REGISTRY_ABI must match Registry v2 (M9): register(endpoint,
+    string[], Price[]) with per-model parallel prices, updateModelPrice,
+    getPrice(operator, model) → Price, getListing →
+    (address, string, string[], Price[], bool)."""
+    from run import REGISTRY_ABI
+
+    def fn(name: str) -> dict[str, Any]:
+        return next(
+            f for f in REGISTRY_ABI if f.get("type") == "function" and f.get("name") == name
+        )
+
+    assert [i["type"] for i in fn("register")["inputs"]] == ["string", "string[]", "tuple[]"]
+    assert fn("register")["inputs"][2]["components"] is not None
+
+    update = fn("updateModelPrice")
+    assert [i["type"] for i in update["inputs"]] == ["string", "tuple"]
+
+    get_price = fn("getPrice")
+    assert [i["type"] for i in get_price["inputs"]] == ["address", "string"]
+    assert [o["type"] for o in get_price["outputs"]] == ["tuple"]
+
+    # v2 getListing returns Listing memory = ONE struct → the ABI must wrap
+    # the five fields in a single outer tuple (solc encodes a single-struct
+    # return with an outer head-offset; flat outputs cannot decode it).
+    listing = fn("getListing")
+    assert [o["type"] for o in listing["outputs"]] == ["tuple"]
+    assert [c["type"] for c in listing["outputs"][0]["components"]] == [
+        "address", "string", "string[]", "tuple[]", "bool",
+    ]

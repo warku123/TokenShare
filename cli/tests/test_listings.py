@@ -173,10 +173,13 @@ def test_registry_abi_has_v2_surface():
     assert get_price["stateMutability"] == "view"
 
     get_listing = by_name[("function", "getListing")]
-    assert [o["type"] for o in get_listing["outputs"]] == [
+    # solc wraps the single struct return; web3 auto-unwraps via the tuple.
+    assert [o["type"] for o in get_listing["outputs"]] == ["tuple"]
+    comps = get_listing["outputs"][0]["components"]
+    assert [c["type"] for c in comps] == [
         "address", "string", "string[]", "tuple[]", "bool",
     ]
-    assert tuple(get_listing["outputs"][3]["components"]) == price
+    assert tuple(comps[3]["components"]) == price
 
     register = by_name[("function", "register")]
     assert [i["type"] for i in register["inputs"]] == ["string", "string[]", "tuple[]"]

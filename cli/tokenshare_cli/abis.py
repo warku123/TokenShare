@@ -157,17 +157,30 @@ REGISTRY_ABI = [
         "type": "function",
         "name": "getListing",
         "inputs": [{"name": "operator", "type": "address", "internalType": "address"}],
+        # v2 returns `Listing memory` — a SINGLE struct. solc encodes a
+        # single-struct return as one (dynamic) outer tuple with a head
+        # offset, so the outputs must be the wrapped tuple. web3 unwraps
+        # single-tuple outputs itself, so chain.get_listing()'s five-field
+        # unpack is unchanged. (Flat field outputs misread the outer offset
+        # → BadFunctionCallOutput on real chain bytes.)
         "outputs": [
-            {"name": "listingOperator", "type": "address", "internalType": "address"},
-            {"name": "endpoint", "type": "string", "internalType": "string"},
-            {"name": "models", "type": "string[]", "internalType": "string[]"},
             {
-                "name": "prices",
-                "type": "tuple[]",
-                "internalType": "struct Registry.Price[]",
-                "components": _PRICE_COMPONENTS,
-            },
-            {"name": "active", "type": "bool", "internalType": "bool"},
+                "name": "listing",
+                "type": "tuple",
+                "internalType": "struct Registry.Listing",
+                "components": [
+                    {"name": "listingOperator", "type": "address", "internalType": "address"},
+                    {"name": "endpoint", "type": "string", "internalType": "string"},
+                    {"name": "models", "type": "string[]", "internalType": "string[]"},
+                    {
+                        "name": "prices",
+                        "type": "tuple[]",
+                        "internalType": "struct Registry.Price[]",
+                        "components": _PRICE_COMPONENTS,
+                    },
+                    {"name": "active", "type": "bool", "internalType": "bool"},
+                ],
+            }
         ],
         "stateMutability": "view",
     },
