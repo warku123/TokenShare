@@ -13,7 +13,7 @@ window.TS_CONFIG = {
   explorer: "https://testnet.monadscan.com",
 
   escrowAddr: "0x654c83F23669908C867f02EF3E20B2126c4753De",
-  registryAddr: "0x7e8223BD2824F6dd7694739eAc03556CE307c363",
+  registryAddr: "0xeD347cDc1761750E20C024459b38dedFb1462254",
 
   /* official Circle USDC on Monad testnet (fixed chain fact) */
   usdcAddr: "0x534b2f3A21130d7a60830c2Df862319e593943A3",
