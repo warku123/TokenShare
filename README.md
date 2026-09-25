@@ -11,24 +11,32 @@
 
 ```mermaid
 sequenceDiagram
-    participant B as Buyer (CLI)
-    participant C as Escrow (on-chain)
+    participant B as Buyer (CLI / web console)
+    participant C as Escrow v3.1 (on-chain)
     participant R as Seller Relay
     participant O as OpenAI (upstream)
 
     B->>C: deposit / lock USDC (maxAmount, ttl)
     Note over C: paymentId locked in escrow
-    B->>R: POST /v1/chat/completions<br/>+ EIP-191 signature over the request
-    R->>C: verify on-chain payment proof first
-    alt no valid payment
-        R-->>B: 402 — rejected at zero cost, never forwarded
-    else payment valid
+
+    alt per-call path — signed request (CLI call / console)
+        B->>R: POST /v1/chat/completions<br/>EIP-191 X-Payment-Id + X-Signature
+        R->>C: verify on-chain payment proof first
         R->>O: forward with seller's API key
         O-->>R: response + official usage
-        R->>C: settle(paymentId, actual)
+        R->>C: settle(paymentId, actual) — protocol fee applied:<br/>fee = actual x feeBps / 10000 (feeBps=0 today, owner-setFee)<br/>seller ledger += actual - fee, feeRecipient += fee
         R-->>B: LLM response + EIP-712 signed receipt
-        B->>B: ecrecover receipt, verify seller
+    else bearer API-key path (M13) — agents / SDKs
+        B->>B: LOCK then MINT API KEY (one EIP-191 signature)<br/>returns tsk1.… key + base_url
+        B->>R: POST /v1/chat/completions<br/>Authorization: Bearer tsk1.…
+        R->>O: forward
+        O-->>R: response + official usage
+        R->>C: settlePartial(paymentId, amount) per call<br/>FeeTaken(fee, sellerAmount) — payment stays Locked
+        R-->>B: response + X-Receipt per call (real usage metered)
+        B->>R: GET /payment/{id}/usage — captured / maxAmount / remaining
+        B->>R: POST /payment/{id}/revoke — instant revoke, no chain tx
     end
+    Note over C: after TTL, refund returns the remainder — refunds carry zero fee
 ```
 
 In five steps:
@@ -37,7 +45,26 @@ In five steps:
 2. **Sign** — the CLI signs each request with **EIP-191** (method, path, body hash, paymentId) and attaches `X-Payment-Id` + `X-Signature`.
 3. **Verify, then forward** — the seller relay checks the on-chain payment proof **before** forwarding anything to OpenAI. Unpaid requests get a **402 with zero upstream cost** — the seller's API key is never used for free.
 4. **Pay for what you use** — settlement is priced in three tiers from the **official usage** returned by OpenAI: cached input / input / output tokens, each priced per 1M tokens in USDC (6-decimal native units).
-5. **Settle & verify** — the relay calls `settle(paymentId, actual)` on-chain (difference vs. the lock is refunded to the buyer) and stamps the response with an **EIP-712 signed receipt**, which the CLI verifies via `ecrecover` against the seller's on-chain Registry address.
+5. **Settle & verify** — the relay calls `settle(paymentId, actual)` on-chain (difference vs. the lock is refunded to the buyer) and stamps the response with an **EIP-712 signed receipt**, which the CLI verifies via `ecrecover` against the seller's on-chain Registry address. Every seller credit is charged the **protocol fee** (`fee = amount × feeBps / 10000`, rounded down): the seller's ledger gets `amount − fee`, the fee recipient (the deployer/treasury) gets `fee`, and the split is provable on-chain via the `FeeTaken` event. Refunds always carry **zero fee**.
+
+## API-key flow (M13) — one signature, agents pay per real usage
+
+The web console turns any lock into an **OpenAI-compatible endpoint** for autonomous agents:
+
+1. **LOCK** in the console (MetaMask) — a normal on-chain escrow lock.
+2. **MINT API KEY** — the wallet signs **one** EIP-191 grant; the console shows a `tsk1.…` key + the relay `base_url`.
+3. Point **any OpenAI-compatible agent/SDK** at it — no TokenShare code needed:
+
+   ```bash
+   export OPENAI_BASE_URL=https://<your-relay>/v1
+   export OPENAI_API_KEY=tsk1.…
+   ```
+
+4. **Multiple calls accrue real-usage charges** — the relay keeps a cumulative per-key ledger and flushes each capture on-chain via `Escrow` `settlePartial` (`Escrow` v3.1). The payment **stays Locked** (more calls keep flowing) until the TTL, with a `FeeTaken` split per credit.
+5. **Reconcile via the usage endpoint** — `GET /payment/{id}/usage` returns `captured / maxAmount / remaining` (the console's **USAGE** button shows the same live meter).
+6. **REVOKE** a leaked key — console button or `POST /payment/{id}/revoke`: instant, relay-side, **no chain transaction**. Whatever remains of the lock is refunded to the buyer after the TTL (zero-fee).
+
+CLI equivalent: `python3 -m tokenshare_cli mint-key --payment-id <id>` and `python3 -m tokenshare_cli usage --payment-id <id>`.
 
 ## Trust model
 
@@ -90,6 +117,13 @@ Custom upstreams (`http://127.0.0.1:…` mocks, proxies) are **development and t
 - **Faucets:** `https://faucet.monad.xyz` (MON) · `https://faucet.circle.com` (USDC for both chains)
 - **Explorer:** `https://testnet.monadscan.com`
 
+**Deployed contracts (Monad testnet):**
+
+| Contract | Address | Notes |
+|----------|---------|-------|
+| Escrow v3.1 | `0x157C551D145d3c4bBF8f3554c43Fb3C931D71aD5` | protocol fee `feeBps = 0` today — owner-adjustable via `setFee` (`FeeTaken` event on every seller credit) |
+| Registry v4 | `0xeD347cDc1761750E20C024459b38dedFb1462254` | per-model three-tier prices + on-chain seller enumeration + `removeModel` |
+
 Both networks run the **same deployed bytecode** — only configuration (RPC, chain ID, USDC address) changes.
 
 ## Quickstart
@@ -100,26 +134,28 @@ Both networks run the **same deployed bytecode** — only configuration (RPC, ch
 # 1. Install Python dependencies (relay + CLI)
 pip install -r relay/requirements.txt -r cli/requirements.txt
 
-# 2. Build & test contracts (54 tests green)
+# 2. Build & test contracts (forge: 118 tests green; cre settlement-audit: 10)
 cd contracts && forge test && cd ..
 
 # 3. Relay + CLI unit tests
-cd relay && pytest tests && cd ..     # 81 tests green
-cd cli && pytest tests && cd ..       # 56 tests green
+cd relay && pytest tests && cd ..     # 153 tests green
+cd cli && pytest tests && cd ..       # 132 tests green
 
 # 4. Configure (keys/addresses — never commit .env)
 cp .env.example .env
 
 # 5. Full end-to-end run on a local Base-Sepolia anvil fork — no funds,
-#    no API key needed (a deterministic mock OpenAI is started automatically):
+#    no API key needed (a deterministic mock OpenAI is started automatically);
+#    without keys the monad path skips with exit 0:
 python3 e2e/run.py --network base_sepolia
+# (e2e helper unit suite: pytest e2e/tests → 22 passed, 1 skipped)
 ```
 
 Expected tail of a successful run:
 
 ```
-OK: payment 2 Settled, actual=11400 native (0.011400 USDC) <= maxAmount 5000000
-OK: payment 1 Refunded (M4 refund path verified on-chain)
+OK: payment 2 Settled, actual=11400 native (0.011400 USDC) <= maxAmount 5000000; M14 fee split: fee=114 (100 bps), seller +11286, feeRecipient(=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266) +114
+OK: payment 1 Refunded — no FeeTaken, buyer ledger +1000000 native (M4 refund path + M14 zero-fee refund verified on-chain)
 
 E2E PASSED
 ```
@@ -192,31 +228,96 @@ Same code path, configuration-only switch. Prerequisites (executed in M5b, with 
    python3 e2e/run.py --network monad_testnet
    ```
 
+   Without keys in `.env` the monad path prints `E2E SKIPPED` and **exits 0** (config-ready, not chain-proven) — **CI green ≠ real-chain green**: the monad deliverable must be demonstrated on an actual funded run.
+
 4. For buyer-facing demos the relay must be reachable over the internet: expose it (e.g. a tunnel), then `export RELAY_PUBLIC_ENDPOINT=https://…` before the run so the Registry listing carries the public URL. Transactions are viewable at `https://testnet.monadscan.com`.
+
+### Running a persistent relay on a VPS
+
+For an always-on relay (demo judges should be able to call it any time), run it on any small VPS and expose it through a tunnel.
+
+**Option A — Docker Compose** (repo file: [`relay/docker-compose.yml`](relay/docker-compose.yml)):
+
+```bash
+cd relay
+cp ../.env .env            # relay env (RELAY_SELLER_KEY, RPC_URL, OPENAI_* …)
+docker compose up -d --build
+curl -s http://127.0.0.1:8787/health
+```
+
+> The shipped compose file is written for **Phala Cloud TDX CVMs** (M7): on a plain VPS comment out the `/var/run/dstack.sock` volume (TEE key derivation) and set `RELAY_SELLER_KEY` in `relay/.env` instead; `platform: linux/amd64` can stay or be dropped on an x86_64 host.
+
+**Option B — systemd** (no Docker; from a repo checkout with Python 3.11+):
+
+```ini
+# /etc/systemd/system/tokenshare-relay.service
+[Unit]
+Description=TokenShare seller relay
+After=network-online.target
+
+[Service]
+User=relay
+WorkingDirectory=/opt/tokenshare
+EnvironmentFile=/opt/tokenshare/.env
+ExecStart=/opt/tokenshare/.venv/bin/python -m uvicorn relay.app.main:app --host 127.0.0.1 --port 8787
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload && sudo systemctl enable --now tokenshare-relay
+```
+
+**Public exposure — cloudflared tunnel** (no open ports, TLS included):
+
+```bash
+cloudflared tunnel create tokenshare
+cloudflared tunnel route dns tokenshare relay.yourdomain.dev
+cloudflared tunnel run --url http://127.0.0.1:8787 tokenshare   # run as a service for keeps
+```
+
+**Re-register the public endpoint** — the Registry listing must carry the public URL, so after the relay is reachable, re-register with `RELAY_PUBLIC_ENDPOINT` semantics (`--endpoint`):
+
+```bash
+python3 e2e/register_listing.py --network monad_testnet \
+  --endpoint https://relay.yourdomain.dev \
+  --model kimi-k2.6 \
+  --price-cached-in 1000 --price-input 2000 --price-output 3000
+# re-registration is idempotent for an existing seller (deactivate→re-register
+# is handled for you); infra-lane helper scripts under scripts/ will wrap this step
+```
+
+**CORS** — the relay's browser-facing CORS defaults to `*`; on a public relay pin it to your front-end origin(s) via `RELAY_CORS_ORIGINS` (comma-separated) in the relay env, and keep `OPENAI_BASE_URL` / `OPENAI_API_KEY` private to the server.
 
 ## Repo layout
 
 ```
 tokenshare/
-├── contracts/               # Foundry: Escrow + Registry, 54 tests green
-│   ├── src/Escrow.sol
-│   ├── src/Registry.sol
+├── contracts/               # Foundry: Escrow + Registry, 118 tests green (cre: 10)
+│   ├── src/Escrow.sol       # v3.1: deposit/lock/settle/settlePartial/refund + protocol fee
+│   ├── src/Registry.sol     # v4: per-model prices, seller enumeration, removeModel
 │   └── script/Deploy.s.sol  # --sig run(string), writes deployed.json
 ├── relay/                   # FastAPI seller relay
 │   ├── app/                 # main / pricing / receipt / chain / config
-│   └── tests/
+│   ├── tests/               # 153 tests green
+│   └── docker-compose.yml   # container run (Phala TDX oriented — see VPS section)
 ├── cli/                     # Typer buyer CLI
-│   ├── tokenshare_cli/      # signing / receipt / streaming / disputes / ...
-│   └── tests/               # 56 tests green
-├── web/                     # static market page (zero framework)
+│   ├── tokenshare_cli/      # signing / receipt / streaming / disputes / api keys
+│   └── tests/               # 132 tests green
+├── web/                     # static market page + console (zero framework)
 ├── e2e/                     # run.py --network base_sepolia|monad_testnet + mock_openai.py
+│   └── tests/               # 22 passed, 1 skipped (helper suite)
 └── TokenShare-BUILD_SPEC.md # build spec
 ```
 
 ## Demo
 
-<!-- M6 -->
-Live demo: Vercel deployment link — *coming soon*. Screenshots of the live market page and Monad testnet transactions will be added here.
+- **One-command bring-up (infra lane):** `scripts/demo.sh` — starts the full local stack (fork + deploy + relay + web) end to end. The script is landing shortly (infra lane in progress); until then use the manual quick path below.
+- **Local quick path:** `python3 -m http.server 8080 -d web` → open http://localhost:8080 — the market page reads live Registry listings via `web/config.js`; the console lives at `/console.html`.
+- Live demo link and Monad testnet screenshots will be added here after the deployment refresh.
 
 ### Web frontend (`web/`)
 
