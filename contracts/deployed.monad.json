@@ -1,8 +1,8 @@
 {
   "chainId": 10143,
-  "deployedAt": 1790240975,
+  "deployedAt": 1790327255,
   "deployer": "0x38c26E1782b7E6F656Aa35EbF473e2ff0D718Dd6",
-  "escrow": "0x654c83F23669908C867f02EF3E20B2126c4753De",
+  "escrow": "0x31F9aB26710515C49767249622a43B0F91c15C88",
   "network": "monad_testnet",
   "registry": "0xeD347cDc1761750E20C024459b38dedFb1462254",
   "usdc": "0x534b2f3A21130d7a60830c2Df862319e593943A3",

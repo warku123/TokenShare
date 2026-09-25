@@ -144,4 +144,47 @@ contract Deploy is Script {
         console2.log("deployer:     ", deployer);
         console2.log("artifact:     ", ARTIFACT_PATH);
     }
+
+    /**
+     * @notice Escrow-only redeploy (M13 Escrow v2 partial settle): deploys a
+     *         fresh Escrow against the SAME usdc and rewrites the `escrow`
+     *         field of the EXISTING deployed.json, preserving registry/usdc/
+     *         usdcIsMock. Escrow balances do NOT carry over — buyers must
+     *         re-deposit against the new Escrow. Run on the SAME chain as the
+     *         original artifact; the artifact must already exist.
+     */
+    function runEscrowOnly(string calldata network) external {
+        string memory existing = vm.readFile(ARTIFACT_PATH);
+        address registry = vm.parseJsonAddress(existing, ".registry");
+        address usdc = vm.parseJsonAddress(existing, ".usdc");
+        bool usdcIsMock = vm.parseJsonBool(existing, ".usdcIsMock");
+
+        uint256 chainId = block.chainid;
+        address deployer = msg.sender;
+
+        vm.startBroadcast();
+        Escrow escrow = new Escrow(IERC20(usdc));
+        vm.stopBroadcast();
+
+        string memory json = "deployed";
+        vm.serializeString(json, "network", network);
+        vm.serializeUint(json, "chainId", chainId);
+        vm.serializeAddress(json, "escrow", address(escrow));
+        vm.serializeAddress(json, "registry", registry);
+        vm.serializeAddress(json, "usdc", usdc);
+        vm.serializeBool(json, "usdcIsMock", usdcIsMock);
+        vm.serializeAddress(json, "deployer", deployer);
+        string memory artifact = vm.serializeUint(json, "deployedAt", block.timestamp);
+        vm.writeJson(artifact, ARTIFACT_PATH);
+
+        console2.log("=== TokenShare escrow-only redeploy complete ===");
+        console2.log("network:       ", network);
+        console2.log("chainId:       ", chainId);
+        console2.log("escrow NEW:    ", address(escrow));
+        console2.log("registry:      ", registry);
+        console2.log("usdc:          ", usdc);
+        console2.log("usdcIsMock:    ", usdcIsMock);
+        console2.log("deployer:      ", deployer);
+        console2.log("artifact:      ", ARTIFACT_PATH);
+    }
 }
