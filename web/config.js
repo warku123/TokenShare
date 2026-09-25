@@ -12,7 +12,7 @@ window.TS_CONFIG = {
   rpcUrl: "https://testnet-rpc.monad.xyz",
   explorer: "https://testnet.monadscan.com",
 
-  escrowAddr: "0x654c83F23669908C867f02EF3E20B2126c4753De",
+  escrowAddr: "0x31F9aB26710515C49767249622a43B0F91c15C88",
   registryAddr: "0xeD347cDc1761750E20C024459b38dedFb1462254",
 
   /* official Circle USDC on Monad testnet (fixed chain fact) */
