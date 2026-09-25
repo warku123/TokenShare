@@ -101,8 +101,8 @@
 
     if (!T.cfgReady()) {
       notice(
-        `<b>config.js 未配置</b> — 部署后从 <code class="inl">contracts/deployed.json</code> 填入 ` +
-        `<code class="inl">escrowAddr / registryAddr / sellers</code>，市场页即读真链。`
+        `<b>config.js not configured</b> — after deployment, copy <code class="inl">escrowAddr / registryAddr / sellers</code> ` +
+        `from <code class="inl">contracts/deployed.json</code> and the market reads the real chain.`
       );
       listingsEl.innerHTML = "";
       return;
@@ -124,7 +124,7 @@
     } catch (e) {
       listingsEl.innerHTML = "";
       notice(
-        `<b>RPC 不可达</b> — ${T.esc(cfg.rpcUrl)} 读取失败（网络或 RPC CORS）。` +
+        `<b>RPC unreachable</b> — failed to read ${T.esc(cfg.rpcUrl)} (network or RPC CORS).` +
         `<span class="dim">${T.esc(e.shortMessage || e.message || "")}</span>`
       );
       return;
@@ -133,7 +133,7 @@
     const visible = listings.filter((l) => l.registered && !l.error);
     if (visible.length === 0) {
       listingsEl.innerHTML = "";
-      notice(`Registry 枚举与 config sellers 均未取得登记 listing — 检查 <code class="inl">registryAddr</code> 指向 v3、RPC 可达，或卖家已完成 register。`);
+      notice(`no registered listing from Registry enumeration or config.js sellers — check that <code class="inl">registryAddr</code> points at the current Registry, that the RPC is reachable, or that a seller has registered.`);
       return;
     }
 

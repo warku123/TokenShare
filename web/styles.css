@@ -598,6 +598,19 @@ h1 {
   color: var(--faint); border: 1px solid var(--line); white-space: nowrap;
 }
 
+/* lib-6 connected-state wallet actions — ghost tier, never compete with
+   the primary flows */
+.wallet-ops { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+.wallet-note {
+  font-family: var(--mono); font-size: 10.5px; line-height: 1.7; color: var(--amber);
+  border: 1px dashed rgba(232,180,74,0.35); background: rgba(232,180,74,0.04);
+  padding: 8px 10px; max-width: 360px; text-align: left;
+  animation: flashnote 1.2s ease;
+}
+.wallet-note b { color: var(--amber); }
+.wallet-note .dim { color: var(--faint); }
+@keyframes flashnote { 0% { border-color: rgba(232,180,74,0.8); } 100% { border-color: rgba(232,180,74,0.35); } }
+
 /* ═══ WALLET SELECTOR MODAL (M11 · EIP-6963) ═══ */
 .wsel-overlay {
   position: fixed; inset: 0; z-index: 100;
@@ -782,8 +795,8 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
 .mpr .mtag { margin-left: 0; flex: none; }
 .mpr .mono { font-size: 11.5px; }
 
-/* M12 row-level model 下线 (Registry v4 removeModel) — a quiet danger link,
-   deliberately lower-key than the card-level [ DEACTIVATE ] .btn-danger:
+/* M12 row-level model delist (Registry v4 removeModel) — a quiet danger link,
+   deliberately lower-key than the card-level [ DEACTIVATE ALL ] .btn-danger:
    borderless until hovered, 9.5px, sits at the row's tail */
 .mdel {
   font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.08em;
@@ -880,11 +893,12 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
 .rcpt-grid span { display: block; font-family: var(--mono); font-size: 9px; letter-spacing: 0.16em; color: var(--faint); margin-bottom: 5px; }
 .rcpt-grid b { font-weight: 400; font-size: 13px; overflow-wrap: anywhere; }
 
-/* precheck */
-.precheck-row { display: flex; gap: 10px; }
-.precheck-row input { flex: 1; }
-.precheck-row .btn { flex: none; }
-.precheck-result { border-top: 1px dashed var(--line); padding-top: 14px; display: flex; flex-direction: column; gap: 9px; }
+/* inline verify diagnostics inside the register form (the standalone
+   precheck card is gone — merged step) */
+.verify-detail { border-top: 1px dashed var(--line); padding-top: 12px; margin-top: 10px; display: flex; flex-direction: column; gap: 9px; }
+.verify-detail:empty { display: none; }
+.verify-detail .empty-hint { margin: 0; }
+.verify-detail .empty-hint .btn { margin-left: 6px; }
 
 /* disputes */
 .disp-list { display: flex; flex-direction: column; gap: 8px; }
@@ -913,8 +927,8 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
   .con-head { flex-direction: column; align-items: stretch; }
   .wallet-box { align-items: flex-start; }
   .wallet-info { justify-content: flex-start; }
+  .wallet-ops { justify-content: flex-start; }
   .fld-row { flex-direction: column; align-items: stretch; }
-  .precheck-row { flex-direction: column; }
   .tabs { width: 100%; }
   .tab-btn { flex: 1; }
 }

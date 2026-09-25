@@ -161,10 +161,10 @@
     if (!view.length) {
       listingsEl.innerHTML = "";
       notice(state.listings.length
-        ? `筛选/搜索无匹配 — 当前条件 <code class="inl">${T.esc(state.q || state.modelFilter || "")}</code> 命中 0 条，放宽条件或 <button class="btn btn-sm" id="f-reset" type="button">[ RESET ]</button>。`
+        ? `no match for the current filter/search — <code class="inl">${T.esc(state.q || state.modelFilter || "")}</code> hit 0 listings; loosen the criteria or <button class="btn btn-sm" id="f-reset" type="button">[ RESET ]</button>.`
         : (state.source === "config"
-          ? `链上读取失败，且 config.js 手工登记的 sellers 也无 listing — 检查 RPC / Registry 地址后重试。`
-          : `Registry 枚举返回 0 个 seller — 确认卖家已 <code class="inl">register</code>，或核对 <code class="inl">config.js registryAddr</code> 指向 v3。`),
+          ? `on-chain read failed and the manually listed config.js sellers have no listing either — check the RPC / Registry address and retry.`
+          : `Registry enumeration returned 0 sellers — confirm a seller has <code class="inl">register</code>ed, or check that <code class="inl">config.js registryAddr</code> points at the current Registry.`),
         "net-warn");
       const rst = $("f-reset");
       if (rst) rst.addEventListener("click", () => {
@@ -213,8 +213,8 @@
 
   if (!T.cfgReady()) {
     notice(
-      `<b>config.js 未配置</b> — 部署后从 <code class="inl">contracts/deployed.json</code> 填入 ` +
-      `<code class="inl">escrowAddr / registryAddr</code>，市场子页即从 Registry 枚举 sellers。`
+      `<b>config.js not configured</b> — after deployment, copy <code class="inl">escrowAddr / registryAddr</code> ` +
+      `from <code class="inl">contracts/deployed.json</code> and the market page enumerates sellers from the Registry.`
     );
     if (sourceEl) sourceEl.hidden = true;
   } else {

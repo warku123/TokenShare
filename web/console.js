@@ -26,9 +26,9 @@
   if (!T.cfgReady()) {
     configBanner.hidden = false;
     configBanner.innerHTML =
-      `<b>config.js 待填</b> — 部署后从 <code class="inl">contracts/deployed.json</code> 填入 ` +
-      `<code class="inl">escrowAddr / registryAddr</code>（及 <code class="inl">sellers</code>）。` +
-      `当前仅展示页面骨架，链读写不可用。`;
+      `<b>config.js not filled in</b> — after deployment, copy <code class="inl">escrowAddr / registryAddr</code> ` +
+      `(and <code class="inl">sellers</code>) from <code class="inl">contracts/deployed.json</code>. ` +
+      `Only the page skeleton renders; chain reads/writes are unavailable.`;
   }
 
   /* ═══ tabs ════════════════════════════════════════════════ */
@@ -52,21 +52,51 @@
   const walletAddr = $("wallet-addr");
   const netBadge = $("net-badge");
   const usdcBal = $("wallet-usdc");
+  const switchBtn = $("wallet-switch");
+  const disconnBtn = $("wallet-disconnect");
+  const walletNote = $("wallet-note");
+  let noteTimer = null;
 
   function renderWallet() {
+    const ops = $("wallet-ops");
     if (!state.address) {
       connectBtn.hidden = false;
       walletInfo.hidden = true;
+      if (ops) ops.hidden = true;
       return;
     }
     connectBtn.hidden = true;
     walletInfo.hidden = false;
+    if (ops) ops.hidden = false;
     walletAddr.textContent = T.truncAddr(state.address);
     walletAddr.href = T.addrLink(state.address);
     walletAddr.dataset.copy = state.address;
     walletAddr.title = `${state.address}${state.walletName ? ` · via ${state.walletName}` : ""} — click copies, ⧉ explorer via market page`;
     const nameEl = $("wallet-name");
     if (nameEl) nameEl.textContent = (state.walletName || "").toUpperCase() || "WALLET";
+  }
+
+  /* transient wallet-bar note (logout hints, switch failures) */
+  function showWalletNote(html, ms = 12000) {
+    walletNote.innerHTML = html;
+    walletNote.hidden = false;
+    clearTimeout(noteTimer);
+    noteTimer = setTimeout(() => { walletNote.hidden = true; }, ms);
+  }
+
+  /* wipe every local trace of the connection — shared by DISCONNECT and
+     accountsChanged([]). Balance displays reset to placeholders; MY LISTING
+     returns to its connect-wallet empty state. */
+  function clearConnState() {
+    state.signer = null;
+    state.address = null;
+    state.walletName = "";
+    usdcBal.textContent = "—";
+    const mirror = $("b-wallet-usdc-mirror");
+    if (mirror) mirror.textContent = "see wallet bar ↑";
+    $("b-escrow-bal").textContent = "—";
+    renderWallet();
+    loadMyListing();
   }
 
   function renderNet(ok) {
@@ -173,21 +203,52 @@
      provider whenever the pick changes */
   T.wallet.onChange({
     accounts: (accs) => {
-      state.signer = null;
-      state.address = null;
-      state.walletName = "";
-      renderWallet();
+      clearConnState();
       /* non-empty = account switch inside the same wallet → silent re-sync,
-         no picker, no popup; empty = disconnected (layer already forgot rdns) */
+         no picker, no popup; empty = disconnected (the layer already forgot
+         rdns and cleared its own state — no logout marker is written) */
       if (accs && accs.length) finishConnect(false).catch((e) => console.error("account switch failed:", e));
     },
     chain: () => window.location.reload(),
   });
-  /* silent resume: remembered rdns → bare eth_accounts — never pops */
+  /* silent resume: remembered rdns → bare eth_accounts — never pops; the
+     layer refuses to resume while `logout:<rdns>` is set (lib-6) */
   T.wallet.resume()
     .then((r) => { if (r) return finishConnect(false); })
     .catch(() => {});
   renderWallet();
+
+  /* [ SWITCH ACCOUNT ] — wallet_requestPermissions re-opens the account
+     picker (MetaMask pops it even when already connected). 4001 = user
+     cancelled → state untouched. Calibration runs inside the wallet layer
+     (raw eth_accounts, never getSigner); finishConnect re-syncs the page. */
+  switchBtn.addEventListener("click", () => guard(switchBtn, async () => {
+    try {
+      const r = await T.wallet.switchAccount();
+      if (!r || !r.ok) return; /* cancelled — keep everything as-is */
+      await finishConnect(false); /* event may fire too — both paths are idempotent */
+    } catch (e) {
+      console.error("account switch failed:", e);
+      showWalletNote(`account switch failed — ${T.esc(e.shortMessage || e.message || "unknown error")}`);
+    }
+  }));
+
+  /* [ DISCONNECT ] — true logout (lib-6): best-effort wallet_revokePermissions
+     (MetaMask truly revokes; OKX/Coinbase ignore it → manual hint) + the
+     persistent `logout:<rdns>` marker (refresh will not auto-reconnect).
+     Logging out does NOT touch on-chain USDC approvals — those live in the
+     token contract and need their own revoke. */
+  disconnBtn.addEventListener("click", () => guard(disconnBtn, async () => {
+    const r = await T.wallet.logout();
+    clearConnState();
+    const head = r && r.manual
+      ? `logged out locally — <b>also disconnect this site inside your wallet</b> (it ignores programmatic revoke).`
+      : `logged out — site permission revoked in the wallet.`;
+    showWalletNote(
+      `${head} refresh will not auto-reconnect.<br>` +
+      `<span class="dim">on-chain USDC approvals (approve) are separate and unaffected — revoke them on-chain if needed.</span>`
+    );
+  }));
 
   const needWallet = () => {
     if (!state.signer) { connectBtn.focus(); connectBtn.classList.add("flash"); setTimeout(() => connectBtn.classList.remove("flash"), 900); return true; }
@@ -245,7 +306,7 @@
     const box = $("s-my-listing");
     deactBtn.hidden = true; /* until fresh chain truth says active */
     if (!state.address || !T.cfgReady()) {
-      box.innerHTML = `<p class="empty-hint">连接钱包后展示你的 Registry listing。</p>`;
+      box.innerHTML = `<p class="empty-hint">connect a wallet to view your Registry listing.</p>`;
       return;
     }
     box.innerHTML = `<p class="empty-hint">reading getListing(${T.esc(T.truncAddr(state.address))}) …</p>`;
@@ -256,21 +317,22 @@
 
     if (!l.registered) {
       box.innerHTML =
-        `<p class="empty-hint">尚未登记。先预检加载 relay 真实模型面，再完成 <code class="inl">Registry.register</code>，` +
-        `listing 即刻出现在市场页。</p>`;
+        `<p class="empty-hint">not registered yet — load the relay's verified model face in the register form, ` +
+        `then submit <code class="inl">Registry.register</code>; the listing appears on the market immediately.</p>`;
     } else {
       /* v2: one price triple per model — group rows by model.
-         M12 (Registry v4): each row carries a small 下线 control (removeModel,
-         single tx) — deliberately lower-key than the card-level [ DEACTIVATE ].
-         The LAST model's control is disabled (contract guards RemoveLastModel):
-         listing-level offboarding stays on the big button. removeModel has no
+         M12 (Registry v4): each row carries a small delist control
+         (removeModel, single tx) — deliberately lower-key than the
+         card-level [ DEACTIVATE ALL ]. The LAST model's control is
+         disabled (contract guards RemoveLastModel): listing-level
+         offboarding stays on the big button. removeModel has no
          active requirement → controls render for INACTIVE listings too. */
       const multiModel = l.models.length > 1;
       const priceRows = l.models.map((m) => {
         const p = T.priceFor(l, m);
         const del = multiModel
-          ? `<button type="button" class="mdel" data-model="${T.esc(m)}" title="下线该模型 — removeModel(&quot;${T.esc(m)}&quot;) · 单 tx · 即刻停止服务">[ 下线 ]</button>`
-          : `<button type="button" class="mdel" disabled title="最后一个模型请用卡底 [ DEACTIVATE ] — 合约守卫 RemoveLastModel">[ 下线 ]</button>`;
+          ? `<button type="button" class="mdel" data-model="${T.esc(m)}" title="delist this model — removeModel(&quot;${T.esc(m)}&quot;) · single tx · stops serving immediately">[ REMOVE ]</button>`
+          : `<button type="button" class="mdel" disabled title="last model — use [ DEACTIVATE ALL ] below · contract guards RemoveLastModel">[ REMOVE ]</button>`;
         return `<div class="mpr"><span class="mtag">${T.esc(m)}</span>` +
           (p
             ? `<span class="mono">cached $${T.fmtUsdc(p.cachedIn)} · in $${T.fmtUsdc(p.input)} · out $${T.fmtUsdc(p.output)}</span>`
@@ -286,8 +348,8 @@
         `<div class="kv"><span>MODELS</span><b>${l.models.map((m) => `<span class="mtag">${T.esc(m)}</span>`).join(" ") || "—"}</b></div>` +
         `<div class="kv"><span>PRICES /1M</span><b class="${l.active ? "" : "weak"}">${priceRows || "—"}</b></div>` +
         (l.active ? "" :
-          `<p class="empty-hint deact-note">已停用 — 市场页转 INACTIVE 灰态、买家不可再锁单；在途（Locked）payment 仍可正常 settle。` +
-          `右侧表单勾选 LISTING ACTIVE 并提交 <code class="inl">register</code> 即可恢复。</p>`);
+          `<p class="empty-hint deact-note">inactive — the market turns this listing INACTIVE gray and buyers can no longer lock; in-flight (Locked) payments still settle normally. ` +
+          `Re-check LISTING ACTIVE in the form and submit <code class="inl">register</code> to restore it.</p>`);
       deactBtn.hidden = !l.active;
       /* M7 touchpoint: TEE / upstream-policy rows via GET /info — silent degrade */
       T.probeInfo(l.endpoint).then((info) => {
@@ -441,10 +503,10 @@
   const modelsGateOk = (endpoint) =>
     modelsState.status === "ok" && modelsState.base === endpoint && modelsState.accessible.length > 0;
   function gateReason() {
-    if (modelsState.status === "loading") return "模型预检进行中 — 等结果出来再提交";
-    if (modelsState.status === "error") return `模型预检失败（${modelsState.reason}）— 修复后点 LOAD FROM RELAY 重试`;
-    if (modelsState.status === "ok") return `endpoint 与预检来源（${modelsState.base}）不一致 — 对当前 endpoint 重新预检`;
-    return "先点 LOAD FROM RELAY 预检 — 只有 relay 实测可调的模型才能登记，杜绝虚空模型";
+    if (modelsState.status === "loading") return "model precheck in flight — wait for the result before submitting";
+    if (modelsState.status === "error") return `model precheck failed (${modelsState.reason}) — fix it, then LOAD FROM RELAY again`;
+    if (modelsState.status === "ok") return `endpoint differs from the prechecked source (${modelsState.base}) — re-run LOAD FROM RELAY on the current endpoint`;
+    return "run LOAD FROM RELAY first — only models the relay can actually call may be listed (no phantom models)";
   }
 
   function renderModelNote() {
@@ -455,18 +517,18 @@
       note.textContent = `GET ${modelsState.base}/verify-upstream …`;
     } else if (modelsState.status === "error") {
       note.className = "model-verify-note err";
-      note.textContent = `✗ ${modelsState.reason} — 修复后重新预检`;
+      note.textContent = `✗ ${modelsState.reason} — fix and re-run the precheck`;
     } else if (modelsState.status === "ok") {
       if (endpoint !== modelsState.base) {
         note.className = "model-verify-note warn";
-        note.textContent = `⚠ endpoint 已改（预检来源 ${T.hostOf(modelsState.base)}）— 提交前需重新预检`;
+        note.textContent = `⚠ endpoint changed (prechecked ${T.hostOf(modelsState.base)}) — re-run before submitting`;
       } else {
         note.className = "model-verify-note ok";
-        note.textContent = `✓ ${T.hostOf(modelsState.base)} 实测可调 ${modelsState.accessible.length} 个模型 — 只能从中勾选`;
+        note.textContent = `✓ ${T.hostOf(modelsState.base)} can actually call ${modelsState.accessible.length} model(s) — pick from these only`;
       }
     } else {
       note.className = "model-verify-note";
-      note.textContent = "未预检 — 提交前必须先从 relay 拉取真实可调模型面";
+      note.textContent = "not prechecked yet — load the real callable model face from the relay before submitting";
     }
   }
 
@@ -488,7 +550,7 @@
   /* successful precheck → chips = accessible_models; check-state rules:
        re-verify (wasOk): keep user picks, newly-discovered models default on
        first verify with listing: pre-check listed ∩ accessible
-       otherwise: 默认全选
+       otherwise: default = all checked
        (wasOk must be captured by the caller BEFORE flipping to "loading") */
   function applyVerified(base, accessible, wasOk) {
     const prevChecked = modelsState.checked;
@@ -519,34 +581,37 @@
     renderModelZone();
   }
 
-  /* shared precheck: one fetch drives BOTH the precheck card and the
-     register-form chips (联动) */
-  async function runVerify(base, origin) {
-    const out = $("p-result");
+  /* register-form inline precheck (merged into the form — no separate
+     card): LOAD FROM RELAY → GET {endpoint}/verify-upstream → success
+     renders accessible_models as checkable chips into the price table;
+     every failure state renders inline in the form area too */
+  async function runVerify(base) {
+    const detail = $("s-verify-detail");
     base = (base || "").trim().replace(/\/+$/, "");
     if (!base) {
-      out.innerHTML = `<p class="empty-hint err">enter the relay base URL first</p>`;
-      if (origin === "form") failVerify("endpoint 为空 — 先填 RELAY ENDPOINT");
+      failVerify("endpoint is empty — fill RELAY ENDPOINT first");
+      detail.innerHTML = `<p class="empty-hint err">fill RELAY ENDPOINT first — step 1 of this form</p>`;
       return;
     }
-    if (origin === "form") { $("s-endpoint").value = base; $("p-base").value = base; }
+    $("s-endpoint").value = base;
     const wasOk = modelsState.status === "ok"; /* before the loading flip */
     modelsState.status = "loading";
     modelsState.base = base;
     renderModelZone();
-    out.innerHTML = `<p class="empty-hint">GET ${T.esc(T.joinUrl(base, "/verify-upstream"))} …</p>`;
     const r = await T.fetchJson(T.joinUrl(base, "/verify-upstream"), {}, 20000);
     if (r.corsOrNetwork) {
-      out.innerHTML =
-        `<p class="empty-hint err">relay 不可达（${r.error === "timeout" ? "超时" : "网络或 CORS 未开启"}）。` +
-        `<button class="btn btn-sm" id="p-retry" type="button">[ RETRY ]</button></p>`;
-      $("p-retry").addEventListener("click", () => runVerify($("p-base").value, "card"));
-      failVerify("relay 不可达（网络/CORS）");
+      failVerify(`relay unreachable (${r.error === "timeout" ? "timeout" : "network/CORS"})`);
+      detail.innerHTML =
+        `<p class="empty-hint err">relay unreachable — ${r.error === "timeout" ? "timed out after 20s" : "network error or CORS not enabled"}. ` +
+        `<button class="btn btn-sm" id="s-verify-retry" type="button">[ RETRY ]</button></p>`;
+      $("s-verify-retry").addEventListener("click", () => runVerify($("s-endpoint").value));
       return;
     }
     if (!r.ok || !r.body) {
-      out.innerHTML = `<p class="empty-hint err">HTTP ${r.status} — verify-upstream unavailable</p>`;
       failVerify(`verify-upstream HTTP ${r.status}`);
+      detail.innerHTML = `<p class="empty-hint err">HTTP ${r.status} — verify-upstream unavailable. ` +
+        `<button class="btn btn-sm" id="s-verify-retry" type="button">[ RETRY ]</button></p>`;
+      $("s-verify-retry").addEventListener("click", () => runVerify($("s-endpoint").value));
       return;
     }
     const b = r.body;
@@ -556,23 +621,26 @@
       (m && typeof m === "object") ? `${m.model} — ${m.reason}` : String(m));
 
     if (!b.key_valid) {
-      failVerify("上游 key 无效（key_valid=false）— relay 拿不到真实模型面");
-      renderPrecheckCard(b, accessible, mismatches);
+      failVerify("upstream key invalid (key_valid=false) — the relay has no real model face");
+      renderVerifyDetail(b, accessible, mismatches);
       return;
     }
     if (!accessible.length) {
-      failVerify("relay 返回空模型面（accessible_models 为空）");
-      renderPrecheckCard(b, accessible, mismatches);
+      failVerify("relay returned an empty model face (accessible_models is empty)");
+      renderVerifyDetail(b, accessible, mismatches);
       return;
     }
     applyVerified(base, accessible, wasOk);
-    renderPrecheckCard(b, accessible, mismatches);
+    renderVerifyDetail(b, accessible, mismatches);
   }
 
-  function renderPrecheckCard(b, accessible, mismatches) {
+  /* verify diagnostics rendered INLINE inside the register form (the old
+     standalone precheck card is gone): key validity, upstream host,
+     accessible face, listing consistency, mismatches */
+  function renderVerifyDetail(b, accessible, mismatches) {
     const want = new Set(selectedModels());
     const diffExtra = [...want].filter((m) => !accessible.includes(m));
-    $("p-result").innerHTML =
+    $("s-verify-detail").innerHTML =
       `<div class="kv"><span>KEY</span><b class="${b.key_valid ? "ok" : "bad"}">${b.key_valid ? "✓ valid" : "✗ INVALID"}</b></div>` +
       `<div class="kv"><span>UPSTREAM</span><b class="mono">${T.esc(b.upstream_host || "—")}</b></div>` +
       (b.error ? `<div class="kv"><span>ERROR</span><b class="bad mono wrap-anywhere">${T.esc(b.error)}</b></div>` : "") +
@@ -583,7 +651,7 @@
       (diffExtra.length ? `<div class="kv"><span>FORM vs KEY</span><b class="bad">selected but not accessible: ${diffExtra.map((m) => `<span class="mtag">${T.esc(m)}</span>`).join(" ")}</b></div>` : "");
   }
 
-  $("s-load-models").addEventListener("click", () => guard($("s-load-models"), () => runVerify($("s-endpoint").value, "form")));
+  $("s-load-models").addEventListener("click", () => guard($("s-load-models"), () => runVerify($("s-endpoint").value)));
   /* chips are rendered dynamically → delegated change listener keeps the
      authoritative checked set in sync */
   $("s-model-checks").addEventListener("change", (e) => {
@@ -677,14 +745,14 @@
 
   /* human-readable copy for the Registry custom errors (v2 frozen face +
      v4 M12 additions — RemoveLastModel / ModelNotFound power the row-level
-     下线 flow's preflight humanization) */
+     delist flow's preflight humanization) */
   const REGISTRY_ERR_COPY = {
-    AlreadyRegistered: "链上已存在 active listing，register 必 revert。唯一改形路径：deactivate → 重新 register（两笔交易）",
-    NotActive: "listing 未激活（NotActive）— 改价需 active listing；改模型集/端点走 deactivate → register",
-    ModelNotFound: "模型不在链上 listing 中（ModelNotFound）— 该行可能刚被移除（刷新后行消失）；加回模型走 deactivate → register，删模型用 MY LISTING 行级 [ 下线 ]",
-    EmptyModels: "models 为空（EmptyModels）— 至少勾选一个",
-    LengthMismatch: "models 与 prices 长度不一致（LengthMismatch）— 页面组装错误，请反馈",
-    RemoveLastModel: "最后一个模型不可移除（RemoveLastModel）— listing 需保留至少一个模型；整站下线请用卡底 [ DEACTIVATE ]",
+    AlreadyRegistered: "an active listing already exists on-chain — register always reverts. The only reshape path: deactivate → re-register (two txs)",
+    NotActive: "listing is not active (NotActive) — price updates need an active listing; changing the model set / endpoint goes through deactivate → register",
+    ModelNotFound: "model is not in the on-chain listing (ModelNotFound) — the row was likely just removed (it disappears after refresh); re-add via deactivate → register, remove via the row-level [ REMOVE ] in MY LISTING",
+    EmptyModels: "models is empty (EmptyModels) — check at least one",
+    LengthMismatch: "models and prices lengths differ (LengthMismatch) — page assembly bug, please report",
+    RemoveLastModel: "the last model cannot be removed (RemoveLastModel) — a listing keeps at least one model; to go fully offline use [ DEACTIVATE ALL ] at the card bottom",
   };
   function humanizeRegistryErr(e) {
     let key = (e && e.revert && e.revert.name && REGISTRY_ERR_COPY[e.revert.name]) ? e.revert.name : null;
@@ -704,20 +772,20 @@
     try { await call(); return null; }
     catch (e) {
       return humanizeRegistryErr(e) ||
-        { kind: "revert", text: `链上预演 revert — ${T.esc(e.shortMessage || e.reason || e.message || "unknown")}` };
+        { kind: "revert", text: `on-chain simulation reverted — ${T.esc(e.shortMessage || e.reason || e.message || "unknown")}` };
     }
   }
   function offerTwoStepFix(txbox) {
     const btn = document.createElement("button");
     btn.className = "btn";
     btn.type = "button";
-    btn.textContent = "[ 一键修复：DEACTIVATE → REGISTER · 依次签两笔 ]";
+    btn.textContent = "[ ONE-CLICK FIX: DEACTIVATE → REGISTER · SIGN TWO TXS ]";
     btn.addEventListener("click", () => $("s-submit").click());
     txbox.appendChild(btn);
   }
   /* after a successful register/updateModelPrice: refresh listing + re-run the
-     verify so chips & precheck card reflect the new on-chain truth */
-  const reverifyAfterTx = (endpoint) => { runVerify(endpoint, "form").catch(() => {}); };
+     inline verify so chips & diagnostics reflect the new on-chain truth */
+  const reverifyAfterTx = (endpoint) => { runVerify(endpoint).catch(() => {}); };
 
   /* multi-tx update flow: models after a failure are not attempted —
      list them as skipped so the partial state is explicit */
@@ -725,7 +793,7 @@
     for (const m of models) {
       const line = T.txLine(txbox, `updateModelPrice(${m})`);
       line.el.classList.add("is-skip");
-      line.el.querySelector(".txl-state").textContent = "skipped — 修复上方失败后重新提交";
+      line.el.querySelector(".txl-state").textContent = "skipped — fix the failure above and resubmit";
     }
   }
 
@@ -740,7 +808,7 @@
     if (active) {
       if (!endpoint) return formErr(txbox, "endpoint required (https://…:8787)");
       if (!modelsGateOk(endpoint)) return formErr(txbox, gateReason());
-      if (!models.length) return formErr(txbox, "至少勾选一个实测可调的模型");
+      if (!models.length) return formErr(txbox, "check at least one relay-verified model");
       if (bad.length) return formErr(txbox, `${bad.join(", ")} — ${PRICE_ERR} · prices are USDC per 1M tokens`);
     }
 
@@ -760,7 +828,7 @@
              model; each gets its own wallet signature, failures stop the
              queue and mark the rest skipped */
           const changed = changedModels(mine, models, prices);
-          if (!changed.length) return formErr(txbox, "所有模型价格与链上一致 — 无需发送");
+          if (!changed.length) return formErr(txbox, "every model price matches on-chain — nothing to send");
           for (let idx = 0; idx < changed.length; idx++) {
             const m = changed[idx];
             const p = prices.get(m);
@@ -885,9 +953,10 @@
     ariaLabel: "confirm deactivate",
     title: "confirm — registry.deactivate()",
     copy:
-      "下线后：市场页 ACTIVE 展示即刻撤下（卡转 INACTIVE 灰态，买家不可再锁单）；" +
-      "已在途（Locked）的 payment 仍可正常 settle；随时可在右侧表单重新 register 恢复 ACTIVE。",
-    det: "deactivate() → active=false · 枚举条目保留（append-only，链上可审计）· 1 tx · 钱包签名",
+      "Delisting turns the whole listing off: the ACTIVE market presence is pulled immediately (card turns INACTIVE gray, " +
+      "buyers can no longer lock); in-flight (Locked) payments still settle normally; " +
+      "re-register from the form at any time to restore ACTIVE.",
+    det: "deactivate() → active=false · enumeration entry kept (append-only, auditable on-chain) · 1 tx · wallet signature",
     goLabel: "[ SIGN DEACTIVATE ]",
   });
 
@@ -897,16 +966,16 @@
     ariaLabel: "confirm remove model",
     title: "confirm — registry.removeModel()",
     copy:
-      `下线模型 ${model}：该模型即刻停止服务（getPrice 即刻 revert，relay 对新调用回 400，买家不可再按它锁单调用）；` +
-      "已在途（Locked）payment 的 settle 将走 settle-failed，买家 ttl 到期后 refund 收回全款；" +
-      "下架后可随时经右侧表单 deactivate → register 把它加回来。",
-    det: `removeModel("${model}") → models[]/prices[] 平行数组同索引移除（swap-and-pop）· 1 tx · 钱包签名 · 事件 ModelRemoved(operator, model)`,
+      `Delist model ${model}: it stops serving immediately (getPrice reverts at once, the relay answers 400 to new calls, ` +
+      "buyers can no longer lock against it); in-flight (Locked) payments will go settle-failed and buyers refund in " +
+      "full after ttl; you can re-add it later via the form's deactivate → register.",
+    det: `removeModel("${model}") → models[]/prices[] parallel arrays removed at the same index (swap-and-pop) · 1 tx · wallet signature · emits ModelRemoved(operator, model)`,
     goLabel: "[ SIGN REMOVE ]",
   });
 
-  /* [ DEACTIVATE ] — one-tap offboarding from the MY LISTING card.
-     Signer comes from finishConnect (the M11 wallet layer) — never
-     window.ethereum directly. */
+  /* [ DEACTIVATE ALL ] — one-tap listing-level offboarding from the MY
+     LISTING card. Signer comes from finishConnect (the M11 wallet layer) —
+     never window.ethereum directly. */
   deactBtn.addEventListener("click", () => guard(deactBtn, async () => {
     if (needWallet() || needConfig()) return;
     const mine = state.myListing;
@@ -991,9 +1060,8 @@
     }
   }
 
-  /* — upstream precheck card — shares runVerify with the register form:
-       a successful run feeds accessible_models into the form chips (联动) */
-  $("p-run").addEventListener("click", () => guard($("p-run"), () => runVerify($("p-base").value, "card")));
+  /* — upstream precheck card — removed (merged into the register form as
+     the inline LOAD FROM RELAY step; see runVerify / renderVerifyDetail) — */
 
   /* ═══ BUYER tab ═══════════════════════════════════════════ */
 
@@ -1001,7 +1069,7 @@
   function syncSellerInfo() {
     const l = listingOf($("b-seller").value);
     const info = $("b-lock-info");
-    if (!l) { info.innerHTML = `<p class="empty-hint">选择卖家后按模型显示三档价与 minAmount 估计。</p>`; return; }
+    if (!l) { info.innerHTML = `<p class="empty-hint">pick a seller to see per-model tier prices and the minAmount estimate.</p>`; return; }
     /* v2: one price triple + min estimate per model */
     const rows = l.models.map((m) => {
       const p = T.priceFor(l, m);
@@ -1013,7 +1081,7 @@
     info.innerHTML =
       `<div class="kv"><span>PRICES /1M · MIN EST</span><b>${rows || "—"}</b></div>`;
     $("b-lock-hint").textContent =
-      `≥ 最贵模型估计 $${T.fmtUsdc(maxMin)}（in×200k + out×32k caps，按调用模型取对应档）`;
+      `≥ priciest-model estimate $${T.fmtUsdc(maxMin)} (in×200k + out×32k caps; the tier of the called model applies)`;
     /* mirror into call tab */
     const csel = $("c-seller");
     if (!csel.value) { csel.value = l.operator; syncCallModels(); }
@@ -1191,7 +1259,7 @@
 
     if (r.corsOrNetwork) {
       return termLine(term,
-        `<span class="t-a">✗</span> relay ${r.error === "timeout" ? "请求超时（15s）— relay 无响应" : "不可达（网络或 CORS — 等待 relay CORS 配置）"}`);
+        `<span class="t-a">✗</span> relay ${r.error === "timeout" ? "request timed out (15s) — relay not responding" : "unreachable (network or CORS — waiting on the relay's CORS config)"}`);
     }
 
     if (!r.ok) {
@@ -1229,7 +1297,7 @@
     rcptPanel.hidden = false;
     if (!receiptHeader) {
       rcptPanel.classList.add("warn");
-      rcptPanel.innerHTML = `<b>NO RECEIPT</b> — ${settle === "settle-failed" ? "settle failed on-chain; response served, you may refund after ttl (只警告，不记争议)" : "relay did not attach X-Receipt"}`;
+      rcptPanel.innerHTML = `<b>NO RECEIPT</b> — ${settle === "settle-failed" ? "settle failed on-chain; response served, you may refund after ttl (warning only — no dispute recorded)" : "relay did not attach X-Receipt"}`;
       return;
     }
 
@@ -1245,7 +1313,7 @@
       const m = receipt.message;
       rcptPanel.classList.add("ok");
       rcptPanel.innerHTML =
-        `<b>✓ 收据验签通过</b> <span class="mono dim">recovered ${T.esc(T.truncAddr(check.recovered))} == listing.operator</span>` +
+        `<b>✓ receipt signature verified</b> <span class="mono dim">recovered ${T.esc(T.truncAddr(check.recovered))} == listing.operator</span>` +
         `<div class="rcpt-grid">` +
         `<div><span>ACTUAL</span><b>$${T.fmtUsdc(m.actualAmount)}</b></div>` +
         `<div><span>UPSTREAM</span><b class="mono">${T.esc(m.upstreamHost)}</b></div>` +
@@ -1255,8 +1323,8 @@
     } else {
       rcptPanel.classList.add("bad");
       rcptPanel.innerHTML =
-        `<b>✗ 收据验签失败 — ${T.esc(check.reason)}</b>` +
-        `<p class="dim mono" style="margin-top:6px">已记入争议列表（localStorage）。recovered: ${T.esc(check.recovered || "—")} · expected: ${T.esc(T.truncAddr(l.operator))}</p>`;
+        `<b>✗ receipt verification failed — ${T.esc(check.reason)}</b>` +
+        `<p class="dim mono" style="margin-top:6px">recorded in the disputes ledger (localStorage). recovered: ${T.esc(check.recovered || "—")} · expected: ${T.esc(T.truncAddr(l.operator))}</p>`;
       recordDispute(paymentId, check.reason, l.operator);
     }
   }));
@@ -1291,7 +1359,7 @@
     const all = T.disputes.all().filter((d) =>
       !state.address || T.sameAddr(d.buyer || "", state.address) || !d.buyer);
     $("d-clear").hidden = all.length === 0;
-    if (!all.length) { list.innerHTML = `<p class="empty-hint">无争议记录。收据验签失败会自动记入此处。</p>`; return; }
+    if (!all.length) { list.innerHTML = `<p class="empty-hint">no disputes. Receipt-verification failures land here automatically.</p>`; return; }
     list.innerHTML = all.map((d) =>
       `<div class="disp"><span class="mono">#${T.esc(d.paymentId)}</span>` +
       `<span class="disp-reason">${T.esc(d.reason)}</span>` +

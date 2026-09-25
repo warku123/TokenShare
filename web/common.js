@@ -329,7 +329,7 @@ window.TS = (() => {
       } else {
         dot.classList.add("off");
         lbl.textContent = "offline";
-        slot.title = "relay unreachable — or CORS not enabled yet (等待 relay CORS 配置)";
+        slot.title = "relay unreachable — or CORS not enabled yet";
       }
     }));
     return online;
@@ -603,7 +603,7 @@ window.TS = (() => {
     switch (status) {
       case 400: return "model not in the seller's listing (or listing inactive) — pick a listed model";
       case 401: return "signature missing/invalid — reconnect the wallet and retry";
-      case 402: return "payment proof rejected — maxAmount 低于卖家 minAmount 估计，调高金额后重新 lock";
+      case 402: return "payment proof rejected — maxAmount below the seller's minAmount estimate; raise it and re-lock";
       case 409: return "lock about to expire (ttl margin) — refund & re-lock with a longer ttl";
       case 502: return "upstream (official API) error — not settled; retry or refund after ttl";
       default: return null;
@@ -635,6 +635,12 @@ window.TS = (() => {
        no innerHTML (a data-URI SVG icon can carry script).
      ══════════════════════════════════════════════════════════ */
   const WALLET_RDNS_KEY = "tokenshare.wallet.rdns";
+  /* lib-6: persistent per-wallet logout marker — `logout:<rdns>`. While
+     set, silent resume for that wallet is suppressed (an explicit DISCONNECT
+     survives a page refresh); the ONLY clears are an explicit reconnect
+     (selector pick / SWITCH ACCOUNT success). accountsChanged([]) from the
+     wallet side clears state WITHOUT writing this flag. */
+  const WALLET_LOGOUT_PREFIX = "tokenshare.wallet.logout:";
 
   const wallet = (() => {
     const announced = new Map(); /* dedupe key (uuid, else rdns) → {info, provider} */
@@ -685,9 +691,26 @@ window.TS = (() => {
     const list = () => (announced.size ? [...announced.values()] : legacyEntries());
 
     const remember = (entry) => {
-      if (entry.info.rdns) { try { localStorage.setItem(WALLET_RDNS_KEY, entry.info.rdns); } catch { /* private mode */ } }
+      if (entry.info.rdns) {
+        try {
+          localStorage.setItem(WALLET_RDNS_KEY, entry.info.rdns);
+          localStorage.removeItem(WALLET_LOGOUT_PREFIX + entry.info.rdns); /* explicit connect clears a prior logout */
+        } catch { /* private mode */ }
+      }
     };
     const forget = () => { try { localStorage.removeItem(WALLET_RDNS_KEY); } catch { /* ignore */ } };
+    const logoutMarked = (rdns) => {
+      if (!rdns) return false;
+      try { return localStorage.getItem(WALLET_LOGOUT_PREFIX + rdns) === "1"; } catch { return false; }
+    };
+    const markLogout = (rdns) => {
+      if (!rdns) return;
+      try { localStorage.setItem(WALLET_LOGOUT_PREFIX + rdns, "1"); } catch { /* private mode */ }
+    };
+    const clearLogout = (rdns) => {
+      if (!rdns) return;
+      try { localStorage.removeItem(WALLET_LOGOUT_PREFIX + rdns); } catch { /* ignore */ }
+    };
 
     function emit(kind, arg) {
       for (const cb of subs[kind]) { try { cb(arg); } catch { /* one bad callback ≠ all */ } }
@@ -703,7 +726,14 @@ window.TS = (() => {
       unbind();
       const onAccounts = (accs) => {
         const a = accs || [];
-        if (!a.length) forget(); /* disconnected inside the wallet → drop the memory */
+        if (!a.length) {
+          /* disconnected inside the wallet → drop the memory and the whole
+             local connection state — but NO logout flag (this is not an
+             explicit on-page DISCONNECT) */
+          forget();
+          unbind();
+          current = null;
+        }
         emit("accounts", a);
       };
       const onChain = (chainId) => emit("chain", chainId);
@@ -729,9 +759,9 @@ window.TS = (() => {
         const empty = document.createElement("div");
         empty.className = "wsel-empty";
         const p1 = document.createElement("p");
-        p1.textContent = "未检测到钱包 — 没有 EIP-6963 公告，window.ethereum 也为空。";
+        p1.textContent = "No wallet detected — zero EIP-6963 announcements and window.ethereum is empty.";
         const p2 = document.createElement("p");
-        p2.textContent = "安装一个后刷新本页：";
+        p2.textContent = "Install one, then refresh this page:";
         const links = document.createElement("div");
         links.className = "wsel-install";
         for (const [name, url] of [["MetaMask", "https://metamask.io/download/"], ["OKX Wallet", "https://www.okx.com/web3"]]) {
@@ -854,13 +884,76 @@ window.TS = (() => {
       return { provider: entry.provider, address: ethers.getAddress(accs[0]), name: entry.info.name };
     }
 
+    /* ── lib-6 DISCONNECT → true logout ──────────────────────────
+       1. best-effort wallet_revokePermissions({eth_accounts:{}}), capped
+          at 300ms via Promise.race, ALL errors swallowed:
+            MetaMask truly revokes the site permission;
+            OKX resolves as a silent no-op;
+            Coinbase rejects (harmless).
+       2. persist the `logout:<rdns>` marker (survives refresh);
+       3. wipe local connection state (memory, listeners, current).
+       Raw provider only — NEVER ethers getSigner here. Returns
+       {manual} telling the UI whether the wallet ignores programmatic
+       revoke (OKX/Coinbase → the user must also disconnect the site
+       inside the wallet). */
+    async function logout() {
+      const entry = current;
+      if (!entry) return { manual: false };
+      const rdns = (entry.info && entry.info.rdns) || null;
+      const manual = !!(rdns && /okex|coinbase/i.test(rdns)) ||
+        !!(entry.provider && (entry.provider.isOkxWallet || entry.provider.isCoinbaseWallet));
+      try {
+        await Promise.race([
+          entry.provider.request({ method: "wallet_revokePermissions", params: [{ eth_accounts: {} }] }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("revoke timeout")), 300)),
+        ]);
+      } catch { /* unsupported / timeout / rejected — best-effort by contract */ }
+      markLogout(rdns);
+      forget();
+      unbind();
+      current = null;
+      return { manual };
+    }
+
+    /* ── lib-6 SWITCH ACCOUNT ────────────────────────────────────
+       wallet_requestPermissions({eth_accounts:{}}) first — MetaMask
+       opens its account picker even when already connected.
+         4001 → user cancelled, keep everything as-is;
+         any other error → degrade to eth_requestAccounts;
+       after success, calibrate via bare eth_accounts (never getSigner)
+       and clear the logout marker. */
+    async function switchAccount() {
+      if (!current) return { ok: false, cancelled: true };
+      const provider = current.provider;
+      try {
+        await provider.request({ method: "wallet_requestPermissions", params: [{ eth_accounts: {} }] });
+      } catch (e) {
+        if (e && (e.code === 4001 || e.code === "ACTION_REJECTED")) return { ok: false, cancelled: true };
+        /* wallet doesn't implement the permissions method → classic popup */
+        try {
+          await provider.request({ method: "eth_requestAccounts" });
+        } catch (e2) {
+          if (e2 && (e2.code === 4001 || e2.code === "ACTION_REJECTED")) return { ok: false, cancelled: true };
+          throw e2;
+        }
+      }
+      let accs = [];
+      try { accs = await provider.request({ method: "eth_accounts" }); } catch { /* keep going — stale is fine */ }
+      if (!accs || !accs.length) return { ok: false, cancelled: true };
+      remember(current); /* re-affirm rdns + clear any logout marker */
+      return { ok: true, address: ethers.getAddress(accs[0]) };
+    }
+
     /* silent session restore: remembered rdns → announced match → bare
        eth_accounts. NEVER getSigner here — it would auto-pop
-       eth_requestAccounts when the wallet is unauthorized. */
+       eth_requestAccounts when the wallet is unauthorized.
+       lib-6: the `logout:<rdns>` marker wins — after an explicit
+       DISCONNECT, a refresh must NOT silently reconnect. */
     async function resume() {
       let rdns = null;
       try { rdns = localStorage.getItem(WALLET_RDNS_KEY); } catch { return null; }
       if (!rdns) return null;
+      if (logoutMarked(rdns)) { forget(); return null; } /* explicit logout — stay out (marker persists) */
       await announcedReady;
       const entry = list().find((w) => w.info.rdns === rdns);
       if (!entry) return null; /* wallet absent this session — keep the memory */
@@ -877,6 +970,9 @@ window.TS = (() => {
       connectInteractive,
       resume,
       forget,
+      logout,          /* lib-6: true disconnect (revoke best-effort + logout marker) */
+      switchAccount,   /* lib-6: wallet_requestPermissions account re-pick */
+      logoutMarked,    /* test/introspection: is `logout:<rdns>` set? */
       /* one encapsulation: raw picked provider → ethers wrapper */
       browserProvider: () => (current ? new ethers.BrowserProvider(current.provider) : null),
       request: (method, params) =>

@@ -38,12 +38,17 @@
         <span class="net-badge" id="net-badge">—</span>
         <span class="wallet-usdc mono" id="wallet-usdc" title="wallet USDC balance">—</span>
       </div>
+      <div class="wallet-ops" id="wallet-ops" hidden>
+        <button class="btn btn-sm btn-ghost" id="wallet-switch" type="button">[ SWITCH ACCOUNT ]</button>
+        <button class="btn btn-sm btn-ghost" id="wallet-disconnect" type="button">[ DISCONNECT ]</button>
+      </div>
+      <p class="wallet-note" id="wallet-note" hidden></p>
     </div>
   </section>
 
   <div class="mkt-notice" id="config-banner" hidden></div>
   <div class="mkt-notice net-warn" id="net-banner" hidden>
-    <b>钱包网络不符</b> — 请切换到 <code class="inl" id="net-banner-name">—</code>。
+    <b>Wrong network</b> — switch to <code class="inl" id="net-banner-name">—</code>.
     <button class="btn btn-sm" id="net-switch" type="button">[ SWITCH / ADD NETWORK ]</button>
   </div>
 
@@ -60,9 +65,9 @@
       <!-- my listing -->
       <article class="card rv">
         <h2 class="card-title">MY LISTING<span class="card-tag">Registry.getListing(me)</span></h2>
-        <div class="card-body" id="s-my-listing"><p class="empty-hint">连接钱包后展示你的 Registry listing。</p></div>
+        <div class="card-body" id="s-my-listing"><p class="empty-hint">connect a wallet to view your Registry listing.</p></div>
         <div class="card-foot">
-          <button class="btn btn-danger btn-wide" id="s-deactivate" type="button" hidden>[ DEACTIVATE ]</button>
+          <button class="btn btn-danger btn-wide" id="s-deactivate" type="button" hidden>[ DEACTIVATE ALL ]</button>
           <div class="txbox" id="s-my-tx"></div>
         </div>
       </article>
@@ -77,12 +82,15 @@
           </label>
 
           <div class="fld">
-            <span class="fld-lbl">MODELS <i>verified via relay /verify-upstream — 只登记真实可调的模型面</i></span>
+            <span class="fld-lbl">MODELS <i>step 1 — LOAD FROM RELAY probes /verify-upstream · step 2 — check the models to list</i></span>
             <div class="model-verify">
               <button class="btn btn-sm btn-ghost" id="s-load-models" type="button">[ ↺ LOAD FROM RELAY ]</button>
               <span class="model-verify-note" id="s-models-note"></span>
             </div>
             <div class="model-checks" id="s-model-checks"></div>
+            <div class="verify-detail" id="s-verify-detail"></div>
+            <p class="fld-hint">The relay probes upstream <code class="inl">/v1/models</code> with its configured
+              official-platform key; only models it can actually call become checkable chips — no phantom model kinds.</p>
           </div>
 
           <div class="fld-row">
@@ -94,8 +102,9 @@
               <input type="text" inputmode="decimal" id="s-price-output" placeholder="4.00"></label>
           </div>
           <div class="model-prices" id="s-model-prices"></div>
-          <p class="fld-hint">Registry v2 按模型计价：勾选模型默认继承 BASE 三档价，在对应行单独改格即为该模型覆盖价；
-            改 BASE 时未动过的格子跟随同步。<code class="inl">register</code> 一次性携带全部价格（prices ∥ models）。</p>
+          <p class="fld-hint">Registry v2 prices per model: checked models inherit the BASE tiers; edit a cell in a
+            model's row to override that model only; cells you never touched follow BASE edits.
+            <code class="inl">register</code> carries every price at once (prices ∥ models).</p>
 
           <label class="mswitch">
             <input type="checkbox" id="s-active" checked>
@@ -108,20 +117,6 @@
         </div>
       </article>
     </div>
-
-    <!-- upstream precheck -->
-    <article class="card rv">
-      <h2 class="card-title">UPSTREAM PRECHECK<span class="card-tag">GET {relay}/verify-upstream</span></h2>
-      <div class="card-body">
-        <div class="precheck-row">
-          <input type="url" id="p-base" placeholder="https://relay.example.com:8787" spellcheck="false" autocomplete="off">
-          <button class="btn" id="p-run" type="button">[ RUN PRECHECK ]</button>
-        </div>
-        <p class="fld-hint">Relay 用配置的官方平台 key 打 <code class="inl">/v1/models</code>，再与链上 listing 交叉核验。
-          预检成功的 <code class="inl">accessible_models</code> 会同步为上方表单的勾选面——无法勾选relay实测之外的模型。</p>
-        <div class="precheck-result" id="p-result"><p class="empty-hint">precheck result renders here — key validity, accessible models, listing consistency.</p></div>
-      </div>
-    </article>
   </section>
 
   <!-- ════════════ BUYER ════════════ -->
@@ -160,14 +155,14 @@
         <div class="card-body">
           <label class="fld"><span class="fld-lbl">SELLER <i>from the market listings</i></span>
             <select id="b-seller"><option value="">— choose seller —</option></select></label>
-          <div class="mini-info" id="b-lock-info"><p class="empty-hint">选择卖家后显示三档价与 minAmount 估计。</p></div>
+          <div class="mini-info" id="b-lock-info"><p class="empty-hint">pick a seller to see per-model tier prices and the minAmount estimate.</p></div>
           <div class="fld-row">
             <label class="fld"><span class="fld-lbl">MAX AMOUNT <i>USDC</i></span>
               <input type="text" inputmode="decimal" id="b-max" placeholder="0.05"></label>
             <label class="fld"><span class="fld-lbl">TTL <i>seconds</i></span>
               <input type="number" id="b-ttl" value="600" min="60" step="60"></label>
           </div>
-          <p class="fld-hint" id="b-lock-hint">≥ 卖家最贵模型×caps 估计，参考市场页各模型三档价</p>
+          <p class="fld-hint" id="b-lock-hint">≥ the seller's priciest-model estimate (in×200k + out×32k caps) — see per-model tiers on the market page</p>
           <button class="btn btn-wide" id="b-lock-btn" type="button">[ LOCK ]</button>
           <div class="txbox" id="b-lock-tx"></div>
           <div class="pid-box" id="b-payment-id"></div>

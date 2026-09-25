@@ -23,6 +23,19 @@ Monad testnet (chainId 10143) · Escrow/Registry/USDC 已部署（见 `web/confi
 - [ ] **6963 零公告回退**：钱包不支持 6963（仅注入 `window.ethereum`，含 `providers` 数组）→ 选择器列出 legacy 行（按 isMetaMask/isOkxWallet 标注名称），可正常连接；有 6963 公告时 `window.ethereum` 完全不参与（OKX 抢注失效）
 - [ ] **图标注入面**：选择器行仅用 `createElement('img')` + `textContent` 渲染（DevTools 检查 DOM 无 innerHTML 注入路径）；伪造恶意 announce（icon 为带脚本的 data-URI SVG、name 含 `<img onerror>`）→ 名称按纯文本显示、无脚本执行
 
+## 登出 / 换账户（lib-6 · DISCONNECT 真登出 + SWITCH ACCOUNT）
+
+- [ ] **DISCONNECT 真登出（路径 1）**：连接态钱包条出现并列 `[ SWITCH ACCOUNT ]` + `[ DISCONNECT ]`（ghost 小按钮）；点 DISCONNECT → best-effort `wallet_revokePermissions({eth_accounts:{}})`（≤300ms race 吞错）+ 写持久 flag `tokenshare.wallet.logout:<rdns>` + 清本地连接态（地址/余额/MY LISTING 回未连接空态，CONNECT 按钮复现）；MetaMask 场景钱包内「已连接站点」列表本站消失（真撤销）
+- [ ] **登出后刷新不自动连回（路径 2）**：DISCONNECT 后刷新页面 → 零弹窗、保持未连接（resume 先查 `logout:<rdns>` flag，有则跳过 eth_accounts 恢复）；再显式点 CONNECT 选同一钱包成功连接（remember 清 flag）→ 之后刷新恢复静默连接（flag 已清）
+- [ ] **OKX/Coinbase 手动断开提示（路径 3）**：OKX/Coinbase 下点 DISCONNECT → 钱包条出现琥珀色提示「logged out locally — also disconnect this site inside your wallet (it ignores programmatic revoke)… refresh will not auto-reconnect」+ 附注「on-chain USDC approvals (approve) are separate and unaffected」（登出≠撤销 USDC 代币授权）；提示数秒后自动消失
+- [ ] **SWITCH ACCOUNT（路径 4）**：点 `[ SWITCH ACCOUNT ]` → `wallet_requestPermissions({eth_accounts:{}})`——MetaMask 已连接也弹选号 UI；4001 用户取消 → 一切保持现状（地址/余额不变，无报错）；不支持该方法的钱包（OKX/Coinbase 等）自动降级 `eth_requestAccounts` 经典弹窗；成功后裸 `eth_accounts` 校准当前账户 + 清 logout flag → 地址/余额/MY LISTING 静默刷新（全程不调 ethers getSigner 的隐式弹窗路径）
+- [ ] **accountsChanged 事件语义（路径 5）**：钱包扩展内手动断开本站（accountsChanged=[]）→ 页面清态（CONNECT 复现）且**不写** logout flag（localStorage 无 `logout:` 键）、rdns 记忆清除；钱包内切账户（accountsChanged 非空）→ 同一钱包静默换地址（不弹窗、不重开选择器）；显式 DISCONNECT 与钱包侧断开在刷新后都不自动连回，但前者靠 logout flag、后者靠 rdns 记忆清除
+
+## UI 文案语言（M13）
+
+- [ ] **用户可见串零中文**：`grep -n "[一-鿿]" web/*.html web/*.js` 仅剩代码注释命中（config.js/common.js/console.js 注释）；页面按钮/标签/错误提示/确认 dialog/tooltip/状态文案全部英文（TESTING.md 本身保留中文）
+
+
 ## 市场页（只读，无需钱包）
 
 > M9 起首页 `index.html` 仅保留 ≤2 卡预览 + FULL MARKET 入口面板；完整市场在 `market.html`（导航三页互链）。
@@ -59,21 +72,21 @@ Monad testnet (chainId 10143) · Escrow/Registry/USDC 已部署（见 `web/confi
 - [ ] 提交门控：未预检 / key 无效 / relay 不可达 / endpoint 改后未复验 → 禁提交并在预览框+红条给明确原因；models 零选 → 红条拒绝；**任一模型**价格非数或 >6 位小数 → 预览框琥珀行列出模型名 + 提交红条拒绝
 - [ ] 预览框实时反映将发的交易：`register(endpoint, models, prices[])`（prices 平行数组逐模型 `(c,i,o)`，**一笔原子 tx**）/ `updateModelPrice(model, (c,i,o))` 逐变更模型多行 / `deactivate()+register` 两笔 / `deactivate()`；按钮文案随路径切换（SUBMIT / UPDATE PRICE·N TX / DEACTIVATE → RE-REGISTER · 2 TX / DEACTIVATE）；价格全与链上一致 → 按钮变 PRICES UNCHANGED，点击仅红条提示不发交易
 - [ ] **逐模型改价**：shape 不变仅改价 → 每个变更模型一笔 `updateModelPrice`，逐笔钱包签名 + tx 行序号 i/N；中途某笔失败 → 该行红、其余标记 skipped（灰虚线），修复后重新提交剩余；staticCall 预演失败（NotActive/ModelNotFound）→ 人话红条且不弹钱包
-- [ ] UPSTREAM PRECHECK 与表单联动：表单侧预检会回填 `p-base` 并渲染结果卡；卡侧 RUN 成功同样刷新表单 chips；渲染 key_valid、upstream_host、accessible_models、listed_models、mismatches（逐条 model+原因）；relay 不可达→RETRY 提示+表单侧同步失败态
+- [ ] **UPSTREAM PRECHECK 已并入 register 表单（M13 合并）**：无独立 precheck 卡；表单 MODELS 区即预检步骤——填 endpoint → `[ ↺ LOAD FROM RELAY ]` → 成功 `accessible_models` 直接渲染为可勾选 chips 进入每模型价格表；key 无效/relay 不可达/HTTP 非 200 等失败状态内嵌表单区显示（红条 + 诊断行 KEY/UPSTREAM/ACCESSIBLE/LISTING ON-CHAIN/LISTED/MISMATCHES/FORM vs KEY + RETRY 按钮）；成功后诊断行同样内嵌渲染；预检中 `[ ↺ LOAD FROM RELAY ]` 禁用
 - [ ] 提交：MetaMask 弹窗前先 `staticCall` 预演，revert 人话化（AlreadyRegistered→提示 deactivate→register 唯一路径并给一键两步按钮；NotActive/ModelNotFound/EmptyModels/LengthMismatch 各有文案）；tx 行 pending(amber)→hash（可点 explorer)→confirmed（绿）/reverted（红）；成功后 MY LISTING 刷新 + 预检自动复验
 - [ ] 按钮防重：交易 pending / 预检进行中期间按钮 disabled
-- [ ] **DEACTIVATE（MY LISTING 卡一键下线）**：仅 active listing 显示 `[ DEACTIVATE ]`（红系细边框危险按钮，卡底）；未连接 / 未登记 / 已停用 / 读卡期间均不出现
+- [ ] **DEACTIVATE（MY LISTING 卡一键整站下线，M13 改名）**：仅 active listing 显示 `[ DEACTIVATE ALL ]`（红系细边框危险按钮，卡底；行为不变=listing 级 deactivate，与行级 [ REMOVE ] 形成层级对比）；未连接 / 未登记 / 已停用 / 读卡期间均不出现
 - [ ] 确认弹窗：终端风 alertdialog（红标题 `confirm — registry.deactivate()`），一句后果=市场页 ACTIVE 展示即刻撤下（卡转 INACTIVE 灰态、买家不可再锁单）＋在途 Locked payment 仍可 settle＋可随时 register 恢复；Esc / 点遮罩 / `[ CANCEL ]` 关闭且**不发交易**、按钮复位；默认焦点在 CANCEL
 - [ ] 确认后：钱包弹一笔 `deactivate()` 签名；卡内 tx 行 pending(amber)→hash（可点 explorer)→confirmed（绿）；全程按钮 disabled 防重
 - [ ] 成功后：MY LISTING STATUS 变 INACTIVE 灰徽章（pulse 停止）+ PRICES 区弱化 + 停用说明行（指引回表单重注册）；买家下拉该 seller 变 `(inactive)` disabled；market.html 刷新后该卡 INACTIVE 灰态、首页 ACTIVE 统计减一（append-only 枚举不删条目）
 - [ ] **deactivate → 重注册回环**：下线后表单勾 LISTING ACTIVE → 预览**直走** `register(…)` 单笔（**不**进 deactivate→register 两步）→ 一笔签名 → STATUS 回 ACTIVE、市场页恢复可购；反向 stale（链上已 active 而本地不知）时 AlreadyRegistered 红条 + 一键两步按钮依旧生效
 - [ ] deactivate 失败兜底：链上已 inactive 而本地 stale 时点 `[ DEACTIVATE ]` → tx 行红（NotActive revert），卡片自动重读链上真值并收起按钮，表单内容不被清
-- [ ] **模型级下线（M12 · Registry v4 removeModel）**：MY LISTING 的 PRICES /1M 区每模型行末尾有小型 `[ 下线 ]` 链接（红系弱样式，视觉档位低于卡底 `[ DEACTIVATE ]` 大按钮）；active 与 inactive listing 均显示（合约无 active 要求）
+- [ ] **模型级下线（M12 · Registry v4 removeModel）**：MY LISTING 的 PRICES /1M 区每模型行末尾有小型 `[ REMOVE ]` 链接（红系弱样式，视觉档位低于卡底 `[ DEACTIVATE ALL ]` 大按钮）；active 与 inactive listing 均显示（合约无 active 要求）
 - [ ] 确认弹窗：终端风 alertdialog（红标题 `confirm — registry.removeModel()`），文案三要素齐全=①该模型**即刻停止服务**（getPrice revert → relay 对新调用 400）②**在途（Locked）payment 将 settle-failed，买家 ttl 后 refund 收回全款**③下架后可 register 加回；Esc / 点遮罩 / `[ CANCEL ]` 关闭且**不发交易**；默认焦点在 CANCEL
 - [ ] **单 tx**：确认后先 `staticCall` 预演（revert 人话化、不弹钱包）→ 钱包仅弹**一笔** `removeModel(model)` 签名 → tx 行 pending(amber)→hash（可点 explorer)→confirmed（绿）；操作期间全部行级按钮 disabled 防重，结束/取消后恢复正确态
 - [ ] **行消失+联动**：成功后 MY LISTING 重读 getListing，该模型行消失；买家 LOCK 卖家信息、CALL DEMO 模型下拉同步少一模型（同源 getListing）；market.html 下次刷新该卡少一模型 chip；表单内未提交的编辑不被清（prefill 跳过）
-- [ ] **末模型守卫（禁点方案）**：仅剩 1 个模型时其 `[ 下线 ]` 为 disabled 灰态，title 提示「最后一个模型请用卡底 [ DEACTIVATE ]」；竞争兜底=卡片 stale（另一窗口已删到只剩一个）时点下线 → staticCall 捕 `RemoveLastModel` → 人话红条「最后一个模型不可移除…整站下线请用 [ DEACTIVATE ]」且不弹钱包
-- [ ] stale 行兜底：另一窗口已移除该模型后本地仍显示 → 点 `[ 下线 ]` → staticCall 捕 `ModelNotFound` → 人话红条 + 卡片自动重读（行消失），不弹钱包
+- [ ] **末模型守卫（禁点方案，M13 引导改）**：仅剩 1 个模型时其 `[ REMOVE ]` 为 disabled 灰态，title 提示「last model — use [ DEACTIVATE ALL ] below · contract guards RemoveLastModel」（引导用大按钮）；竞争兜底=卡片 stale（另一窗口已删到只剩一个）时点下线 → staticCall 捕 `RemoveLastModel` → 人话红条「the last model cannot be removed … use [ DEACTIVATE ALL ] at the card bottom」且不弹钱包
+- [ ] stale 行兜底：另一窗口已移除该模型后本地仍显示 → 点 `[ REMOVE ]` → staticCall 捕 `ModelNotFound` → 人话红条 + 卡片自动重读（行消失），不弹钱包
 - [ ] **重注册回环**：移除某模型后，右侧表单重新勾选该模型并提交 → 走 deactivate→register 两步流 → 该模型行带价复活（价随模型走：prices ∥ models 同索引）；`ModelRemoved(operator, model)` 事件可在 explorer tx 日志核对
 
 ## Buyer tab
