@@ -394,6 +394,349 @@ contract EscrowTest is Test {
     }
 
     // =====================================================================
+    // settlePartial (Escrow v2 per-key metering)
+    // =====================================================================
+
+    function test_SettlePartial_Happy_Single() public {
+        _deposit(buyer, 100e6);
+        uint256 maxAmount = 10e6;
+        uint256 pid = _lock(maxAmount);
+
+        vm.expectEmit(true, false, false, true, address(escrow));
+        emit Escrow.SettlePartial(pid, 4e6, 4e6);
+
+        vm.prank(seller);
+        escrow.settlePartial(pid, 4e6);
+
+        assertEq(escrow.balances(seller), 4e6, "seller credited immediately");
+        assertEq(escrow.balances(buyer), 90e6, "buyer untouched");
+        assertEq(escrow.capturedOf(pid), 4e6, "captured accumulated");
+        assertTrue(_stateOf(pid) == Escrow.State.Locked, "state stays Locked");
+        // ledger credit, not a token push: escrow still holds everything
+        assertEq(usdc.balanceOf(address(escrow)), 100e6, "escrow holdings unchanged");
+    }
+
+    function test_SettlePartial_MultipleAccumulate() public {
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+
+        vm.startPrank(seller);
+        escrow.settlePartial(pid, 3e6);
+        escrow.settlePartial(pid, 4e6);
+        vm.expectEmit(true, false, false, true, address(escrow));
+        emit Escrow.SettlePartial(pid, 2_500_000, 9_500_000);
+        escrow.settlePartial(pid, 2_500_000);
+        vm.stopPrank();
+
+        assertEq(escrow.balances(seller), 9_500_000, "seller credited the sum");
+        assertEq(escrow.capturedOf(pid), 9_500_000, "captured == sum of captures");
+        assertTrue(_stateOf(pid) == Escrow.State.Locked, "still Locked");
+    }
+
+    function test_SettlePartial_UpToExactMax_StaysLocked() public {
+        _deposit(buyer, 100e6);
+        uint256 maxAmount = 10e6;
+        uint256 pid = _lock(maxAmount);
+
+        vm.startPrank(seller);
+        escrow.settlePartial(pid, 6e6);
+        escrow.settlePartial(pid, 4e6); // exact remainder
+        vm.stopPrank();
+
+        assertEq(escrow.capturedOf(pid), maxAmount, "captured == maxAmount");
+        assertTrue(_stateOf(pid) == Escrow.State.Locked, "still Locked at cap");
+        assertEq(escrow.balances(seller), maxAmount, "seller fully paid");
+
+        // nothing left: even 1 unit of further capture exceeds the cap
+        vm.prank(seller);
+        vm.expectRevert(abi.encodeWithSelector(Escrow.ExceedsMaxAmount.selector, maxAmount + 1, maxAmount));
+        escrow.settlePartial(pid, 1);
+    }
+
+    function test_RevertSettlePartial_ExceedsMaxAmount() public {
+        _deposit(buyer, 100e6);
+        uint256 maxAmount = 10e6;
+        uint256 pid = _lock(maxAmount);
+
+        vm.startPrank(seller);
+        escrow.settlePartial(pid, 7e6);
+        // attempted cumulative total 7e6 + 4e6 = 11e6 > 10e6
+        vm.expectRevert(abi.encodeWithSelector(Escrow.ExceedsMaxAmount.selector, 11e6, maxAmount));
+        escrow.settlePartial(pid, 4e6);
+        vm.stopPrank();
+
+        assertEq(escrow.capturedOf(pid), 7e6, "failed capture left captured untouched");
+    }
+
+    function test_RevertSettlePartial_ZeroAmount() public {
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+
+        vm.prank(seller);
+        vm.expectRevert(Escrow.ZeroAmount.selector);
+        escrow.settlePartial(pid, 0);
+    }
+
+    function test_RevertSettlePartial_NotSeller() public {
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+
+        vm.prank(buyer);
+        vm.expectRevert(abi.encodeWithSelector(Escrow.NotSeller.selector, buyer, seller));
+        escrow.settlePartial(pid, 4e6);
+
+        vm.prank(thirdParty);
+        vm.expectRevert(abi.encodeWithSelector(Escrow.NotSeller.selector, thirdParty, seller));
+        escrow.settlePartial(pid, 4e6);
+    }
+
+    function test_RevertSettlePartial_NonexistentId() public {
+        vm.prank(seller);
+        vm.expectRevert(abi.encodeWithSelector(Escrow.NotLocked.selector, 42, Escrow.State.None));
+        escrow.settlePartial(42, 4e6);
+    }
+
+    function test_RevertSettlePartial_AfterTerminalStates() public {
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+
+        vm.prank(seller);
+        escrow.settle(pid, 4e6);
+        vm.prank(seller);
+        vm.expectRevert(abi.encodeWithSelector(Escrow.NotLocked.selector, pid, Escrow.State.Settled));
+        escrow.settlePartial(pid, 1e6);
+
+        uint256 pid2 = _lock(5e6);
+        (,,, uint64 expiry,) = escrow.getPayment(pid2);
+        vm.warp(expiry);
+        vm.prank(buyer);
+        escrow.refund(pid2);
+        vm.prank(seller);
+        vm.expectRevert(abi.encodeWithSelector(Escrow.NotLocked.selector, pid2, Escrow.State.Refunded));
+        escrow.settlePartial(pid2, 1e6);
+    }
+
+    /// @dev TTL policy aligned with `settle`: capture stays allowed while Locked,
+    ///      even past expiresAt (seller may flush usage after serving; races refund).
+    function test_SettlePartial_AfterTtl() public {
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+
+        (,,, uint64 expiry,) = escrow.getPayment(pid);
+        vm.warp(expiry + 1); // past expiry, before any refund
+
+        vm.prank(seller);
+        escrow.settlePartial(pid, 4e6);
+
+        assertEq(escrow.capturedOf(pid), 4e6, "captured after ttl");
+        assertTrue(_stateOf(pid) == Escrow.State.Locked, "still Locked");
+    }
+
+    /// @dev Boundary: exactly at expiresAt refund becomes available, but the
+    ///      payment is still Locked — settlePartial (like settle) still allowed.
+    function test_SettlePartial_AtExactTtlBoundary() public {
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+
+        (,,, uint64 expiry,) = escrow.getPayment(pid);
+        vm.warp(expiry);
+
+        vm.prank(seller);
+        escrow.settlePartial(pid, 2e6);
+        assertEq(escrow.capturedOf(pid), 2e6, "captured at boundary");
+    }
+
+    /// @dev Refund after partial captures pays out only maxAmount - captured.
+    function test_Refund_AfterPartial_DeductsCaptured() public {
+        _deposit(buyer, 100e6);
+        uint256 maxAmount = 10e6;
+        uint256 pid = _lock(maxAmount);
+
+        vm.prank(seller);
+        escrow.settlePartial(pid, 4e6);
+
+        (,,, uint64 expiry,) = escrow.getPayment(pid);
+        vm.warp(expiry);
+
+        vm.expectEmit(true, true, false, true, address(escrow));
+        emit Escrow.Refunded(pid, buyer, maxAmount - 4e6, buyer);
+
+        vm.prank(buyer);
+        escrow.refund(pid);
+
+        assertEq(escrow.balances(buyer), 90e6 + 6e6, "buyer refunded the remainder only");
+        assertEq(escrow.balances(seller), 4e6, "seller keeps captured");
+        assertTrue(_stateOf(pid) == Escrow.State.Refunded, "state Refunded");
+    }
+
+    /// @dev Edge: refund after the cap was fully captured transfers nothing but
+    ///      still terminates the payment (settle/settlePartial then revert).
+    function test_Refund_AfterFullCapture_ZeroPayout() public {
+        _deposit(buyer, 100e6);
+        uint256 maxAmount = 10e6;
+        uint256 pid = _lock(maxAmount);
+
+        vm.startPrank(seller);
+        escrow.settlePartial(pid, 10e6);
+        vm.stopPrank();
+
+        (,,, uint64 expiry,) = escrow.getPayment(pid);
+        vm.warp(expiry);
+
+        vm.expectEmit(true, true, false, true, address(escrow));
+        emit Escrow.Refunded(pid, buyer, 0, thirdParty);
+
+        vm.prank(thirdParty);
+        escrow.refund(pid);
+
+        assertEq(escrow.balances(buyer), 90e6, "buyer balance unchanged");
+        assertEq(escrow.balances(seller), maxAmount, "seller keeps all captured");
+        assertTrue(_stateOf(pid) == Escrow.State.Refunded, "terminated");
+
+        vm.prank(seller);
+        vm.expectRevert(abi.encodeWithSelector(Escrow.NotLocked.selector, pid, Escrow.State.Refunded));
+        escrow.settle(pid, maxAmount);
+    }
+
+    // --- settle x settlePartial interplay --------------------------------
+
+    /// @dev `actual` is the CUMULATIVE total owed to the seller: closing at
+    ///      exactly `captured` pays no top-up and refunds the remainder.
+    function test_Settle_AfterPartial_CloseOutAtCaptured() public {
+        _deposit(buyer, 100e6);
+        uint256 maxAmount = 10e6;
+        uint256 pid = _lock(maxAmount);
+
+        vm.startPrank(seller);
+        escrow.settlePartial(pid, 4e6);
+        vm.expectEmit(true, true, true, true, address(escrow));
+        emit Escrow.Settled(pid, buyer, seller, 4e6, 6e6);
+        escrow.settle(pid, 4e6);
+        vm.stopPrank();
+
+        assertEq(escrow.balances(seller), 4e6, "no double pay: only the capture");
+        assertEq(escrow.balances(buyer), 96e6, "buyer refunded the remainder");
+        assertEq(escrow.capturedOf(pid), maxAmount, "captured bumped to maxAmount");
+        assertTrue(_stateOf(pid) == Escrow.State.Settled, "terminal Settled");
+    }
+
+    /// @dev Top-up: settle declares a cumulative `actual` above `captured`.
+    function test_Settle_AfterPartial_TopUp() public {
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+
+        vm.startPrank(seller);
+        escrow.settlePartial(pid, 3e6);
+        escrow.settle(pid, 8e6); // cumulative 8e6: +5e6 top-up
+        vm.stopPrank();
+
+        assertEq(escrow.balances(seller), 8e6, "seller total == cumulative actual");
+        assertEq(escrow.balances(buyer), 92e6, "buyer gets maxAmount - actual");
+        assertTrue(_stateOf(pid) == Escrow.State.Settled, "terminal Settled");
+    }
+
+    function test_RevertSettle_ActualBelowCaptured() public {
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+
+        vm.startPrank(seller);
+        escrow.settlePartial(pid, 5e6);
+        vm.expectRevert(abi.encodeWithSelector(Escrow.BelowCaptured.selector, pid, 4e6, 5e6));
+        escrow.settle(pid, 4e6);
+        vm.stopPrank();
+
+        assertTrue(_stateOf(pid) == Escrow.State.Locked, "revert left state untouched");
+        assertEq(escrow.capturedOf(pid), 5e6, "captured untouched");
+    }
+
+    /// @dev Mixed sequence across payments: partials, close-out settle at a
+    ///      cumulative actual, refund with captured deduction, ongoing partially
+    ///      captured lock, withdraw. Token conservation must hold throughout:
+    ///      holdings == Σbalances + Σ(Locked: maxAmount - captured).
+    function test_Invariant_MixedPartialFlow_TokenConservation() public {
+        address buyer2 = makeAddr("buyer2");
+        _deposit(buyer, 100e6);
+        _deposit(buyer2, 50e6);
+
+        vm.startPrank(buyer);
+        uint256 p1 = escrow.lock(seller, 10e6, 0);
+        uint256 p2 = escrow.lock(seller, 8e6, 0);
+        vm.stopPrank();
+        vm.startPrank(buyer2);
+        uint256 p3 = escrow.lock(seller, 20e6, 0);
+        vm.stopPrank();
+
+        // p1: two partial captures, then close-out settle at cumulative 9e6
+        vm.startPrank(seller);
+        escrow.settlePartial(p1, 4e6);
+        escrow.settlePartial(p1, 3e6);
+        escrow.settle(p1, 9e6); // +2e6 top-up
+        // p2: single capture, stays Locked
+        escrow.settlePartial(p2, 5e6);
+        vm.stopPrank();
+
+        // p3: capture 6e6, then refund returns only 14e6 to the buyer
+        vm.startPrank(seller);
+        escrow.settlePartial(p3, 6e6);
+        vm.stopPrank();
+        (,,, uint64 p3Expiry,) = escrow.getPayment(p3);
+        vm.warp(p3Expiry);
+        vm.prank(thirdParty);
+        escrow.refund(p3);
+
+        // ongoing uncaptured lock
+        vm.startPrank(buyer2);
+        uint256 p4 = escrow.lock(seller, 7e6, 0);
+        vm.stopPrank();
+
+        // seller cashes out everything credited so far: 4+3+2 (p1) +5 (p2) +6 (p3) = 20e6
+        vm.startPrank(seller);
+        escrow.withdraw(20e6);
+        vm.stopPrank();
+
+        // ledger expectations
+        //  buyer: 100 -10(p1) -8(p2) +1(p1 settle remainder) = 83e6
+        assertEq(escrow.balances(buyer), 83e6, "buyer ledger");
+        //  buyer2: 50 -20(p3) +14(p3 refund) -7(p4 lock) = 37e6
+        assertEq(escrow.balances(buyer2), 37e6, "buyer2 ledger");
+        assertEq(escrow.balances(seller), 0, "seller fully withdrawn");
+        assertEq(escrow.balances(thirdParty), 0, "refund caller gains nothing");
+
+        // conservation: p2 Locked (captured 5e6), p4 Locked (captured 0)
+        uint256 sumBalances = escrow.balances(buyer) + escrow.balances(buyer2) + escrow.balances(seller);
+        uint256 sumLockedRemaining = (8e6 - 5e6) + (7e6 - 0);
+        assertEq(usdc.balanceOf(address(escrow)), sumBalances + sumLockedRemaining, "token conservation");
+
+        assertTrue(_stateOf(p1) == Escrow.State.Settled, "p1 settled");
+        assertTrue(_stateOf(p2) == Escrow.State.Locked, "p2 locked");
+        assertTrue(_stateOf(p3) == Escrow.State.Refunded, "p3 refunded");
+        assertTrue(_stateOf(p4) == Escrow.State.Locked, "p4 locked");
+        assertEq(escrow.capturedOf(p2), 5e6, "p2 captured");
+    }
+
+    /// @dev settlePartial is ledger-only like settle/refund: no external token
+    ///      call, hence no reentrancy surface.
+    function test_SettlePartial_NoExternalTokenCalls() public {
+        MaliciousToken token = new MaliciousToken();
+        escrow = new Escrow(IERC20(address(token)));
+
+        address b = makeAddr("b");
+        token.mint(b, 100e6);
+        vm.startPrank(b);
+        token.approve(address(escrow), 100e6);
+        escrow.deposit(100e6);
+        uint256 pid = escrow.lock(seller, 10e6, 0);
+        vm.stopPrank();
+
+        vm.prank(seller);
+        escrow.settlePartial(pid, 4e6);
+
+        assertEq(token.transferCalls(), 0, "no token push during partial capture");
+        assertEq(token.transferFromCalls(), 1, "only deposit pulled tokens");
+        assertEq(escrow.balances(seller), 4e6, "seller ledger credited");
+    }
+
+    // =====================================================================
     // withdraw
     // =====================================================================
 

@@ -13,10 +13,14 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  *   buyer --deposit--> credited balance
  *   buyer --lock(seller, maxAmount, ttl)--> payment becomes `Locked`
  *     (maxAmount is moved out of the buyer's withdrawable balance into the payment)
- *   seller --settle(paymentId, actual)--> seller credited `actual`, buyer credited
- *     the difference (maxAmount - actual); payment becomes `Settled`
+ *   seller --settlePartial(paymentId, amount)--> seller credited `amount` at once;
+ *     `captured` accumulates (captured + amount <= maxAmount) while the payment
+ *     STAYS `Locked` so further captures remain possible
+ *   seller --settle(paymentId, actual)--> seller credited up to a cumulative
+ *     `actual` (partial captures count toward it), buyer credited the difference
+ *     (maxAmount - actual); payment becomes `Settled`
  *   anyone --refund(paymentId) after ttl elapsed--> buyer credited back
- *     the full maxAmount; payment becomes `Refunded`
+ *     the remaining maxAmount - captured; payment becomes `Refunded`
  *   user --withdraw(amount)--> USDC transferred out of the contract
  *
  * UNITS: all amounts are native USDC units, i.e. USDC's 6 decimal places.
@@ -30,7 +34,8 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  *
  * NON-UPGRADEABLE: plain constructor deployment, no proxy, no owner/admin,
  * no privileged entry points. Every mutating function is permissionless except
- * `settle`, which is restricted to the seller designated at lock time.
+ * `settle` and `settlePartial`, which are restricted to the seller designated
+ * at lock time.
  */
 contract Escrow is ReentrancyGuard {
     using SafeERC20 for IERC20;
@@ -56,12 +61,18 @@ contract Escrow is ReentrancyGuard {
     /// @param expiresAt Timestamp (inclusive) until which the lock is valid;
     ///                  after this refund becomes available.
     /// @param state     Current lifecycle state.
+    /// @param captured  Cumulative amount already credited to the seller via
+    ///                  `settlePartial` (v2). Always <= maxAmount; deducted from
+    ///                  the payout on `refund` and counted toward `settle`'s
+    ///                  cumulative `actual`. Appended at the tail of the struct —
+    ///                  fresh v2 deployments only, no storage migration needed.
     struct Payment {
         address buyer;
         address seller;
         uint256 maxAmount;
         uint64 expiresAt;
         State state;
+        uint256 captured;
     }
 
     /*//////////////////////////////////////////////////////////////////////////
@@ -133,6 +144,13 @@ contract Escrow is ReentrancyGuard {
     /// @param expiresAt The timestamp at which refund becomes available.
     error TtlNotElapsed(uint256 paymentId, uint64 expiresAt);
 
+    /// @notice Settle declared a cumulative `actual` lower than the amount
+    ///         already captured via `settlePartial` (advances cannot be clawed back).
+    /// @param paymentId The payment id.
+    /// @param actual    The cumulative total declared by `settle`.
+    /// @param captured  The amount already captured for this payment.
+    error BelowCaptured(uint256 paymentId, uint256 actual, uint256 captured);
+
     /*//////////////////////////////////////////////////////////////////////////
                                      EVENTS
     //////////////////////////////////////////////////////////////////////////*/
@@ -158,6 +176,10 @@ contract Escrow is ReentrancyGuard {
         uint256 actualAmount,
         uint256 refundedAmount
     );
+
+    /// @notice Seller captured part of a locked payment (Escrow v2 metering).
+    ///         The payment stays `Locked`; `captured` is the new cumulative total.
+    event SettlePartial(uint256 indexed paymentId, uint256 amount, uint256 captured);
 
     /// @notice An expired lock was refunded to the buyer's balance.
     event Refunded(uint256 indexed paymentId, address indexed buyer, uint256 amount, address indexed caller);
@@ -240,7 +262,8 @@ contract Escrow is ReentrancyGuard {
             seller: seller,
             maxAmount: maxAmount,
             expiresAt: expiresAt,
-            state: State.Locked
+            state: State.Locked,
+            captured: 0
         });
 
         emit Locked(paymentId, msg.sender, seller, maxAmount, expiresAt);
@@ -248,16 +271,22 @@ contract Escrow is ReentrancyGuard {
 
     /**
      * @notice Settle a locked payment. Only the seller designated at lock time
-     *         may call. `actual` is credited to the seller's withdrawable
-     *         balance and the remainder (`maxAmount - actual`) is returned to
-     *         the buyer's withdrawable balance.
+     *         may call. `actual` is the CUMULATIVE total owed to the seller for
+     *         this payment: any amount already paid via `settlePartial` counts
+     *         toward it, so only the un-advanced remainder (`actual - captured`)
+     *         is credited here, and the buyer receives `maxAmount - actual`.
+     *         With `captured == 0` this is exactly the original one-shot behavior.
      * @dev A settle is allowed as long as the payment is still `Locked` — even
      *      after `expiresAt` — since the seller only calls this after having
      *      served the request. It races against (and is atomic with) `refund`.
+     *      Reverts with `BelowCaptured` if `actual < captured` (advances cannot
+     *      be clawed back). On success the payment reaches the terminal `Settled`
+     *      state and `captured` is bumped to `maxAmount` (fully consumed).
      * @param paymentId Id returned by `lock`.
-     * @param actual    Amount to pay the seller, in USDC native units (6 dp);
-     *                  must satisfy actual <= maxAmount. actual == 0 pays the
-     *                  seller nothing and returns the full maxAmount to the buyer.
+     * @param actual    Cumulative amount owed to the seller, in USDC native
+     *                  units (6 dp); must satisfy captured <= actual <= maxAmount.
+     *                  actual == 0 (and captured == 0) pays the seller nothing
+     *                  and returns the full maxAmount to the buyer.
      */
     function settle(uint256 paymentId, uint256 actual)
         external
@@ -267,16 +296,56 @@ contract Escrow is ReentrancyGuard {
         Payment storage payment = _payments[paymentId];
         if (msg.sender != payment.seller) revert NotSeller(msg.sender, payment.seller);
         if (actual > payment.maxAmount) revert ExceedsMaxAmount(actual, payment.maxAmount);
-
-        uint256 refunded = payment.maxAmount - actual;
+        if (actual < payment.captured) revert BelowCaptured(paymentId, actual, payment.captured);
 
         // Effects only: the tokens already sit in this contract since `lock`
         // moved the buyer's balance into the payment. No token transfer here.
+        // Partial captures were already credited; only the top-up is paid now.
+        uint256 sellerTopUp = actual - payment.captured;
+        uint256 refunded = payment.maxAmount - actual;
+
         payment.state = State.Settled;
-        if (actual > 0) balances[payment.seller] += actual;
+        payment.captured = payment.maxAmount; // fully consumed (terminal consistency)
+        if (sellerTopUp > 0) balances[payment.seller] += sellerTopUp;
         if (refunded > 0) balances[payment.buyer] += refunded;
 
         emit Settled(paymentId, payment.buyer, payment.seller, actual, refunded);
+    }
+
+    /**
+     * @notice Capture part of a locked payment (Escrow v2 per-key metering).
+     *         Only the seller designated at lock time may call. `amount` is
+     *         credited to the seller's withdrawable balance immediately and
+     *         accumulated in `captured`; the payment STAYS `Locked` so further
+     *         captures — as well as the one-shot `settle` and the `refund` —
+     *         remain available.
+     * @dev TTL policy matches `settle`: allowed while `Locked`, even after
+     *      `expiresAt` (the seller may flush usage after serving a request; it
+     *      races `refund` atomically). Ledger-only like `settle`: no external
+     *      token call, the seller pulls via `withdraw`. Requires
+     *      `captured + amount <= maxAmount` (reverts `ExceedsMaxAmount` with the
+     *      attempted total) and `amount > 0` (reverts `ZeroAmount` — a zero
+     *      capture is a meaningless no-op here, unlike `settle(actual=0)`).
+     * @param paymentId Id returned by `lock`.
+     * @param amount    Amount to capture now, in USDC native units (6 dp).
+     */
+    function settlePartial(uint256 paymentId, uint256 amount)
+        external
+        nonReentrant
+        onlyLocked(paymentId)
+    {
+        Payment storage payment = _payments[paymentId];
+        if (msg.sender != payment.seller) revert NotSeller(msg.sender, payment.seller);
+        _requireNonZero(amount);
+        if (payment.captured + amount > payment.maxAmount) {
+            revert ExceedsMaxAmount(payment.captured + amount, payment.maxAmount);
+        }
+
+        // Effects only: state stays Locked; the credit is ledger-only.
+        payment.captured += amount;
+        balances[payment.seller] += amount;
+
+        emit SettlePartial(paymentId, amount, payment.captured);
     }
 
     /**
@@ -285,6 +354,8 @@ contract Escrow is ReentrancyGuard {
      *         ANYONE may call it (permissionless cleanup of expired locks —
      *         gas is paid by the caller, funds always go to the buyer).
      * @dev Reverts while `block.timestamp < expiresAt` (TTL not yet elapsed).
+     *      Pays out the REMAINING escrow `maxAmount - captured`: anything the
+     *      seller already captured via `settlePartial` stays with the seller.
      * @param paymentId Id returned by `lock`.
      */
     function refund(uint256 paymentId) external nonReentrant onlyLocked(paymentId) {
@@ -294,7 +365,7 @@ contract Escrow is ReentrancyGuard {
         if (block.timestamp < payment.expiresAt) revert TtlNotElapsed(paymentId, payment.expiresAt);
 
         address buyer = payment.buyer;
-        uint256 amount = payment.maxAmount;
+        uint256 amount = payment.maxAmount - payment.captured;
 
         // Effect: transition before any accounting (terminal state, no interaction).
         payment.state = State.Refunded;
@@ -353,6 +424,17 @@ contract Escrow is ReentrancyGuard {
     {
         Payment storage payment = _payments[paymentId];
         return (payment.buyer, payment.seller, payment.maxAmount, payment.expiresAt, payment.state);
+    }
+
+    /**
+     * @notice Cumulative amount already captured for a payment via `settlePartial`
+     *         (Escrow v2). The remaining escrow — refundable after TTL, or
+     *         payable on a cumulative `settle` — is `maxAmount - capturedOf(id)`.
+     *         Additive view: `getPayment` keeps its original 5-value ABI shape
+     *         so existing relay/CLI/web consumers stay source-compatible.
+     */
+    function capturedOf(uint256 paymentId) external view returns (uint256) {
+        return _payments[paymentId].captured;
     }
 
     /**
