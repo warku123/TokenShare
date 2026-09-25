@@ -19,6 +19,7 @@
     listings: [],     // market listings (shared with buyer selects)
     myListing: null,
     lastPaymentId: null,
+    escrowBal: null,  // live Escrow balances(me), native 6dp BigInt — drives the lock gate
   };
 
   /* ═══ config gate ═════════════════════════════════════════ */
@@ -91,10 +92,12 @@
     state.signer = null;
     state.address = null;
     state.walletName = "";
+    state.escrowBal = null;
     usdcBal.textContent = "—";
     const mirror = $("b-wallet-usdc-mirror");
     if (mirror) mirror.textContent = "see wallet bar ↑";
     $("b-escrow-bal").textContent = "—";
+    syncLockGate();
     renderWallet();
     loadMyListing();
   }
@@ -133,9 +136,11 @@
     } catch { usdcBal.textContent = "—"; }
     try {
       const eb = await T.escrow(T.readProvider()).balances(state.address);
+      state.escrowBal = eb;
       $("b-escrow-bal").textContent = `$${T.fmtUsdc(eb)}`;
       $("b-escrow-bal").title = `${T.fmtInt(eb)} native units`;
-    } catch { $("b-escrow-bal").textContent = "—"; }
+    } catch { state.escrowBal = null; $("b-escrow-bal").textContent = "—"; }
+    syncLockGate(); /* lock form mirrors the balance + re-gates the button */
   }
 
   async function ensureChain() {
@@ -1088,6 +1093,24 @@
   }
   $("b-seller").addEventListener("change", syncSellerInfo);
 
+  /* — lock pre-check: the LOCK card shows the live escrow balance
+       (state.escrowBal, refreshed by refreshBalances() after connect and
+       after every deposit/withdraw/lock/refund). MAX AMOUNT above it
+       disables [ LOCK ] with an inline note — the chain would revert
+       InsufficientBalance, so the click never reaches the wallet. — */
+  function syncLockGate() {
+    const balEl = $("b-lock-bal");
+    const note = $("b-lock-bal-note");
+    const bal = state.escrowBal;
+    balEl.textContent = bal == null ? "—" : `$${T.fmtUsdc(bal)}`;
+    balEl.title = bal == null ? "" : `${T.fmtInt(bal)} native units`;
+    const sf = T.lockShortfall(readPrice("b-max"), bal);
+    note.hidden = !sf;
+    note.textContent = sf ? sf.text : "";
+    $("b-lock-btn").disabled = Boolean(sf);
+  }
+  $("b-max").addEventListener("input", syncLockGate);
+
   /* — deposit (approve → deposit) — */
   $("b-dep-btn").addEventListener("click", () => guard($("b-dep-btn"), async () => {
     if (needWallet() || needConfig()) return;
@@ -1110,7 +1133,7 @@
       }
       const rcpt = await T.runTx(T.txLine(txbox, `deposit(${T.fmtInt(amt)}) — step 2/2`), esc.deposit(amt));
       if (rcpt) await refreshBalances();
-    } catch (e) { formErr(txbox, e.shortMessage || e.message); }
+    } catch (e) { formErr(txbox, T.humanizeEscrowErr(e) || e.shortMessage || e.message); }
   }));
 
   /* — withdraw — */
@@ -1149,7 +1172,10 @@
     rlist.innerHTML = html;
   }
 
-  $("b-lock-btn").addEventListener("click", () => guard($("b-lock-btn"), async () => {
+  /* guard() unconditionally re-enables the button in its finally — the
+     trailing .finally re-applies the balance gate after every click run */
+  $("b-lock-btn").addEventListener("click", () =>
+    Promise.resolve(guard($("b-lock-btn"), async () => {
     if (needWallet() || needConfig()) return;
     const txbox = $("b-lock-tx");
     txbox.innerHTML = "";
@@ -1160,6 +1186,9 @@
     if (!l) return formErr(txbox, "choose a seller");
     if (max === null || max <= 0n) return formErr(txbox, "enter a positive maxAmount (≤6 decimals)");
     if (!ttl || ttl < 60) return formErr(txbox, "ttl ≥ 60s");
+    /* belt under the disabled-button gate (stale balance, devtools re-enable) */
+    const sf = T.lockShortfall(max, state.escrowBal);
+    if (sf) return formErr(txbox, sf.text);
     const min = T.maxMinAmountEstimate(l);
     if (max < min) formErr(txbox, `note: maxAmount below relay min estimate $${T.fmtUsdc(min)} — calls will 402`);
 
@@ -1183,7 +1212,7 @@
       $("b-payment-id").innerHTML = `<span class="dim mono">Locked — paymentId in the Locked event (see tx)</span>`;
     }
     await refreshBalances();
-  }));
+    })).finally(syncLockGate));
 
   /* — call demo — */
   function syncCallModels() {
@@ -1345,7 +1374,7 @@
       info.el.querySelector(".txl-state").innerHTML =
         `state <b>${st}</b> · max $${T.fmtUsdc(p.maxAmount)} · expires ${new Date(Number(p.expiresAt) * 1000).toLocaleTimeString()}`;
       if (st !== "Locked") return formErr(txbox, `payment is ${st} — only Locked can be refunded`);
-    } catch (e) { return formErr(txbox, e.shortMessage || e.message); }
+    } catch (e) { return formErr(txbox, T.humanizeEscrowErr(e) || e.shortMessage || e.message); }
 
     const rcpt = await T.runTx(T.txLine(txbox, `refund(${pid})`), T.escrow(state.signer).refund(pid));
     if (rcpt) await refreshBalances();

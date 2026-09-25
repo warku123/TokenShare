@@ -153,6 +153,7 @@
       <article class="card rv">
         <h2 class="card-title">LOCK<span class="card-tag">Escrow.lock → paymentId</span></h2>
         <div class="card-body">
+          <div class="bal-row"><span>ESCROW balances(me) <i>live</i></span><b class="mono" id="b-lock-bal">—</b></div>
           <label class="fld"><span class="fld-lbl">SELLER <i>from the market listings</i></span>
             <select id="b-seller"><option value="">— choose seller —</option></select></label>
           <div class="mini-info" id="b-lock-info"><p class="empty-hint">pick a seller to see per-model tier prices and the minAmount estimate.</p></div>
@@ -163,6 +164,7 @@
               <input type="number" id="b-ttl" value="600" min="60" step="60"></label>
           </div>
           <p class="fld-hint" id="b-lock-hint">≥ the seller's priciest-model estimate (in×200k + out×32k caps) — see per-model tiers on the market page</p>
+          <p class="fld-hint err" id="b-lock-bal-note" hidden></p>
           <button class="btn btn-wide" id="b-lock-btn" type="button">[ LOCK ]</button>
           <div class="txbox" id="b-lock-tx"></div>
           <div class="pid-box" id="b-payment-id"></div>

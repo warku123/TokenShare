@@ -726,6 +726,7 @@ h1 {
 .fld-lbl { font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; color: var(--dim); }
 .fld-lbl i { color: var(--faint); font-style: normal; letter-spacing: 0.04em; text-transform: none; }
 .fld-hint { font-family: var(--mono); font-size: 11px; color: var(--faint); line-height: 1.6; }
+.fld-hint.err { color: var(--red); }
 .fld-row { display: flex; gap: 12px; align-items: flex-end; }
 .fld-row .fld { flex: 1; }
 .btn-end { flex: none; }

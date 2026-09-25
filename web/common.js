@@ -33,6 +33,17 @@ window.TS = (() => {
     "function withdraw(uint256 amount)",
     "event Locked(uint256 indexed paymentId, address indexed buyer, address indexed seller, uint256 maxAmount, uint64 expiresAt)",
     "event Refunded(uint256 indexed paymentId, address indexed buyer, uint256 amount, address indexed caller)",
+    /* custom errors (contracts/src/Escrow.sol) — declared so ethers
+       decodes reverts into e.revert {name, args} for human-readable
+       UI copy (was: "execution reverted (unknown custom error)") */
+    "error ZeroAmount()",
+    "error InvalidSeller()",
+    "error SelfLock()",
+    "error InsufficientBalance(uint256 requested, uint256 available)",
+    "error NotLocked(uint256 paymentId, uint8 state)",
+    "error NotSeller(address caller, address seller)",
+    "error ExceedsMaxAmount(uint256 actual, uint256 maxAmount)",
+    "error TtlNotElapsed(uint256 paymentId, uint64 expiresAt)",
   ];
 
   /* Registry v2 (M9, contracts/src/Registry.sol): per-model pricing.
@@ -112,7 +123,87 @@ window.TS = (() => {
     return s + "0".repeat(Math.max(0, 7 - (s.length - s.indexOf("."))));
   };
   const fmtUsdcTrim = (native) => ethers.formatUnits(native, 6);
+  /* like fmtUsdcTrim but drops the padding dust: 10.0 → 10, 2.999674 stays */
+  const fmtUsdcBare = (native) => {
+    const s = fmtUsdcTrim(native);
+    return s.includes(".") ? s.replace(/0+$/, "").replace(/\.$/, "") : s;
+  };
   const fmtInt = (native) => Number(native).toLocaleString("en-US");
+
+  /* ── Escrow custom-error → human copy ──────────────────────
+     ethers v6 populates e.revert {name, args} when the error is
+     declared in the ABI (ESCROW_ABI above); a raw revert-data
+     selector match is the fallback for errors that arrive detached
+     (nested e.info.error.data); a message-name match comes last. */
+  const ESCROW_ERR_SIGS = {
+    ZeroAmount: "ZeroAmount()",
+    InvalidSeller: "InvalidSeller()",
+    SelfLock: "SelfLock()",
+    InsufficientBalance: "InsufficientBalance(uint256,uint256)",
+    NotLocked: "NotLocked(uint256,uint8)",
+    NotSeller: "NotSeller(address,address)",
+    ExceedsMaxAmount: "ExceedsMaxAmount(uint256,uint256)",
+    TtlNotElapsed: "TtlNotElapsed(uint256,uint64)",
+  };
+  const ESCROW_ERR_IFACE = new ethers.Interface(Object.values(ESCROW_ERR_SIGS).map((s) => "error " + s));
+
+  /* → {name, args} or null when the error is not an Escrow custom error */
+  function decodeEscrowErr(e) {
+    if (e && e.revert && e.revert.name && ESCROW_ERR_SIGS[e.revert.name]) {
+      return { name: e.revert.name, args: e.revert.args || [] };
+    }
+    const raw = e && (typeof e.data === "string" ? e.data : (e.info && e.info.error && e.info.error.data));
+    if (typeof raw === "string" && raw.startsWith("0x") && raw.length >= 10) {
+      try {
+        const parsed = ESCROW_ERR_IFACE.parseError(raw);
+        if (parsed) return { name: parsed.name, args: parsed.args };
+      } catch { /* not an Escrow error */ }
+    }
+    const msg = String((e && (e.shortMessage || e.reason || e.message)) || "");
+    const named = Object.keys(ESCROW_ERR_SIGS).find((k) => msg.includes(k));
+    return named ? { name: named, args: [] } : null;
+  }
+
+  /* → human sentence (with the decoded numbers inline) or null */
+  function humanizeEscrowErr(e) {
+    const d = decodeEscrowErr(e);
+    if (!d) return null;
+    const a = d.args || [];
+    switch (d.name) {
+      case "ZeroAmount": return "amount must be > 0 (ZeroAmount)";
+      case "InvalidSeller": return "invalid seller address (InvalidSeller) — pick a seller from the market listing";
+      case "SelfLock": return "buyer and seller are the same address (SelfLock) — a lock needs two different parties";
+      case "InsufficientBalance":
+        return a.length >= 2
+          ? `insufficient escrow balance — escrow $${fmtUsdcBare(a[1])} < requested $${fmtUsdcBare(a[0])}; deposit $${fmtUsdcBare(a[0] - a[1])} more first (InsufficientBalance)`
+          : "insufficient escrow balance (InsufficientBalance) — deposit first";
+      case "NotLocked":
+        return a.length >= 2
+          ? `payment #${a[0].toString()} is ${PAYMENT_STATES[Number(a[1])] || "?"} — not Locked (NotLocked)`
+          : "payment is not Locked (NotLocked) — wrong id, or already settled/refunded";
+      case "NotSeller": return "only the lock's designated seller may settle (NotSeller)";
+      case "ExceedsMaxAmount":
+        return a.length >= 2
+          ? `settle amount $${fmtUsdcBare(a[0])} exceeds the locked max $${fmtUsdcBare(a[1])} (ExceedsMaxAmount)`
+          : "settle amount exceeds the locked max (ExceedsMaxAmount)";
+      case "TtlNotElapsed":
+        return a.length >= 2
+          ? `lock #${a[0].toString()} has not expired — refundable after ${new Date(Number(a[1]) * 1000).toLocaleString()} (TtlNotElapsed)`
+          : "lock has not expired yet (TtlNotElapsed) — refund opens once the ttl elapses";
+      default: return null;
+    }
+  }
+
+  /* lock pre-check: MAX AMOUNT vs the live escrow balance. null = fine;
+     otherwise {more} + the inline-note copy (native 6dp BigInts in). */
+  function lockShortfall(maxNative, balNative) {
+    if (maxNative == null || balNative == null || maxNative <= balNative) return null;
+    const more = maxNative - balNative;
+    return {
+      more,
+      text: `insufficient escrow balance — deposit $${fmtUsdcBare(more)} more (escrow $${fmtUsdcBare(balNative)} < lock $${fmtUsdcBare(maxNative)})`,
+    };
+  }
 
   /* ── display helpers ─────────────────────────────────────── */
   const esc = (s) =>
@@ -512,7 +603,9 @@ window.TS = (() => {
       hash(h) { set("is-pending", `broadcast · <a href="${txLink(h)}" target="_blank" rel="noopener">${esc(h.slice(0, 12))}…${esc(h.slice(-6))}</a>`); },
       confirmed(h) { set("is-ok", `confirmed${h ? ` · <a href="${txLink(h)}" target="_blank" rel="noopener">view tx</a>` : ""}`); },
       failed(err) {
-        const msg = (err && (err.shortMessage || err.reason || err.message)) || "failed";
+        /* Escrow custom errors get the human sentence first — raw ethers
+           copy ("execution reverted (unknown custom error)") is the fallback */
+        const msg = humanizeEscrowErr(err) || (err && (err.shortMessage || err.reason || err.message)) || "failed";
         const rejected = (err && (err.code === "ACTION_REJECTED" || err.code === 4001 ||
           (err.info && err.info.error && err.info.error.code === 4001)));
         set("is-bad", rejected ? "rejected in wallet" : `reverted/failed — ${esc(msg)}`);
@@ -998,6 +1091,7 @@ window.TS = (() => {
     RELAY_CHAT_PATH, buildEip191Message,
     RECEIPT_DOMAIN_NAME, RECEIPT_DOMAIN_VERSION, RECEIPT_TYPES,
     decodeReceiptHeader, verifyReceipt,
+    decodeEscrowErr, humanizeEscrowErr, lockShortfall,
     txLine, runTx, parseLockedPaymentId,
     locks, disputes, relayErrorCopy,
     wallet, WALLET_RDNS_KEY,

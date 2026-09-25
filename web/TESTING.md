@@ -94,6 +94,8 @@ Monad testnet (chainId 10143) · Escrow/Registry/USDC 已部署（见 `web/confi
 - [ ] 余额卡：钱包 USDC + Escrow `balances(me)`；WITHDRAW 输入金额→tx 流→余额刷新
 - [ ] DEPOSIT： allowance 不足时 `approve → deposit` 两笔步进；充足时 approve 自动跳过
 - [ ] LOCK：选卖家（下拉=Registry 链上枚举，RPC 失败降级 config sellers，与市场页同源）→ 按模型逐行显示三档价 + 各模型 minAmount 估计（in×200k+out×32k caps)；hint 取最贵模型估计，低于它给黄色提醒但仍可发；成功→大字 paymentId（点击复制）+ 自动带入 CALL DEMO
+- [ ] LOCK 余额预校验：LOCK 卡顶部内嵌实时 `ESCROW balances(me)`（连接即拉取，deposit/withdraw/lock/refund 成功后刷新）；MAX AMOUNT > 余额时 `[ LOCK ]` 禁点 + 红字「insufficient escrow balance — deposit $N more (escrow $X < lock $Y)」；金额降回余额内即自动解禁（实测：余额 2.999674、填 10 → 禁点 + 提示 deposit $7.000326 more）
+- [ ] Escrow revert 人话：绕过预校验造成链上 revert（如另一窗口先 lock 把钱占走再发，或未到期 refund 触发 TtlNotElapsed）→ tx 行显示带参数的人话（如「insufficient escrow balance — escrow $2.999674 < requested $10; deposit $7.000326 more first (InsufficientBalance)」），不再出现 unknown custom error
 - [ ] CALL DEMO:model 下拉=所选卖家 listing models；prompt → `[ SIGN + CALL ]`
   - 终端 trace:EIP-191 msg 明文（`POST|/v1/chat/completions|<64hex>|<paymentId>`)→ MetaMask personal_sign → POST
   - **恶意 relay usage 注入（rev-4 C1）**：mock relay 返回 `"usage": {"prompt_tokens": "<img onerror=alert(1)>", "cached_tokens": "<script>...", "completion_tokens": {"x":1}}` → trace 中三字段按纯文本转义显示（可见 `<img …>` 原文），无脚本执行、无节点注入、正常数值显示与之前逐字符一致
