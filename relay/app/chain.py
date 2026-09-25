@@ -121,22 +121,38 @@ _SETTLE_PARTIAL_SIGNATURE = "settlePartial(uint256,uint256)"
 # Hardcoded PIN selector, cross-checked against keccak at call time.
 _SETTLE_PARTIAL_SELECTOR = "c97ac54c"
 
+# SEC1-3: Escrow v2 captured getter (read-only eth_call, ABI-free for the
+# same reason as settle_partial — the artifact may lag the deployed v2).
+_CAPTURED_OF_SIGNATURE = "capturedOf(uint256)"
+_CAPTURED_OF_SELECTOR = "d5d177a3"
+
+
+def _check_selector(signature: str, expected: str) -> str:
+    selector = keccak(signature.encode("ascii"))[:4].hex()
+    if selector != expected:
+        raise RuntimeError(
+            f"selector drift: PIN says {expected}, keccak gives {selector} "
+            f"for {signature}"
+        )
+    return selector
+
 
 def _encode_settle_partial_calldata(payment_id: int, amount: int) -> str:
     """0x-prefixed calldata for settlePartial(uint256,uint256):
     4-byte selector + two 32-byte big-endian uint256 words."""
-    selector = keccak(_SETTLE_PARTIAL_SIGNATURE.encode("ascii"))[:4].hex()
-    if selector != _SETTLE_PARTIAL_SELECTOR:
-        raise RuntimeError(
-            "settlePartial selector drift: PIN says "
-            f"{_SETTLE_PARTIAL_SELECTOR}, keccak gives {selector}"
-        )
+    selector = _check_selector(_SETTLE_PARTIAL_SIGNATURE, _SETTLE_PARTIAL_SELECTOR)
     return (
         "0x"
         + selector
         + payment_id.to_bytes(32, "big").hex()
         + amount.to_bytes(32, "big").hex()
     )
+
+
+def _encode_captured_of_calldata(payment_id: int) -> str:
+    """0x-prefixed calldata for capturedOf(uint256)."""
+    selector = _check_selector(_CAPTURED_OF_SIGNATURE, _CAPTURED_OF_SELECTOR)
+    return "0x" + selector + payment_id.to_bytes(32, "big").hex()
 
 
 class ChainClient:
@@ -205,6 +221,16 @@ class ChainClient:
             "expiresAt": int(expires_at),
             "state": int(state),
         }
+
+    def captured_of(self, payment_id: int) -> int:
+        """Escrow v2 capturedOf(paymentId) → the on-chain captured total
+        (SEC1-3). ABI-free eth_call via the PIN selector (same rationale as
+        settle_partial — the Foundry artifact may lag the deployed contract).
+        Read-only: never taken under _SETTLE_LOCK. Raises on revert — callers
+        (relay main) degrade conservatively to 0; an empty return decodes 0."""
+        data = _encode_captured_of_calldata(payment_id)
+        result = self._w3.eth.call({"to": self.escrow.address, "data": data})
+        return int.from_bytes(result, "big") if result else 0
 
     def get_listing(self, operator: str) -> dict[str, Any] | None:
         """Registry.getListing(operator) → parsed listing, or None when the

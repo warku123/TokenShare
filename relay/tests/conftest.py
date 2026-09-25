@@ -69,6 +69,10 @@ class FakeChain:
     payment_buyer: str = BUYER
     settle_partial_calls: list[tuple[int, int]] = []
     settle_partial_fails: bool = False
+    # SEC1-3: chain captured total as capturedOf would report it (restart
+    # seeding knob) + getter-failure knob (conservative 0 fallback path).
+    chain_captured: int = 0
+    captured_of_fails: bool = False
     listing_active: bool = True
     listing_registered: bool = True
     models: list[str] = ["gpt-4o-mini", ""]
@@ -99,6 +103,8 @@ class FakeChain:
         cls.payment_buyer = BUYER
         cls.settle_partial_calls = []
         cls.settle_partial_fails = False
+        cls.chain_captured = 0
+        cls.captured_of_fails = False
         cls.listing_active = True
         cls.listing_registered = True
         cls.models = ["gpt-4o-mini", ""]
@@ -171,6 +177,12 @@ class FakeChain:
             raise RuntimeError("rpc down")
         type(self).settle_partial_calls.append((payment_id, amount))
         return {"status": 1}
+
+    def captured_of(self, payment_id: int) -> int:
+        """SEC1-3 mirror of ChainClient.captured_of."""
+        if type(self).captured_of_fails:
+            raise RuntimeError("getter unavailable")
+        return type(self).chain_captured
 
 
 # --------------------------------------------------------------------------

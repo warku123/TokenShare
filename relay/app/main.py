@@ -567,39 +567,65 @@ _FLUSH_DEN = 10
 class _LedgerEntry:
     __slots__ = ("captured", "pending", "max_amount")
 
-    def __init__(self, max_amount: int) -> None:
+    def __init__(self, max_amount: int | None) -> None:
         self.captured = 0
         self.pending = 0
+        # None until the first plan_capture re-bases it (chain-seeded entries
+        # are created before any budget is known — the usage endpoint then
+        # falls back to getPayment).
         self.max_amount = max_amount
 
 
 class PartialSettleLedger:
     """In-memory capture ledger {paymentId: entry} for the bearer partial
-    path (M13-B/D).
+    path (M13-B/D, SEC1 revisions).
 
-    RESTART SEMANTICS (decided, conservative): the ledger is memory-only; a
-    relay restart resets every paymentId's captured to 0. Escrow v2 at PIN
-    time exposes no captured getter (getPayment carries no captured field),
-    so the relay cannot reseed from chain. Risk, per the M13 PIN: a replayed
-    capture after restart can push settlePartial past the contract's own
-    captured≤maxAmount cap — that tx reverts and surfaces as
-    partial-flush-failed (never swallowing the LLM response; buyer refund
-    intact). If the contracts lane later adds a getter, only `captured_of`
-    below needs wiring — nothing else touches this class."""
+    RESTART SEMANTICS (SEC1-3): the ledger is memory-only, but the first
+    request that touches a paymentId after a restart seeds `captured` from
+    the chain via Escrow v2 capturedOf (seed_and_get; conservative 0 when the
+    read fails — logged). Gates and the usage view therefore work against the
+    REAL accrued total, and a legacy fold-settle can never under-shoot the
+    on-chain captured floor.
+
+    BUDGET REFRESH (SEC1-1): entry.max_amount is NOT a first-request cache —
+    plan_capture re-bases it from the CURRENT request's effective budget
+    (min(on-chain maxAmount, grant.m)) on every call."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._entries: dict[int, _LedgerEntry] = {}
 
+    def seed_and_get(self, payment_id: int, read_captured: Any) -> int:
+        """Return the current captured total, creating the entry seeded from
+        the chain (read_captured() → Escrow v2 capturedOf) on first sight.
+        The chain read happens OUTSIDE the lock; a concurrent creator wins
+        and its seeding is kept. Sync — run via asyncio.to_thread."""
+        with self._lock:
+            entry = self._entries.get(payment_id)
+            if entry is not None:
+                return entry.captured
+        seeded = int(read_captured())
+        with self._lock:
+            entry = self._entries.get(payment_id)
+            if entry is None:
+                entry = _LedgerEntry(None)  # budget re-based by plan_capture
+                entry.captured = seeded
+                self._entries[payment_id] = entry
+            return entry.captured
+
     def plan_capture(self, payment_id: int, actual: int, max_amount: int) -> int:
         """PIN clamp: capture = min(actual, maxAmount - captured); below 1
-        native unit nothing is recorded (dust absorbed). Returns the captured
-        amount (0 = nothing recorded)."""
+        native unit nothing is recorded (dust absorbed). `max_amount` is the
+        CURRENT request's effective budget and is re-based onto the entry
+        every call (SEC1-1: never a stale first-request cache). Returns the
+        captured amount (0 = nothing recorded)."""
         with self._lock:
             entry = self._entries.get(payment_id)
             if entry is None:
                 entry = _LedgerEntry(max_amount)
                 self._entries[payment_id] = entry
+            else:
+                entry.max_amount = max_amount
             capture = min(actual, entry.max_amount - entry.captured)
             if capture < 1:
                 return 0
@@ -634,6 +660,12 @@ class PartialSettleLedger:
             entry = self._entries.get(payment_id)
             return entry.pending if entry is not None else 0
 
+    def clear(self, payment_id: int) -> None:
+        """Drop the entry — after a terminal settle (SEC1-2: settle() ends the
+        payment, no further captures/flushes may accrue against it)."""
+        with self._lock:
+            self._entries.pop(payment_id, None)
+
     def snapshot(self, payment_id: int) -> tuple[int, int | None]:
         """(captured, max_amount | None) — max_amount None when this process
         never saw the payment (usage endpoint falls back to getPayment)."""
@@ -642,10 +674,6 @@ class PartialSettleLedger:
             if entry is None:
                 return 0, None
             return entry.captured, entry.max_amount
-
-    def captured_of(self, payment_id: int) -> int:  # future chain-getter seam
-        """Single wiring point if a chain captured getter lands later."""
-        return self.captured(payment_id)
 
 
 @dataclass(frozen=True)
@@ -666,14 +694,18 @@ def _b64url_decode(part: str) -> bytes:
 
 def _grant_int(payload: dict[str, Any], field: str) -> int:
     """Grant payload integer field: JSON int or decimal string (bools and
-    anything else rejected → 401, aligned with the X-Payment-Id face)."""
+    anything else rejected → 401, aligned with the X-Payment-Id face).
+    SEC1 顺手项: values beyond uint256 are rejected HERE as 401 — letting
+    them through would surface later as an ABI to_bytes OverflowError (500)."""
     value = payload.get(field)
     if isinstance(value, bool):
         raise HTTPException(status_code=401, detail=f"api key payload {field!r} invalid")
-    if isinstance(value, int) and value >= 0:
+    if isinstance(value, int) and 0 <= value < (1 << 256):
         return value
     if isinstance(value, str) and value.isascii() and value.isdigit():
-        return int(value)
+        parsed = int(value)
+        if parsed < (1 << 256):
+            return parsed
     raise HTTPException(status_code=401, detail=f"api key payload {field!r} invalid")
 
 
@@ -745,6 +777,21 @@ def _verify_bearer_grant(grant: BearerGrant, payment: dict[str, Any]) -> None:
         raise HTTPException(status_code=401, detail="api key signer is not the granted buyer")
     if recovered.lower() != str(payment["buyer"]).lower():
         raise HTTPException(status_code=401, detail="api key buyer does not match payment buyer")
+
+
+def _read_chain_captured(st: RelayState, payment_id: int) -> int:
+    """Escrow v2 capturedOf(paymentId) with a conservative 0 fallback (SEC1-3):
+    a getter revert (legacy v1 escrow / unknown payment) or a transient RPC
+    failure degrades to the original restart posture (seed 0) instead of
+    failing requests — seeding is hardening, never a hard dependency."""
+    try:
+        return int(st.chain.captured_of(payment_id))
+    except Exception:
+        logger.warning(
+            "capturedOf read failed paymentId=%s — seeding ledger captured with 0",
+            payment_id,
+        )
+        return 0
 
 
 async def _flush_pending_sync(st: RelayState, payment_id: int) -> bool:
@@ -829,13 +876,19 @@ async def _partial_capture_and_maybe_flush(
 async def payment_usage(payment_id: int) -> dict[str, Any]:
     """Accrued-usage view (M13): {paymentId, captured, maxAmount, remaining}.
 
-    `captured` is the relay's accrued total (may lead the on-chain captured
-    counter while a background flush is in flight; resets to 0 on restart —
-    see PartialSettleLedger). `maxAmount` comes from the ledger entry when
-    this process has served the payment, otherwise from Escrow.getPayment.
-    Unauthenticated by design (same posture as GET /receipt/{id})."""
+    `captured` is chain-SEEDED via capturedOf when this process has no entry
+    (SEC1-3) — a restarted relay reports the real accrued total instead of
+    resetting to 0; it may still lead the on-chain counter while a background
+    flush is in flight. `maxAmount` comes from the ledger's effective budget
+    when present, otherwise from Escrow.getPayment. Unauthenticated by design
+    (same posture as GET /receipt/{id})."""
     st = _get_state()
-    captured, entry_max = st.ledger.snapshot(payment_id)
+    captured = await asyncio.to_thread(
+        st.ledger.seed_and_get,
+        payment_id,
+        lambda: _read_chain_captured(st, payment_id),
+    )
+    _, entry_max = st.ledger.snapshot(payment_id)
     max_amount = entry_max
     if max_amount is None:
         payment = await asyncio.to_thread(st.chain.get_payment, payment_id)
@@ -1017,15 +1070,41 @@ async def _try_settle(
     st: RelayState, payment_id: int, usage: Usage, prices: Prices, max_amount: int
 ) -> tuple[bool, int]:
     """Price + settle. Returns (settled, actual). Never raises — a settle
-    failure must not swallow the LLM response (PIN semantics)."""
+    failure must not swallow the LLM response (PIN semantics).
+
+    SEC1-2 (CHOSEN FIX ① — unified settlement semantics): Escrow v2 settle
+    requires actual ≥ the on-chain captured total, so after bearer partial
+    captures a plain clamp(actual) would revert BelowCaptured FOREVER (→ free
+    service within ttl). The ledger's accrued total — including un-flushed
+    pending, atomically CLAIMED here so an already-scheduled background flush
+    no-ops instead of double-sending — is folded into ONE final settle:
+        total = min(captured + clamp(actual), maxAmount)
+    On success the entry is cleared (Settled is terminal). On failure the
+    claimed pending is NOT restored to `pending`: it stays folded into
+    `captured` and the next settle retry carries it — a later bearer flush
+    can therefore never double-count it (the buyer cannot be overcharged).
+    Acceptable narrow edge (documented): a background flush already IN FLIGHT
+    (claimed+mid-send) cannot be recalled; both txs serialize on _SETTLE_LOCK
+    and the straggler settlePartial reverts on the settled/over-captured
+    state — mixed-mode concurrency inside one flush window only."""
     actual = compute_actual(usage, prices)
     settle_amount = clamp_settle_amount(actual, max_amount)
+    # Seed captured from the chain when this process has no entry (SEC1-3:
+    # e.g. restart after bearer captures) — no-op once the entry exists.
+    await asyncio.to_thread(
+        st.ledger.seed_and_get,
+        payment_id,
+        lambda: _read_chain_captured(st, payment_id),
+    )
+    st.ledger.take_pending(payment_id)  # claim un-flushed: bg flush no-ops
+    total = min(st.ledger.captured(payment_id) + settle_amount, max_amount)
     try:
-        await asyncio.to_thread(st.chain.settle, payment_id, settle_amount)
-        return True, actual
+        await asyncio.to_thread(st.chain.settle, payment_id, total)
     except Exception:
         logger.exception("settle failed for paymentId=%s", payment_id)
         return False, actual
+    st.ledger.clear(payment_id)
+    return True, actual
 
 
 async def _settle_and_stamp_headers(
@@ -1327,11 +1406,49 @@ async def _chat_completions_bearer(st: RelayState, request: Request, raw_body: b
             status_code=402, detail="payment invalid (unpaid/wrong seller/expired)"
         )
 
-    # Capture budget: the grant's m clamped by the on-chain maxAmount. An
-    # inflated m (self-minted by the buyer) would otherwise turn every flush
-    # into a doomed settlePartial revert — min() keeps the ledger bounded by
-    # what the contract will actually accept.
-    max_amount = min(int(payment["maxAmount"]), grant.max_amount)
+    # SEC1-3: seed the ledger from the chain's capturedOf (no-op once the
+    # entry exists) so the budget gate works against the REAL accrued total
+    # after a relay restart, not a reset-to-0 guess.
+    captured = await asyncio.to_thread(
+        st.ledger.seed_and_get,
+        grant.payment_id,
+        lambda: _read_chain_captured(st, grant.payment_id),
+    )
+
+    # SEC1-1 budget admission gate — BEFORE forwarding. ① The CHAIN budget is
+    # authoritative: a self-minted grant.m can never extend it, and once the
+    # remaining headroom cannot cover a min-priced call the relay must refuse
+    # service instead of serving for free until ttl.
+    chain_budget = int(payment["maxAmount"])
+    chain_remaining = chain_budget - captured
+    if chain_remaining < min_amount:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": "payment budget exhausted",
+                "remaining": max(chain_remaining, 0),
+                "minAmount": min_amount,
+            },
+        )
+    # ② grant.m is the buyer's own (possibly tighter) limit: respected —
+    # refusal to serve once its headroom cannot cover a call either.
+    grant_remaining = grant.max_amount - captured
+    if grant_remaining < min_amount:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": "api key limit exhausted",
+                "remaining": max(grant_remaining, 0),
+                "minAmount": min_amount,
+            },
+        )
+
+    # Capture budget: effective cap = min(on-chain, grant.m), passed to the
+    # ledger so plan_capture RE-BASES the entry budget every request (SEC1-1:
+    # never a stale first-request cache). An inflated m is already bounded by
+    # ①; min() additionally keeps the clamp honest against a shrunken chain
+    # maxAmount read.
+    max_amount = min(chain_budget, grant.max_amount)
     expires_at = int(payment["expiresAt"])
 
     if body.get("stream"):
