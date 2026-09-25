@@ -42,6 +42,11 @@ base_sepolia local path = EVERYTHING on this machine:
      explicit because the CLI's cap-based default can exceed the deposit) ->
      refund the short lock after its TTL expires. CLI output must contain the
      model reply, `Settle status: settled` and `Receipt verification: OK`.
+     M13 (fork path only): a dedicated short lock is consumed TWICE via the
+     CLI-minted stateless bearer API key (`mint-key`) — both calls must be
+     200 with X-Receipts, the on-chain SettlePartial logs must accumulate
+     exactly the two captures while the payment STAYS Locked, and the refund
+     after the TTL must return exactly maxAmount - captured.
   7. On-chain asserts: Escrow payment Settled (state=2), settled amount equals
      the PIN pricing formula, escrow balances moved buyer->seller; refund path
      leaves the payment Refunded (state=3) with the buyer credited back.
@@ -154,6 +159,16 @@ CALL_MAX_USDC = "5"
 # Short lock for the refund path: lock 1 USDC with ttl=3s, then refund.
 REFUND_MAX_USDC = "1"
 REFUND_TTL_S = 3
+# M13 partial-settle segment (fork path): a dedicated short lock consumed via
+# the CLI-minted bearer API key — two relay calls capture per call while the
+# payment STAYS Locked; after the TTL the refund returns maxAmount - captured.
+PARTIAL_MAX_USDC = "1"
+PARTIAL_TTL_S = 8
+PARTIAL_PROMPT = "Explain stateless signed API keys in one sentence."
+# The relay flushes captures on-chain asynchronously after each response
+# (M13 PIN: per-response async flush / threshold / TTL-window) — poll up to
+# this long for the SettlePartial logs before declaring failure.
+SETTLE_PARTIAL_POLL_S = 25.0
 def pin_actual(prices: dict[str, int], prompt_tokens: int, cached_tokens: int,
                completion_tokens: int) -> int:
     """PIN actual — verbatim relay/app/pricing.py compute_actual:
@@ -497,6 +512,40 @@ ESCROW_ABI = [
         "stateMutability": "view",
         "inputs": [{"name": "account", "type": "address"}],
         "outputs": [{"type": "uint256"}],
+    },
+    # Escrow v2 (M13 ABI PIN, append-only): partial settlement while Locked —
+    # settlePartial accumulates `captured` (<= maxAmount) WITHOUT changing the
+    # payment state; after the TTL refund() returns maxAmount - captured.
+    {
+        "type": "function",
+        "name": "settlePartial",
+        "stateMutability": "nonpayable",
+        "inputs": [
+            {"name": "paymentId", "type": "uint256"},
+            {"name": "amount", "type": "uint256"},
+        ],
+        "outputs": [],
+    },
+    {
+        "type": "event",
+        "name": "SettlePartial",
+        "anonymous": False,
+        "inputs": [
+            {"name": "paymentId", "type": "uint256", "indexed": True},
+            {"name": "amount", "type": "uint256", "indexed": False},
+            {"name": "captured", "type": "uint256", "indexed": False},
+        ],
+    },
+    {
+        "type": "event",
+        "name": "Refunded",
+        "anonymous": False,
+        "inputs": [
+            {"name": "paymentId", "type": "uint256", "indexed": True},
+            {"name": "buyer", "type": "address", "indexed": True},
+            {"name": "amount", "type": "uint256", "indexed": False},
+            {"name": "caller", "type": "address", "indexed": True},
+        ],
     },
 ]
 
@@ -1046,10 +1095,14 @@ def escrow_payment(rpc_url: str, deployed: dict[str, Any], payment_id: int) -> d
     escrow = w3.eth.contract(
         address=w3.to_checksum_address(deployed["escrow"]), abi=ESCROW_ABI
     )
-    buyer, seller, max_amount, expires_at, state = escrow.functions.getPayment(int(payment_id)).call()
+    raw = escrow.functions.getPayment(int(payment_id)).call()
+    # M13 Escrow v2 may add a trailing `captured` output; the v1 5-tuple stays
+    # valid (captured=None → partial asserts fall back to SettlePartial logs).
+    buyer, seller, max_amount, expires_at, state = raw[:5]
     return {
         "buyer": buyer, "seller": seller, "maxAmount": int(max_amount),
         "expiresAt": int(expires_at), "state": int(state),
+        "captured": int(raw[5]) if len(raw) >= 6 else None,
     }
 
 
@@ -1163,6 +1216,233 @@ def onchain_settle_asserts(rpc_url: str, deployed: dict[str, Any], payment_id: i
         f"({actual / 1e6:.6f} USDC) <= maxAmount {payment['maxAmount']}"
     )
     return payment
+
+
+# ---------------------------------------------------------------------------
+# M13 partial-settle segment (fork path): CLI mint-key -> bearer calls -> the
+# payment stays Locked with cumulative captures -> TTL -> refund the remainder
+# ---------------------------------------------------------------------------
+
+
+def _b64url_pad(segment: str) -> str:
+    return segment + "=" * (-len(segment) % 4)
+
+
+def parse_receipt_header(raw: str) -> dict[str, Any]:
+    """Decode an X-Receipt header value (unpadded base64url JSON
+    {domain, message, signature}) into a dict."""
+    import base64
+
+    return json.loads(base64.urlsafe_b64decode(_b64url_pad(raw.strip())))
+
+
+def escrow_supports_settle_partial(rpc_url: str, escrow_addr: str) -> bool:
+    """True when the DEPLOYED bytecode contains the settlePartial selector —
+    the gate for the M13 segment (an Escrow v1 deployment simply means the
+    contracts lane has not landed for this run yet)."""
+    w3 = w3_at(rpc_url)
+    selector = w3.keccak(text="settlePartial(uint256,uint256)")[:4]
+    code = w3.eth.get_code(w3.to_checksum_address(escrow_addr))
+    return bytes(selector) in bytes(code)
+
+
+def settle_partial_logs(rpc_url: str, deployed: dict[str, Any], payment_id: int,
+                        from_block: int) -> list[Any]:
+    """Decoded SettlePartial logs for `payment_id` since `from_block`."""
+    w3 = w3_at(rpc_url)
+    escrow = w3.eth.contract(
+        address=w3.to_checksum_address(deployed["escrow"]), abi=ESCROW_ABI
+    )
+    events = escrow.events.SettlePartial().get_logs(
+        argument_filters={"paymentId": int(payment_id)}, from_block=int(from_block)
+    )
+    return [
+        {
+            "amount": int(e["args"]["amount"]),
+            "captured": int(e["args"]["captured"]),
+            "tx": e["transactionHash"].hex(),
+        }
+        for e in events
+    ]
+
+
+def partial_settle_flow(deployed: dict[str, Any], rpc_url: str, chain_id: int,
+                        base_env: dict[str, str], buyer_key: str, buyer_addr: str,
+                        seller_addr: str, served_model: str) -> None:
+    """M13 consumer segment (fork path): one Locked payment consumed TWICE via
+    a CLI-minted stateless bearer API key, then refunded for the remainder.
+
+    1. CLI `lock` a short-TTL payment (dedicated to the bearer path).
+    2. CLI `mint-key --json` -> tsk1 key + relay base URL (EIP-191 mint
+       message: TokenShare API key grant|paymentId|expiry|maxAmount).
+    3. httpx Bearer calls x2 against the relay (mock upstream): each must be
+       200 with an X-Receipt whose paymentId/seller/actualAmount check out.
+    4. On-chain + relay-view asserts: SettlePartial events accumulate exactly
+       the two captured amounts while getPayment STILL reports Locked (v1
+       getPayment has no captured getter — logs are the on-chain source); the
+       relay GET /payment/{id}/usage view matches.
+    5. TTL elapses (wall clock + fork warp) -> CLI `refund` returns exactly
+       maxAmount - captured (Refunded event amount, payment state Refunded).
+
+    Skips (clearly labeled, never masquerading as exercised) when the
+    Escrow v2 settlePartial face is not deployed yet (contracts lane pending)
+    or the relay does not serve the bearer/usage face yet (relay lane
+    pending) — the rest of the run still gates E2E PASSED.
+    """
+    step("[6/8] M13 partial-settle segment: mint-key -> Bearer x2 -> partial captures -> refund remainder")
+    if not escrow_supports_settle_partial(rpc_url, deployed["escrow"]):
+        print(
+            "PARTIAL SKIPPED: deployed Escrow has no settlePartial face "
+            "(Escrow v2 / contracts lane not landed) — M13 segment not exercised"
+        )
+        return
+
+    buyer_env = cli_env(base_env, deployed, rpc_url, chain_id, buyer_key, seller_addr)
+    disputes_file = E2E_DIR / ".disputes.json"
+
+    lock_out = run_cli(["--disputes-file", str(disputes_file), "lock",
+                        "--seller", seller_addr, "--max", PARTIAL_MAX_USDC,
+                        "--ttl", str(PARTIAL_TTL_S)], buyer_env)
+    partial_pid = int(parse_cli_value(lock_out, "paymentId"))
+    expires_at = int(parse_cli_value(lock_out, "expiresAt").split("unix ")[1])
+    print(f"locked paymentId {partial_pid} (ttl={PARTIAL_TTL_S}s) for the M13 bearer path")
+
+    # Relay bearer-face probe: the M13 usage view must exist for this fresh
+    # payment (captured=0) — a 404/missing field means the relay lane has not
+    # landed; skip instead of failing against an old relay.
+    mint_out = run_cli(["--disputes-file", str(disputes_file), "mint-key",
+                        "--payment-id", str(partial_pid), "--json"], buyer_env)
+    try:
+        minted = json.loads(mint_out.strip())
+    except json.JSONDecodeError:
+        fail_all(f"mint-key --json output is not JSON:\n{mint_out}")
+    api_key = str(minted.get("apiKey") or "")
+    relay_base = str(minted.get("baseUrl") or "").rstrip("/")
+    if not api_key.startswith("tsk1.") or not relay_base:
+        fail_all(f"mint-key output missing apiKey/baseUrl:\n{mint_out}")
+    if int(minted.get("paymentId", -1)) != partial_pid:
+        fail_all(f"mint-key paymentId {minted.get('paymentId')} != {partial_pid}")
+    if int(minted.get("maxAmount", -1)) != int(PARTIAL_MAX_USDC) * 10**6:
+        fail_all(f"mint-key maxAmount {minted.get('maxAmount')} != lock maxAmount")
+    print(f"minted API key for payment {partial_pid} (expiry unix {minted.get('expiry')}, "
+          f"base {relay_base})")
+
+    import base64 as _b64
+    import httpx
+
+    usage_probe = httpx.get(f"{relay_base}/payment/{partial_pid}/usage", timeout=10.0)
+    probe_body = usage_probe.json() if "application/json" in usage_probe.headers.get("content-type", "") else {}
+    if usage_probe.status_code != 200 or "captured" not in probe_body:
+        print(
+            f"PARTIAL SKIPPED: relay has no /payment/{{id}}/usage bearer face "
+            f"(HTTP {usage_probe.status_code}) — relay lane not landed; M13 segment not exercised"
+        )
+        return
+
+    # Two Bearer calls — each captures per-call actual while the payment
+    # stays Locked; each response carries its own X-Receipt.
+    actuals: list[int] = []
+    for i in (1, 2):
+        resp = httpx.post(
+            f"{relay_base}/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={"model": served_model,
+                  "messages": [{"role": "user", "content": f"{PARTIAL_PROMPT} (call {i})"}]},
+            timeout=60.0,
+        )
+        if resp.status_code != 200:
+            fail_all(f"bearer call {i} returned HTTP {resp.status_code}: {resp.text[:300]}")
+        receipt_raw = resp.headers.get("X-Receipt")
+        if not receipt_raw:
+            fail_all(f"bearer call {i} response has no X-Receipt header (headers: "
+                     f"{list(resp.headers.keys())})")
+        receipt = parse_receipt_header(receipt_raw)
+        message = receipt.get("message") or {}
+        if int(message.get("paymentId", -1)) != partial_pid:
+            fail_all(f"bearer call {i} receipt paymentId {message.get('paymentId')} != {partial_pid}")
+        if str(message.get("seller", "")).lower() != seller_addr.lower():
+            fail_all(f"bearer call {i} receipt seller {message.get('seller')} != {seller_addr}")
+        expected_actual = pin_actual(
+            LISTING_PRICES,
+            MOCK_USAGE["prompt_tokens"],
+            MOCK_USAGE["cached_tokens"],
+            MOCK_USAGE["completion_tokens"],
+        )
+        if int(message.get("actualAmount", -1)) != expected_actual:
+            fail_all(f"bearer call {i} receipt actualAmount {message.get('actualAmount')} "
+                     f"!= PIN pricing {expected_actual}")
+        actuals.append(int(message["actualAmount"]))
+        print(f"bearer call {i}: HTTP 200, X-Receipt verified (actualAmount={actuals[-1]} native)")
+    captured_total = sum(actuals)
+
+    # On-chain evidence: SettlePartial logs must accumulate exactly the two
+    # captures, with the LAST event's captured == the running total — while
+    # getPayment still reports Locked (partial settle never finalizes).
+    start_block = max(int(w3_at(rpc_url).eth.block_number) - 2, 0)
+    deadline = time.monotonic() + SETTLE_PARTIAL_POLL_S
+    logs: list[dict[str, Any]] = []
+    while time.monotonic() < deadline:
+        logs = settle_partial_logs(rpc_url, deployed, partial_pid, start_block)
+        if logs and logs[-1]["captured"] >= captured_total:
+            break
+        time.sleep(1.0)
+    if len(logs) < 2:
+        fail_all(f"SettlePartial logs for payment {partial_pid}: {len(logs)} < 2 "
+                 f"(got {logs}) — relay did not flush the bearer captures on-chain")
+    if sum(entry["amount"] for entry in logs) != captured_total:
+        fail_all(f"SettlePartial amounts {[e['amount'] for e in logs]} != bearer captures {captured_total}")
+    if logs[-1]["captured"] != captured_total:
+        fail_all(f"final SettlePartial captured {logs[-1]['captured']} != {captured_total}")
+    payment = escrow_payment(rpc_url, deployed, partial_pid)
+    if payment["state"] != 1:
+        fail_all(f"partial-settled payment {partial_pid} state={payment['state']} "
+                 "(expected 1 = Locked — settlePartial must not finalize)")
+    if payment["captured"] is not None and payment["captured"] != captured_total:
+        fail_all(f"getPayment captured {payment['captured']} != {captured_total}")
+    print(f"OK: payment {partial_pid} still Locked with on-chain captured "
+          f"{captured_total} native ({len(logs)} SettlePartial events)")
+
+    # Relay-side cumulative view must agree with the chain.
+    usage = httpx.get(f"{relay_base}/payment/{partial_pid}/usage", timeout=10.0).json()
+    if int(usage.get("captured", -1)) != captured_total:
+        fail_all(f"relay usage captured {usage.get('captured')} != {captured_total}")
+    max_amount = int(minted.get("maxAmount"))
+    if int(usage.get("remaining", -1)) != max_amount - captured_total:
+        fail_all(f"relay usage remaining {usage.get('remaining')} != "
+                 f"{max_amount - captured_total}")
+    print(f"OK: relay usage view captured={captured_total} "
+          f"remaining={max_amount - captured_total}")
+
+    # TTL elapses -> refund returns maxAmount - captured exactly.
+    wait_s = expires_at - int(time.time()) + 1.5
+    if wait_s > 0:
+        print(f"waiting {wait_s:.1f}s for lock {partial_pid} TTL to elapse …")
+        time.sleep(wait_s)
+    if rpc_url.startswith(("http://127.0.0.1", "http://localhost")):
+        warp_chain_past(rpc_url, expires_at)
+    refund_out = run_cli(["--disputes-file", str(disputes_file), "refund",
+                          "--payment-id", str(partial_pid)], buyer_env)
+    if f"paymentId: {partial_pid} refunded" not in refund_out:
+        fail_all(f"partial refund output missing confirmation:\n{refund_out}")
+    refund_tx = parse_cli_value(refund_out, "tx")
+    w3 = w3_at(rpc_url)
+    escrow = w3.eth.contract(
+        address=w3.to_checksum_address(deployed["escrow"]), abi=ESCROW_ABI
+    )
+    refund_receipt = w3.eth.get_transaction_receipt(refund_tx)
+    refunded_events = escrow.events.Refunded().process_receipt(refund_receipt)
+    if len(refunded_events) != 1:
+        fail_all(f"Refunded events {len(refunded_events)} != 1 for payment {partial_pid}")
+    refunded_amount = int(refunded_events[0]["args"]["amount"])
+    if refunded_amount != max_amount - captured_total:
+        fail_all(f"refund returned {refunded_amount} native, expected "
+                 f"maxAmount - captured = {max_amount - captured_total}")
+    payment = escrow_payment(rpc_url, deployed, partial_pid)
+    if payment["state"] != 3:
+        fail_all(f"partial refund: payment {partial_pid} state={payment['state']} "
+                 "(expected 3 = Refunded)")
+    print(f"OK: refund returned exactly maxAmount - captured "
+          f"({max_amount} - {captured_total} = {refunded_amount} native), payment Refunded")
 
 
 # ---------------------------------------------------------------------------
@@ -1536,6 +1816,14 @@ def run(network: str) -> str | None:
     buyer_flow(deployed, rpc_url, int(deployed.get("chainId") or cfg["chain_id"]),
                base_env, buyer_key, buyer_addr, seller_addr, deposit_usdc,
                served_model, use_mock)
+    if cfg["anvil"]:
+        # M13 consumer segment (fork path ONLY): stateless bearer API key,
+        # per-call partial captures on a still-Locked payment, then refund the
+        # remainder after the TTL. Requires the Escrow v2 settlePartial face +
+        # the relay bearer/usage face (skips with a clear label otherwise).
+        partial_settle_flow(deployed, rpc_url,
+                            int(deployed.get("chainId") or cfg["chain_id"]),
+                            base_env, buyer_key, buyer_addr, seller_addr, served_model)
     return None
 
 

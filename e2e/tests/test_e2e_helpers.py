@@ -317,8 +317,40 @@ def test_registry_abi_is_v4_remove_model() -> None:
     ]
 
 
-# ------------------------------- env pins vs reused artifact (rev-3 C1)
+# ------------------------------- Escrow v2 partial settle (M13) ABI guard
 
+
+def test_escrow_abi_is_v2_partial_settle() -> None:
+    """Escrow v2 (M13) faces in run.ESCROW_ABI: settlePartial(uint256,
+    uint256) nonpayable, the SettlePartial(uint256 indexed, uint256,
+    uint256) event, and the Refunded event carrying the refunded amount (the
+    partial segment asserts refund == maxAmount - captured from it)."""
+    from run import ESCROW_ABI
+
+    def one(kind: str, name: str) -> dict[str, Any]:
+        return next(
+            e for e in ESCROW_ABI if e.get("type") == kind and e.get("name") == name
+        )
+
+    settle = one("function", "settlePartial")
+    assert [i["type"] for i in settle["inputs"]] == ["uint256", "uint256"]
+    assert settle["outputs"] == []
+    assert settle["stateMutability"] == "nonpayable"
+
+    event = one("event", "SettlePartial")
+    assert [(i["type"], i.get("indexed", False)) for i in event["inputs"]] == [
+        ("uint256", True),   # paymentId indexed
+        ("uint256", False),  # per-call amount
+        ("uint256", False),  # cumulative captured
+    ]
+
+    refunded = one("event", "Refunded")
+    names = [i["name"] for i in refunded["inputs"]]
+    assert "amount" in names
+    assert names.index("amount") in (2, 1)  # amount present in the data section
+
+
+# ------------------------------- env pins vs reused artifact (rev-3 C1)
 
 def test_env_artifact_addresses_agree_passes() -> None:
     """env==artifact (case-insensitive) must NOT exit — reuse proceeds."""

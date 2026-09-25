@@ -7,7 +7,8 @@ Extracted verbatim from:
 
 Only the function/event entries the CLI actually calls are embedded (Registry
 v3 = M9 ABI PIN per-model pricing + M10 ABI PIN on-chain enumeration; v4 =
-M12 ABI PIN removeModel + ModelRemoved, append-only). These
+M12 ABI PIN removeModel + ModelRemoved, append-only; Escrow v2 = M13 ABI PIN
+settlePartial + SettlePartial, append-only). These
 are public interfaces — NOT configuration — so embedding them does not violate
 the zero-hardcode rule (no addresses, no chain ids appear here).
 """
@@ -77,6 +78,35 @@ ESCROW_ABI = [
         "inputs": [{"name": "paymentId", "type": "uint256", "internalType": "uint256"}],
         "outputs": [],
         "stateMutability": "nonpayable",
+    },
+    # Escrow v2 (M13 ABI PIN 「M13」, append-only — settle/refund/lock faces
+    # unchanged): settlePartial(paymentId, amount) may be called REPEATEDLY
+    # while the payment is Locked — each call moves `amount` buyer->seller and
+    # accumulates it into the payment's captured total (clamped to <=
+    # maxAmount) WITHOUT changing the payment state (it stays Locked, so more
+    # partial settles keep flowing). After the TTL, refund() returns
+    # maxAmount - captured to the buyer. The cumulative `captured` surfaces
+    # on-chain via the SettlePartial event (and getPayment when the deployed
+    # v2 exposes the getter field).
+    {
+        "type": "function",
+        "name": "settlePartial",
+        "inputs": [
+            {"name": "paymentId", "type": "uint256", "internalType": "uint256"},
+            {"name": "amount", "type": "uint256", "internalType": "uint256"},
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable",
+    },
+    {
+        "type": "event",
+        "name": "SettlePartial",
+        "anonymous": False,
+        "inputs": [
+            {"name": "paymentId", "type": "uint256", "indexed": True, "internalType": "uint256"},
+            {"name": "amount", "type": "uint256", "indexed": False, "internalType": "uint256"},
+            {"name": "captured", "type": "uint256", "indexed": False, "internalType": "uint256"},
+        ],
     },
     {
         "type": "event",

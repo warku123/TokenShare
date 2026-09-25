@@ -76,6 +76,28 @@ def post_chat_json(
     return response
 
 
+def get_usage(base_url: str, payment_id: int, timeout: float = 30.0) -> RelayResponse:
+    """GET /payment/{id}/usage (M13 cumulative view): the relay answers
+    {captured, maxAmount, remaining} for the paymentId — no signature needed
+    (paymentId direct query per the relay PIN). Raises RelayError on >=400."""
+    base = (base_url or "").rstrip("/")
+    if not base:
+        raise ConfigError("relay endpoint is empty; check the Registry listing or pass --relay")
+    from urllib.parse import quote
+
+    url = f"{base}/payment/{quote(str(int(payment_id)), safe='')}/usage"
+    with httpx.Client(timeout=timeout) as client:
+        resp = client.get(url, headers={"Accept": "application/json"})
+    response = RelayResponse(
+        status_code=resp.status_code,
+        headers={k: v for k, v in resp.headers.items()},
+        body_text=resp.text,
+    )
+    if response.status_code >= 400:
+        raise RelayError(response.status_code, response.body_text)
+    return response
+
+
 def open_chat_stream(
     base_url: str,
     payment_id: int,

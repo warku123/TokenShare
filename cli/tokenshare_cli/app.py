@@ -1,7 +1,9 @@
 """TokenShare buyer CLI — Typer app.
 
 Commands (BUILD_SPEC §3 M4): deposit / lock / call / balance / refund,
-plus `disputes` for reviewing failed-receipt records.
+plus `disputes` for reviewing failed-receipt records, `listings` /
+`remove-model` / `verify-attestation`, and the M13 consumer-side pair
+`mint-key` (stateless bearer API key) + `usage` (cumulative capture view).
 
 Env (required, PIN): BUYER_PRIVATE_KEY / RPC_URL / CHAIN_ID / ESCROW_ADDR /
 REGISTRY_ADDR / USDC_ADDR. Optional: SELLER_ADDR (default seller for `call`),
@@ -28,7 +30,7 @@ from . import signing
 from .config import load_config, load_seller_override
 from .errors import TokenshareError
 from .receipt import Receipt, ReceiptDecodeError, decode_receipt, verify_receipt
-from .relay_client import post_chat_json, open_chat_stream
+from .relay_client import get_usage, post_chat_json, open_chat_stream
 from .signing import RELAY_CHAT_PATH
 from .streaming import parse_sse_lines
 from .units import display_usdc, parse_usdc_amount
@@ -44,7 +46,7 @@ Env vars required by every chain-touching command (no values are ever hardcoded)
 
 Optional env: SELLER_ADDR (default seller for call), PROMPT_TOKEN_CAP / COMPLETION_TOKEN_CAP (default lock sizing, mirrors relay defaults 200000 / 32000), TX_TIMEOUT_S (tx wait timeout).
 
-Commands: deposit (approve + deposit USDC into Escrow); lock (lock(seller, maxAmount, ttl=600) -> prints paymentId); call (pick seller -> lock NEW paymentId, or reuse via --payment-id -> read Registry listing.endpoint -> POST /v1/chat/completions with EIP-191 X-Payment-Id + X-Signature -> prints reply, X-Settle-Status, and verifies the EIP-712 X-Receipt against the Registry listing operator); balance (wallet USDC + withdrawable Escrow); refund (withdraw an expired lock after its TTL); disputes (list locally recorded receipt-verification disputes); verify-attestation (best-effort off-chain parse of a TEE attestation quote + optional on-chain digest comparison); listings (compare ACTIVE Registry listings — per-model tiered prices + estimated per-call cost, cheapest first; sellers discovered via the Registry v3 on-chain enumeration sellerCount/getSellers); remove-model (OPERATOR-side: remove ONE model + its parallel price row from your own listing via Registry v4 removeModel, signed with the listing-operator key — --key-env, default BUYER_PRIVATE_KEY for the demo single-account setup).
+Commands: deposit (approve + deposit USDC into Escrow); lock (lock(seller, maxAmount, ttl=600) -> prints paymentId); call (pick seller -> lock NEW paymentId, or reuse via --payment-id -> read Registry listing.endpoint -> POST /v1/chat/completions with EIP-191 X-Payment-Id + X-Signature -> prints reply, X-Settle-Status, and verifies the EIP-712 X-Receipt against the Registry listing operator); balance (wallet USDC + withdrawable Escrow); refund (withdraw an expired lock after its TTL); disputes (list locally recorded receipt-verification disputes); verify-attestation (best-effort off-chain parse of a TEE attestation quote + optional on-chain digest comparison); listings (compare ACTIVE Registry listings — per-model tiered prices + estimated per-call cost, cheapest first; sellers discovered via the Registry v3 on-chain enumeration sellerCount/getSellers); remove-model (OPERATOR-side: remove ONE model + its parallel price row from your own listing via Registry v4 removeModel, signed with the listing-operator key — --key-env, default BUYER_PRIVATE_KEY for the demo single-account setup); mint-key (M13: sign a stateless bearer API key tsk1.… bound to an existing Locked payment — agents call the relay with Authorization: Bearer, per-call capture keeps the payment Locked until TTL); usage (M13: cumulative captured/maxAmount/remaining view via GET /payment/{id}/usage).
 
 Receipt verification (BUILD_SPEC §6.3): a failed X-Receipt check prints a warning and records the paymentId in the dispute ledger (default ~/.tokenshare/disputes.json; override with --disputes-file, review via the `disputes` command).
 
@@ -222,6 +224,163 @@ def refund_cmd(
             typer.echo(f"refunded amount: {display_usdc(result['amount'])}")
         typer.echo(f"Escrow balance: {display_usdc(result['escrow_balance'])}")
         typer.echo(f"tx: {result['tx_hash']}")
+
+    _run(body)
+
+
+# ---------------------------------------------------------------------------
+# mint-key (M13: stateless signed API key for agent consumers)
+# ---------------------------------------------------------------------------
+
+
+@app.command("mint-key")
+def mint_key_cmd(
+    payment_id: int = typer.Option(..., "--payment-id", help="paymentId of an existing Locked payment to bind the key to."),
+    ttl_override: Optional[int] = typer.Option(
+        None,
+        "--ttl-override",
+        help="Shorten the key expiry to now + <seconds> (never extends past the payment's expiresAt).",
+    ),
+    relay: Optional[str] = typer.Option(None, "--relay", help="Override the relay base URL (default: Registry listing endpoint of the payment's seller)."),
+    json_output: bool = typer.Option(False, "--json", help="Emit a single JSON object (apiKey/baseUrl/expiry/…) for scripts."),
+) -> None:
+    """Mint a stateless bearer API key (tsk1.…) bound to a Locked payment.
+
+    Signs the EIP-191 message `TokenShare API key grant|paymentId={p}|expiry={e}|maxAmount={m}`
+    with BUYER_PRIVATE_KEY and emits `tsk1.<b64url(payload)>.<b64url(sig)>`
+    where payload = {p,e,m,buyer}. Agents use the key as
+    `Authorization: Bearer …` against the relay base URL; the relay recovers
+    the signer per request (must equal payment.buyer), captures per call and
+    keeps the payment Locked until the TTL. Zero storage: the key cannot be
+    revoked — wait out the TTL (max leak = maxAmount).
+    """
+    def body() -> None:
+        cfg = load_config()
+        ctx = chain_mod.open_chain(cfg)
+        payment = chain_mod.get_payment(ctx, payment_id)
+        if _state_of(payment) != "Locked":
+            _fail(
+                f"payment {payment_id} is not Locked (state={_state_of(payment)}); "
+                "mint-key binds to an existing Locked payment (run `lock` first)"
+            )
+        payment_buyer = str(payment.get("buyer") or "")
+        if not _same_addr(payment_buyer, ctx.address):
+            _fail(
+                f"payment {payment_id} was locked by {payment_buyer}, not by this "
+                f"buyer ({ctx.address}); refusing to mint"
+            )
+        now = int(time.time())
+        expires_at = int(payment["expires_at"])
+        if expires_at <= now:
+            _fail(
+                f"payment {payment_id} already expired at unix {expires_at} — "
+                "a minted key would be dead on arrival (refund it instead)"
+            )
+        expiry = expires_at
+        if ttl_override is not None:
+            if ttl_override <= 0:
+                _fail("--ttl-override must be a positive number of seconds")
+            expiry = min(expires_at, now + int(ttl_override))
+            if expiry <= now:
+                _fail("--ttl-override is shorter than the minting time — key would be already expired")
+        seller = str(payment.get("seller") or "")
+        listing = chain_mod.get_listing(ctx, seller)
+        if str(listing.get("operator") or "") in ("", "0x" + "0" * 40):
+            _fail("no listing registered for the payment's seller on the Registry")
+        endpoint = relay or str(listing.get("endpoint") or "")
+        if not endpoint:
+            _fail("listing endpoint is empty; pass --relay to override")
+        if relay is not None:
+            _warn_if_plain_http(relay)
+        from eth_utils import to_checksum_address
+
+        buyer_cs = to_checksum_address(payment_buyer)
+        api_key = signing.mint_api_key(cfg.private_key_hex, payment_id, expiry, int(payment["max_amount"]), buyer_cs)
+        models = [str(m) for m in (listing.get("models") or []) if str(m).strip()]
+        model_name = models[0] if models else "(model)"
+        base = endpoint.rstrip("/")
+
+        if json_output:
+            typer.echo(
+                json.dumps(
+                    {
+                        "paymentId": int(payment_id),
+                        "buyer": buyer_cs,
+                        "seller": seller,
+                        "expiry": expiry,
+                        "maxAmount": int(payment["max_amount"]),
+                        "apiKey": api_key,
+                        "baseUrl": base,
+                        "model": model_name,
+                    },
+                    indent=2,
+                )
+            )
+            return
+
+        typer.echo(f"paymentId: {payment_id}")
+        typer.echo(f"buyer: {buyer_cs}")
+        typer.echo(f"seller: {seller}")
+        if not listing.get("active"):
+            _echo_err("warning: the seller's listing is currently INACTIVE — the key only works once it is re-activated")
+        typer.echo(f"API key: {api_key}")
+        typer.echo(f"expiry: unix {expiry}")
+        typer.echo(f"maxAmount: {display_usdc(int(payment['max_amount']))}")
+        typer.echo(f"Relay base URL: {base}")
+        typer.echo(f"Model: {model_name}")
+        curl_body = json.dumps(
+            {"model": model_name, "messages": [{"role": "user", "content": "Hello from TokenShare"}]},
+            separators=(",", ":"),
+        )
+        typer.echo("Example (agent usage, per-call partial capture):")
+        typer.echo(
+            f'  curl {base}/v1/chat/completions \\\n'
+            f'    -H "Authorization: Bearer {api_key}" \\\n'
+            f'    -H "Content-Type: application/json" \\\n'
+            f"    -d '{curl_body}'"
+        )
+
+    _run(body)
+
+
+# ---------------------------------------------------------------------------
+# usage (M13: cumulative capture view for a payment)
+# ---------------------------------------------------------------------------
+
+
+@app.command("usage")
+def usage_cmd(
+    payment_id: int = typer.Option(..., "--payment-id", help="paymentId to query the cumulative capture view for."),
+    relay: Optional[str] = typer.Option(None, "--relay", help="Override the relay base URL (default: Registry listing endpoint of the payment's seller)."),
+) -> None:
+    """Show captured / maxAmount / remaining for a payment (GET /payment/{id}/usage).
+
+    The usage endpoint is a paymentId direct query (no signature needed per
+    the relay PIN) — it reflects the relay's cumulative view across all
+    bearer-key calls, matching the on-chain SettlePartial captures.
+    """
+    def body() -> None:
+        cfg = load_config()
+        ctx = chain_mod.open_chain(cfg)
+        payment = chain_mod.get_payment(ctx, payment_id)
+        seller = str(payment.get("seller") or "")
+        endpoint = relay
+        if endpoint is None:
+            listing = chain_mod.get_listing(ctx, seller)
+            endpoint = str(listing.get("endpoint") or "")
+        response = get_usage(endpoint, payment_id)
+        try:
+            data = response.json()
+        except Exception:
+            _fail(f"relay usage endpoint returned non-JSON: {response.body_text[:200]}")
+        captured = int(data.get("captured", 0))
+        max_amount = int(data.get("maxAmount", payment["max_amount"]))
+        remaining = data.get("remaining")
+        remaining = int(remaining) if remaining is not None else max_amount - captured
+        typer.echo(f"paymentId: {payment_id}")
+        typer.echo(f"captured: {display_usdc(captured)}")
+        typer.echo(f"maxAmount: {display_usdc(max_amount)}")
+        typer.echo(f"remaining: {display_usdc(remaining)}")
 
     _run(body)
 
