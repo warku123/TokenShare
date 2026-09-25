@@ -41,6 +41,12 @@ import {MockUSDC} from "../src/MockUSDC.sol";
  *   USDC_ADDR (optional) — existing ERC-20 USDC (6dp) to use as the settlement
  *   token. When empty/absent, a fresh MockUSDC is deployed and the artifact
  *   records `usdcIsMock: true`.
+ *   FEE_BPS (optional, default 100 = 1%) — Escrow protocol fee in basis points,
+ *   charged on every seller credit (settle top-up / settlePartial capture).
+ *   FEE_RECIPIENT (optional, default deployer) — treasury receiving the fee;
+ *   defaulting to the deployer means the platform (deployer) is the treasury.
+ *   Both are immutable per Escrow deployment; redeploy via runEscrowOnly to
+ *   pick up new values.
  *
  * Output: contracts/deployed.json
  *   {network, chainId, escrow, registry, usdc, usdcIsMock, deployer, deployedAt}
@@ -59,14 +65,21 @@ contract Deploy is Script {
         address usdc = vm.envOr("USDC_ADDR", address(0));
         bool usdcIsMock = false;
 
+        // ------------------------------------------------------------------
+        // Protocol fee (Escrow v3): env FEE_BPS (default 100 = 1%) and
+        // FEE_RECIPIENT (default deployer => platform == deployer).
+        // ------------------------------------------------------------------
+        uint16 feeBps = uint16(vm.envOr("FEE_BPS", uint256(100)));
+        address feeRecipient = vm.envOr("FEE_RECIPIENT", deployer);
+
         vm.startBroadcast();
         if (usdc == address(0)) {
             MockUSDC mock = new MockUSDC();
             usdc = address(mock);
             usdcIsMock = true;
         }
-        // Constructor params per src/ signatures: Escrow(IERC20 usdc_), Registry().
-        Escrow escrow = new Escrow(IERC20(usdc));
+        // Constructor params per src/ signatures: Escrow(IERC20 usdc_, uint16 feeBps_, address feeRecipient_), Registry().
+        Escrow escrow = new Escrow(IERC20(usdc), feeBps, feeRecipient);
         Registry registry = new Registry();
         vm.stopBroadcast();
 
@@ -92,6 +105,8 @@ contract Deploy is Script {
         console2.log("usdc:         ", usdc);
         console2.log("usdcIsMock:   ", usdcIsMock);
         console2.log("deployer:     ", deployer);
+        console2.log("feeBps:       ", feeBps);
+        console2.log("feeRecipient: ", feeRecipient);
         console2.log("artifact:     ", ARTIFACT_PATH);
     }
 
@@ -146,11 +161,14 @@ contract Deploy is Script {
     }
 
     /**
-     * @notice Escrow-only redeploy (M13 Escrow v2 partial settle): deploys a
-     *         fresh Escrow against the SAME usdc and rewrites the `escrow`
-     *         field of the EXISTING deployed.json, preserving registry/usdc/
-     *         usdcIsMock. Escrow balances do NOT carry over — buyers must
-     *         re-deposit against the new Escrow. Run on the SAME chain as the
+     * @notice Escrow-only redeploy (M13 Escrow v2 partial settle; M14 fee
+     *         config): deploys a fresh Escrow against the SAME usdc and
+     *         rewrites the `escrow` field of the EXISTING deployed.json,
+     *         preserving registry/usdc/usdcIsMock. Escrow balances do NOT
+     *         carry over — buyers must re-deposit against the new Escrow.
+     *         Fee config is immutable per deployment: FEE_BPS/FEE_RECIPIENT
+     *         are read from the CURRENT env (defaults: 100 bps, deployer),
+     *         NOT from the old artifact. Run on the SAME chain as the
      *         original artifact; the artifact must already exist.
      */
     function runEscrowOnly(string calldata network) external {
@@ -162,8 +180,11 @@ contract Deploy is Script {
         uint256 chainId = block.chainid;
         address deployer = msg.sender;
 
+        uint16 feeBps = uint16(vm.envOr("FEE_BPS", uint256(100)));
+        address feeRecipient = vm.envOr("FEE_RECIPIENT", deployer);
+
         vm.startBroadcast();
-        Escrow escrow = new Escrow(IERC20(usdc));
+        Escrow escrow = new Escrow(IERC20(usdc), feeBps, feeRecipient);
         vm.stopBroadcast();
 
         string memory json = "deployed";
@@ -185,6 +206,8 @@ contract Deploy is Script {
         console2.log("usdc:          ", usdc);
         console2.log("usdcIsMock:    ", usdcIsMock);
         console2.log("deployer:      ", deployer);
+        console2.log("feeBps:        ", feeBps);
+        console2.log("feeRecipient:  ", feeRecipient);
         console2.log("artifact:      ", ARTIFACT_PATH);
     }
 }

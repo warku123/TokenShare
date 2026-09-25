@@ -23,6 +23,12 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  *     the remaining maxAmount - captured; payment becomes `Refunded`
  *   user --withdraw(amount)--> USDC transferred out of the contract
  *
+ * PROTOCOL FEE (Escrow v3): every seller credit (the `settle` top-up and each
+ *   `settlePartial` capture) is charged `FEE_BPS` basis points, rounded down;
+ *   the fee accrues to `FEE_RECIPIENT` in the balances ledger — zero external
+ *   calls. Refunds are NEVER charged: the buyer always gets back the full
+ *   remaining escrow. Both parameters are immutable, fixed at deployment.
+ *
  * UNITS: all amounts are native USDC units, i.e. USDC's 6 decimal places.
  *         1 USDC = 1_000_000 (1e6). No 18-decimal conversion happens anywhere
  *         in this contract.
@@ -89,6 +95,17 @@ contract Escrow is ReentrancyGuard {
     /// @notice The settlement token (USDC, 6 decimals). Set once at deployment.
     IERC20 public immutable USDC;
 
+    /// @notice Protocol fee in basis points (1 bp = 0.01%), charged on every
+    ///         seller credit (settle top-up / settlePartial capture) and
+    ///         accrued to `FEE_RECIPIENT`. Bounded to <= 10_000 (100%) by the
+    ///         constructor. Set once at deployment — no admin face.
+    uint16 public immutable FEE_BPS;
+
+    /// @notice Recipient of the protocol fee (platform treasury; the deployer
+    ///         in the default deployment path). Never zero — enforced by the
+    ///         constructor. Set once at deployment.
+    address public immutable FEE_RECIPIENT;
+
     /*//////////////////////////////////////////////////////////////////////////
                                     STORAGE
     //////////////////////////////////////////////////////////////////////////*/
@@ -151,6 +168,10 @@ contract Escrow is ReentrancyGuard {
     /// @param captured  The amount already captured for this payment.
     error BelowCaptured(uint256 paymentId, uint256 actual, uint256 captured);
 
+    /// @notice Deployment-time fee configuration is invalid: feeBps > 10_000
+    ///         or the fee recipient is the zero address.
+    error BadFeeConfig();
+
     /*//////////////////////////////////////////////////////////////////////////
                                      EVENTS
     //////////////////////////////////////////////////////////////////////////*/
@@ -181,6 +202,12 @@ contract Escrow is ReentrancyGuard {
     ///         The payment stays `Locked`; `captured` is the new cumulative total.
     event SettlePartial(uint256 indexed paymentId, uint256 amount, uint256 captured);
 
+    /// @notice Protocol fee taken from a seller credit (Escrow v3). Emitted
+    ///         only when `fee > 0` (a zero-fee configuration emits nothing).
+    ///         `sellerAmount` is what the seller actually received: the
+    ///         credited amount minus the fee.
+    event FeeTaken(uint256 indexed paymentId, uint256 fee, uint256 sellerAmount);
+
     /// @notice An expired lock was refunded to the buyer's balance.
     event Refunded(uint256 indexed paymentId, address indexed buyer, uint256 amount, address indexed caller);
 
@@ -208,8 +235,13 @@ contract Escrow is ReentrancyGuard {
 
     /// @param usdc_ ERC-20 settlement token (USDC, 6 decimals). Chain-specific
     ///              address is supplied by the deployer configuration, never hardcoded.
-    constructor(IERC20 usdc_) {
+    /// @param feeBps_ Protocol fee in basis points (1 bp = 0.01%); <= 10_000.
+    /// @param feeRecipient_ Treasury receiving the fee; must not be zero.
+    constructor(IERC20 usdc_, uint16 feeBps_, address feeRecipient_) {
+        if (feeBps_ > 10_000 || feeRecipient_ == address(0)) revert BadFeeConfig();
         USDC = usdc_;
+        FEE_BPS = feeBps_;
+        FEE_RECIPIENT = feeRecipient_;
     }
 
     /*//////////////////////////////////////////////////////////////////////////
@@ -282,6 +314,10 @@ contract Escrow is ReentrancyGuard {
      *      Reverts with `BelowCaptured` if `actual < captured` (advances cannot
      *      be clawed back). On success the payment reaches the terminal `Settled`
      *      state and `captured` is bumped to `maxAmount` (fully consumed).
+     *      The protocol fee (Escrow v3) is charged ONLY on the newly credited
+     *      top-up (`actual - captured`): advances already paid their fee when
+     *      captured via `settlePartial`, so nothing is double-charged. The
+     *      buyer's refund share (`maxAmount - actual`) is never charged.
      * @param paymentId Id returned by `lock`.
      * @param actual    Cumulative amount owed to the seller, in USDC native
      *                  units (6 dp); must satisfy captured <= actual <= maxAmount.
@@ -306,7 +342,18 @@ contract Escrow is ReentrancyGuard {
 
         payment.state = State.Settled;
         payment.captured = payment.maxAmount; // fully consumed (terminal consistency)
-        if (sellerTopUp > 0) balances[payment.seller] += sellerTopUp;
+
+        // Protocol fee (v3): charged on the amount credited NOW (the top-up),
+        // rounded down; fee stays in the ledger for FEE_RECIPIENT. Refunds are
+        // never charged. Ledger-only: no external token call.
+        if (sellerTopUp > 0) {
+            uint256 fee = (sellerTopUp * FEE_BPS) / 10_000;
+            balances[payment.seller] += sellerTopUp - fee;
+            if (fee > 0) {
+                balances[FEE_RECIPIENT] += fee;
+                emit FeeTaken(paymentId, fee, sellerTopUp - fee);
+            }
+        }
         if (refunded > 0) balances[payment.buyer] += refunded;
 
         emit Settled(paymentId, payment.buyer, payment.seller, actual, refunded);
@@ -326,6 +373,9 @@ contract Escrow is ReentrancyGuard {
      *      `captured + amount <= maxAmount` (reverts `ExceedsMaxAmount` with the
      *      attempted total) and `amount > 0` (reverts `ZeroAmount` — a zero
      *      capture is a meaningless no-op here, unlike `settle(actual=0)`).
+     *      The protocol fee (Escrow v3) is charged on `amount`, rounded down;
+     *      `captured` accumulates the GROSS amount so refund/settle remainders
+     *      are unaffected by the fee split.
      * @param paymentId Id returned by `lock`.
      * @param amount    Amount to capture now, in USDC native units (6 dp).
      */
@@ -341,9 +391,15 @@ contract Escrow is ReentrancyGuard {
             revert ExceedsMaxAmount(payment.captured + amount, payment.maxAmount);
         }
 
-        // Effects only: state stays Locked; the credit is ledger-only.
+        // Effects only: state stays Locked; the credit is ledger-only, split
+        // seller/fee-recipient. `captured` tracks the gross amount.
         payment.captured += amount;
-        balances[payment.seller] += amount;
+        uint256 fee = (amount * FEE_BPS) / 10_000;
+        balances[payment.seller] += amount - fee;
+        if (fee > 0) {
+            balances[FEE_RECIPIENT] += fee;
+            emit FeeTaken(paymentId, fee, amount - fee);
+        }
 
         emit SettlePartial(paymentId, amount, payment.captured);
     }

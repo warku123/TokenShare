@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Escrow} from "../src/Escrow.sol";
@@ -22,13 +23,15 @@ contract EscrowTest is Test {
     address internal buyer = makeAddr("buyer");
     address internal seller = makeAddr("seller");
     address internal thirdParty = makeAddr("thirdParty");
+    address internal treasury = makeAddr("treasury"); // v3 fee recipient
 
     uint64 internal constant START_TIME = 1_000_000;
 
     // ------------------------------------------------------------------ setup
     function setUp() public {
         usdc = new MockUSDC();
-        escrow = new Escrow(usdc);
+        // Existing suite runs fee-free (feeBps = 0): zero behavioral delta.
+        escrow = new Escrow(usdc, 0, treasury);
         vm.warp(START_TIME); // deterministic timestamps
     }
 
@@ -718,7 +721,7 @@ contract EscrowTest is Test {
     ///      call, hence no reentrancy surface.
     function test_SettlePartial_NoExternalTokenCalls() public {
         MaliciousToken token = new MaliciousToken();
-        escrow = new Escrow(IERC20(address(token)));
+        escrow = new Escrow(IERC20(address(token)), 0, treasury);
 
         address b = makeAddr("b");
         token.mint(b, 100e6);
@@ -852,7 +855,7 @@ contract EscrowTest is Test {
     ///      withdraw business-executable absent the guard).
     function _setupAttack() internal returns (MaliciousToken token, MaliciousAttacker attacker) {
         token = new MaliciousToken();
-        escrow = new Escrow(IERC20(address(token)));
+        escrow = new Escrow(IERC20(address(token)), 0, treasury);
         attacker = new MaliciousAttacker(escrow, IERC20(address(token)));
         token.setHook(address(attacker)); // the attacker is the hook, NOT the escrow
 
@@ -920,7 +923,7 @@ contract EscrowTest is Test {
     ///      blocks (Locked -> Settled/Refunded terminal transitions).
     function test_SettleRefund_NoExternalTokenCalls() public {
         MaliciousToken token = new MaliciousToken();
-        escrow = new Escrow(IERC20(address(token)));
+        escrow = new Escrow(IERC20(address(token)), 0, treasury);
         // no hook registered: the token behaves as a plain ERC-20 here
 
         address b = makeAddr("b");
@@ -1076,5 +1079,312 @@ contract EscrowTest is Test {
             (, , uint256 maxAmount, , Escrow.State s) = escrow.getPayment(pids[i]);
             if (s == Escrow.State.Locked) total += maxAmount;
         }
+    }
+
+    // =====================================================================
+    // protocol fee (Escrow v3)
+    // =====================================================================
+
+    /// @dev Deploy a fee-charging escrow against the shared MockUSDC and make
+    ///      it the active `escrow` so _deposit/_lock/_stateOf keep working.
+    function _newFeeEscrow(uint16 feeBps) internal returns (Escrow) {
+        escrow = new Escrow(usdc, feeBps, treasury);
+        return escrow;
+    }
+
+    /// @dev True if any log in `logs` is a FeeTaken event.
+    function _hasFeeTaken(Vm.Log[] memory logs) internal view returns (bool) {
+        bytes32 topic0 = keccak256("FeeTaken(uint256,uint256,uint256)");
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter == address(escrow) && logs[i].topics[0] == topic0) return true;
+        }
+        return false;
+    }
+
+    // --- constructor validation -----------------------------------------
+
+    function test_RevertConstructor_FeeBpsAbove10000() public {
+        vm.expectRevert(Escrow.BadFeeConfig.selector);
+        new Escrow(usdc, 10_001, treasury);
+    }
+
+    function test_Constructor_FeeBpsUpperBound10000Allowed() public {
+        Escrow e = new Escrow(usdc, 10_000, treasury);
+        assertEq(e.FEE_BPS(), 10_000, "upper bound accepted");
+        assertEq(e.FEE_RECIPIENT(), treasury, "recipient stored");
+    }
+
+    function test_RevertConstructor_ZeroFeeRecipient() public {
+        vm.expectRevert(Escrow.BadFeeConfig.selector);
+        new Escrow(usdc, 100, address(0));
+    }
+
+    function test_Constructor_FeeConfigImmutables() public {
+        Escrow e = new Escrow(usdc, 250, treasury);
+        assertEq(e.FEE_BPS(), 250, "FEE_BPS exposed");
+        assertEq(e.FEE_RECIPIENT(), treasury, "FEE_RECIPIENT exposed");
+    }
+
+    // --- settle fee -------------------------------------------------------
+
+    /// @dev 100 bps = 1%: settle(actual 4e6) -> fee 40_000, seller 3_960_000,
+    ///      buyer refund share (6e6) NOT charged.
+    function test_Fee_Settle_100Bps() public {
+        _newFeeEscrow(100);
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+
+        uint256 actual = 4e6;
+        uint256 fee = 40_000; // 4e6 * 100 / 10_000
+
+        vm.expectEmit(true, false, false, true, address(escrow));
+        emit Escrow.FeeTaken(pid, fee, actual - fee);
+        vm.expectEmit(true, true, true, true, address(escrow));
+        emit Escrow.Settled(pid, buyer, seller, actual, 6e6);
+
+        vm.prank(seller);
+        escrow.settle(pid, actual);
+
+        assertEq(escrow.balances(seller), actual - fee, "seller gets amount - fee");
+        assertEq(escrow.balances(treasury), fee, "treasury credited the fee");
+        assertEq(escrow.balances(buyer), 96e6, "buyer refund fee-free (90 + 6)");
+        assertTrue(_stateOf(pid) == Escrow.State.Settled, "terminal Settled");
+    }
+
+    /// @dev Rounding: fee is FLOORED. 123_456 * 100 / 10_000 = 1_234 (not 1_235).
+    function test_Fee_Settle_RoundsDown() public {
+        _newFeeEscrow(100);
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+
+        vm.prank(seller);
+        escrow.settle(pid, 123_456);
+
+        assertEq(escrow.balances(treasury), 1_234, "fee floored");
+        assertEq(escrow.balances(seller), 123_456 - 1_234, "seller gets the remainder");
+        assertEq(escrow.balances(seller) + escrow.balances(treasury), 123_456, "no dust lost");
+    }
+
+    /// @dev Extreme: feeBps = 10_000 (100%) sends the entire credit to the
+    ///      treasury; the seller's ledger is untouched.
+    function test_Fee_Settle_FullFee_10000Bps() public {
+        _newFeeEscrow(10_000);
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+
+        vm.expectEmit(true, false, false, true, address(escrow));
+        emit Escrow.FeeTaken(pid, 10e6, 0);
+        vm.prank(seller);
+        escrow.settle(pid, 10e6);
+
+        assertEq(escrow.balances(seller), 0, "seller gets nothing");
+        assertEq(escrow.balances(treasury), 10e6, "treasury gets everything");
+        assertEq(escrow.balances(buyer), 90e6, "buyer refund untouched (full actual settled)");
+    }
+
+    /// @dev Cumulative semantics preserved: fee is charged only on the top-up
+    ///      (actual - captured); advances already paid their fee at capture.
+    function test_Fee_Settle_TopUpChargedOnIncrementOnly() public {
+        _newFeeEscrow(100);
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+
+        vm.startPrank(seller);
+        escrow.settlePartial(pid, 3e6); // fee 30_000 -> seller 2_970_000
+        escrow.settle(pid, 8e6); // top-up 5e6: fee 50_000 -> +4_950_000
+        vm.stopPrank();
+
+        assertEq(escrow.balances(seller), 2_970_000 + 4_950_000, "seller credited net per credit");
+        assertEq(escrow.balances(treasury), 30_000 + 50_000, "treasury = sum of both fees");
+        assertEq(escrow.balances(buyer), 92e6, "buyer gets maxAmount - actual");
+    }
+
+    /// @dev Close-out at exactly `captured`: top-up 0 -> no fee, no FeeTaken,
+    ///      and the buyer's remainder is uncharged.
+    function test_Fee_Settle_CloseOutAtCaptured_NoSecondFee() public {
+        _newFeeEscrow(100);
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+
+        vm.startPrank(seller);
+        escrow.settlePartial(pid, 4e6); // fee 40_000
+        escrow.settle(pid, 4e6); // top-up 0
+        vm.stopPrank();
+
+        assertEq(escrow.balances(seller), 4e6 - 40_000, "only the capture credit");
+        assertEq(escrow.balances(treasury), 40_000, "no extra fee on close-out");
+        assertEq(escrow.balances(buyer), 96e6, "remainder fee-free");
+        assertTrue(_stateOf(pid) == Escrow.State.Settled, "terminal Settled");
+    }
+
+    /// @dev actual == 0 with captured == 0: nothing credited, no fee at all.
+    function test_Fee_Settle_ZeroActual_NoFee() public {
+        _newFeeEscrow(100);
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+
+        vm.recordLogs();
+        vm.prank(seller);
+        escrow.settle(pid, 0);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertFalse(_hasFeeTaken(logs), "no FeeTaken on zero top-up");
+        assertEq(escrow.balances(seller), 0, "seller untouched");
+        assertEq(escrow.balances(treasury), 0, "treasury untouched");
+        assertEq(escrow.balances(buyer), 100e6, "buyer fully refunded");
+    }
+
+    // --- settlePartial fee -------------------------------------------------
+
+    /// @dev Each capture is charged independently (gross captured, net credited).
+    function test_Fee_SettlePartial_PerCaptureFee() public {
+        _newFeeEscrow(100);
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+
+        vm.startPrank(seller);
+        vm.expectEmit(true, false, false, true, address(escrow));
+        emit Escrow.FeeTaken(pid, 30_000, 2_970_000);
+        vm.expectEmit(true, false, false, true, address(escrow));
+        emit Escrow.SettlePartial(pid, 3e6, 3e6);
+        escrow.settlePartial(pid, 3e6);
+
+        vm.expectEmit(true, false, false, true, address(escrow));
+        emit Escrow.FeeTaken(pid, 40_000, 3_960_000);
+        vm.expectEmit(true, false, false, true, address(escrow));
+        emit Escrow.SettlePartial(pid, 4e6, 7e6);
+        escrow.settlePartial(pid, 4e6);
+        vm.stopPrank();
+
+        assertEq(escrow.balances(seller), 6_930_000, "seller credited net per capture");
+        assertEq(escrow.balances(treasury), 70_000, "treasury credited both fees");
+        assertEq(escrow.capturedOf(pid), 7e6, "captured tracks GROSS");
+        assertTrue(_stateOf(pid) == Escrow.State.Locked, "still Locked");
+    }
+
+    /// @dev Sub-unit fee rounds to zero: capture of 1 at 100 bps pays no fee,
+    ///      emits no FeeTaken, and the seller is credited the full unit.
+    function test_Fee_SettlePartial_TinyAmount_FeeRoundsToZero() public {
+        _newFeeEscrow(100);
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+
+        vm.recordLogs();
+        vm.prank(seller);
+        escrow.settlePartial(pid, 1); // fee = 1 * 100 / 10_000 = 0
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertFalse(_hasFeeTaken(logs), "zero fee emits nothing");
+        assertEq(escrow.balances(seller), 1, "seller credited in full");
+        assertEq(escrow.balances(treasury), 0, "treasury untouched");
+        assertEq(escrow.capturedOf(pid), 1, "captured is gross");
+    }
+
+    // --- refund: never charged ---------------------------------------------
+
+    /// @dev Refund pays the buyer the FULL remaining escrow, regardless of the
+    ///      fee configuration; only captured advances (and their fees) left.
+    function test_Fee_Refund_NoFee() public {
+        _newFeeEscrow(100);
+        _deposit(buyer, 100e6);
+        uint256 maxAmount = 10e6;
+        uint256 pid = _lock(maxAmount);
+
+        vm.prank(seller);
+        escrow.settlePartial(pid, 4e6); // fee 40_000 is the ONLY treasury income
+
+        (,,, uint64 expiry,) = escrow.getPayment(pid);
+        vm.warp(expiry);
+
+        vm.expectEmit(true, true, false, true, address(escrow));
+        emit Escrow.Refunded(pid, buyer, maxAmount - 4e6, buyer);
+        vm.prank(buyer);
+        escrow.refund(pid);
+
+        assertEq(escrow.balances(buyer), 96e6, "buyer refunded the full remainder");
+        assertEq(escrow.balances(seller), 4e6 - 40_000, "seller keeps net capture");
+        assertEq(escrow.balances(treasury), 40_000, "refund took no fee");
+    }
+
+    /// @dev Uncaptured lock refunded entirely: treasury gains zero.
+    function test_Fee_Refund_UncapturedLock_TreasuryGainsNothing() public {
+        _newFeeEscrow(100);
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+
+        (,,, uint64 expiry,) = escrow.getPayment(pid);
+        vm.warp(expiry);
+
+        vm.prank(thirdParty);
+        escrow.refund(pid);
+
+        assertEq(escrow.balances(buyer), 100e6, "buyer fully refunded");
+        assertEq(escrow.balances(treasury), 0, "no fee on refund");
+        assertEq(escrow.balances(seller), 0, "seller untouched");
+    }
+
+    // --- feeBps = 0: free path ----------------------------------------------
+
+    /// @dev With feeBps = 0 the settle/settlePartial flow is byte-identical to
+    ///      v2: full credit, zero treasury, and NO FeeTaken event.
+    function test_Fee_ZeroBps_NoFeeTaken() public {
+        _newFeeEscrow(0);
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+
+        vm.recordLogs();
+        vm.startPrank(seller);
+        escrow.settlePartial(pid, 4e6);
+        escrow.settle(pid, 8e6);
+        vm.stopPrank();
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertFalse(_hasFeeTaken(logs), "zero-fee config emits no FeeTaken");
+        assertEq(escrow.balances(seller), 8e6, "seller credited gross");
+        assertEq(escrow.balances(treasury), 0, "treasury untouched");
+    }
+
+    // --- conservation ----------------------------------------------------
+
+    /// @dev Fee-aware token conservation: escrow holdings == Σbalances
+    ///      (treasury included) + Σ(Locked: maxAmount - gross captured).
+    function test_Fee_Conservation_MixedFlow() public {
+        _newFeeEscrow(100);
+        _deposit(buyer, 100e6);
+
+        vm.startPrank(buyer);
+        uint256 p1 = escrow.lock(seller, 10e6, 0);
+        uint256 p2 = escrow.lock(seller, 8e6, 0);
+        vm.stopPrank();
+
+        // p1: capture 4e6 (fee 40k), settle cumulative 9e6 (top-up 5e6, fee 50k)
+        vm.startPrank(seller);
+        escrow.settlePartial(p1, 4e6);
+        escrow.settle(p1, 9e6);
+        // p2: capture 5e6 (fee 50k), stays Locked
+        escrow.settlePartial(p2, 5e6);
+        vm.stopPrank();
+
+        // p2 refund: buyer gets 8e6 - 5e6 = 3e6, fee-free
+        (,,, uint64 p2Expiry,) = escrow.getPayment(p2);
+        vm.warp(p2Expiry);
+        vm.prank(thirdParty);
+        escrow.refund(p2);
+
+        // seller cashes out: (4e6 - 40k) + (5e6 - 50k) + (9e6 - 4e6 - 50k)
+        uint256 sellerNet = 3_960_000 + 4_950_000 + 4_950_000;
+        vm.startPrank(seller);
+        escrow.withdraw(sellerNet);
+        vm.stopPrank();
+
+        //  buyer: 100 -10(p1) -8(p2) +1(p1 remainder) +3(p2 refund) = 86e6
+        assertEq(escrow.balances(buyer), 86e6, "buyer ledger");
+        assertEq(escrow.balances(seller), 0, "seller fully withdrawn");
+        assertEq(escrow.balances(treasury), 140_000, "treasury = 40k + 50k + 50k");
+
+        uint256 sumBalances = escrow.balances(buyer) + escrow.balances(treasury) + escrow.balances(seller);
+        assertEq(usdc.balanceOf(address(escrow)), sumBalances, "holdings == balances (no Locked left)");
+        assertTrue(_stateOf(p1) == Escrow.State.Settled, "p1 settled");
+        assertTrue(_stateOf(p2) == Escrow.State.Refunded, "p2 refunded");
     }
 }
