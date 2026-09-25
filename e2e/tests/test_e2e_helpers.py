@@ -350,6 +350,37 @@ def test_escrow_abi_is_v2_partial_settle() -> None:
     assert names.index("amount") in (2, 1)  # amount present in the data section
 
 
+# ------------------------------- Escrow v3 fee (M14) ABI guard
+
+
+def test_escrow_abi_is_v3_fee_taken() -> None:
+    """Escrow v3 (M14) fee faces in run.ESCROW_ABI: the FeeTaken(uint256
+    indexed paymentId, uint256 fee, uint256 sellerAmount) event — emitted by
+    settle / settlePartial (NEVER by refund, the zero-fee refund PIN) — plus
+    the fee-bps constant the runner pins into the fork deploy env and derives
+    every fee assert from."""
+    from run import ESCROW_ABI, E2E_FEE_BPS
+
+    event = next(
+        e for e in ESCROW_ABI if e.get("type") == "event" and e.get("name") == "FeeTaken"
+    )
+    assert event["anonymous"] is False
+    assert [(i["type"], i.get("indexed", False)) for i in event["inputs"]] == [
+        ("uint256", True),   # paymentId indexed (exact per-payment log filter)
+        ("uint256", False),  # fee
+        ("uint256", False),  # sellerAmount
+    ]
+    assert [i["name"] for i in event["inputs"]] == ["paymentId", "fee", "sellerAmount"]
+
+    # The fork deploy pins FEE_BPS to the runner constant (default 100 = 1%,
+    # aligned with the contracts lane env default): fee math sanity — the
+    # deterministic mock settle amount 11,400 native must yield fee 114 and
+    # sellerAmount 11,286.
+    assert E2E_FEE_BPS == 100
+    assert 11_400 * E2E_FEE_BPS // 10_000 == 114
+    assert 11_400 - 11_400 * E2E_FEE_BPS // 10_000 == 11_286
+
+
 # ------------------------------- env pins vs reused artifact (rev-3 C1)
 
 def test_env_artifact_addresses_agree_passes() -> None:

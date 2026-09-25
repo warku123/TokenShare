@@ -48,8 +48,14 @@ base_sepolia local path = EVERYTHING on this machine:
      exactly the two captures while the payment STAYS Locked, and the refund
      after the TTL must return exactly maxAmount - captured.
   7. On-chain asserts: Escrow payment Settled (state=2), settled amount equals
-     the PIN pricing formula, escrow balances moved buyer->seller; refund path
-     leaves the payment Refunded (state=3) with the buyer credited back.
+     the PIN pricing formula, escrow balances moved buyer->seller; M14 (Escrow
+     v3 protocol fee): settle / settlePartial emit FeeTaken(paymentId, fee,
+     sellerAmount) with fee == amount*FEE_BPS//10000 (the fork deploy injects
+     FEE_BPS=100 explicitly), the seller ledger gets amount-fee and the
+     feeRecipient (deployer) ledger gets fee; refund txs carry NO FeeTaken and
+     credit the buyer IN FULL (zero-fee refund PIN); the M13 partial segment
+     reconciles the CUMULATIVE fee across both captures. Refund path leaves
+     the payment Refunded (state=3).
   8. All subprocesses are killed; the run prints E2E PASSED (verbatim) on
      success, or E2E FAILED: <reason> with a non-zero exit code otherwise.
 
@@ -169,6 +175,14 @@ PARTIAL_PROMPT = "Explain stateless signed API keys in one sentence."
 # (M13 PIN: per-response async flush / threshold / TTL-window) — poll up to
 # this long for the SettlePartial logs before declaring failure.
 SETTLE_PARTIAL_POLL_S = 25.0
+# M14 (Escrow v3 protocol fee): the fork deploy injects FEE_BPS=<this> into
+# the forge env — the contracts lane default is also 100, but it is passed
+# EXPLICITLY so the fee asserts below never depend on the lane default.
+# Single source of truth for every fee assert: fee == amount * E2E_FEE_BPS
+# // 10_000, sellerAmount == amount - fee; refunds are ALWAYS zero-fee
+# (buyer credited in full). FEE_RECIPIENT is the deployer (Deploy.s.sol
+# default), i.e. anvil account 0 on the fork path.
+E2E_FEE_BPS = int(os.environ.get("E2E_FEE_BPS", "100"))
 def pin_actual(prices: dict[str, int], prompt_tokens: int, cached_tokens: int,
                completion_tokens: int) -> int:
     """PIN actual — verbatim relay/app/pricing.py compute_actual:
@@ -536,6 +550,21 @@ ESCROW_ABI = [
             {"name": "captured", "type": "uint256", "indexed": False},
         ],
     },
+    # Escrow v3 (M14 ABI PIN, append-only): every seller credit (the settle
+    # top-up and each settlePartial capture) charges fee == amount *
+    # FEE_BPS // 10_000 and emits this event; the seller ledger receives
+    # sellerAmount and FEE_RECIPIENT receives fee. Refund NEVER emits it
+    # (zero-fee refund). Existing event signatures are unchanged.
+    {
+        "type": "event",
+        "name": "FeeTaken",
+        "anonymous": False,
+        "inputs": [
+            {"name": "paymentId", "type": "uint256", "indexed": True},
+            {"name": "fee", "type": "uint256", "indexed": False},
+            {"name": "sellerAmount", "type": "uint256", "indexed": False},
+        ],
+    },
     {
         "type": "event",
         "name": "Refunded",
@@ -660,6 +689,11 @@ def deploy_contracts(network: str, rpc_url: str, deployer_addr: str,
         # real testnet USDC. Real-chain deploys keep USDC_ADDR (Gate G m1) —
         # official Circle USDC is used there, never a mock with a mint.
         env.pop("USDC_ADDR", None)
+        # M14: pin the Escrow v3 protocol fee for THIS run. The contracts lane
+        # env default is also 100, but the value is injected explicitly so the
+        # fee asserts never depend on the lane default (E2E_FEE_BPS is the
+        # single shared constant: deploy env AND every assert).
+        env["FEE_BPS"] = str(E2E_FEE_BPS)
     cmd = [
         forge, "script", "script/Deploy.s.sol",
         "--sig", "run(string)", network,
@@ -1079,15 +1113,24 @@ def warp_chain_past(rpc_url: str, target_ts: int) -> None:
         print(f"anvil time warped +{delta}s (fork clock lags host clock)")
 
 
-def escrow_balances(rpc_url: str, deployed: dict[str, Any], buyer: str, seller: str) -> dict[str, int]:
+def escrow_balances(rpc_url: str, deployed: dict[str, Any], buyer: str, seller: str,
+                    fee_recipient: str | None = None) -> dict[str, int]:
+    """Withdrawable Escrow balances snapshot. `fee_recipient` (M14: the
+    deployment's FEE_RECIPIENT — the deployer) is tracked only when given, so
+    the v3 fee-split asserts can verify its ledger increment."""
     w3 = w3_at(rpc_url)
     escrow = w3.eth.contract(
         address=w3.to_checksum_address(deployed["escrow"]), abi=ESCROW_ABI
     )
-    return {
+    out = {
         "buyer_escrow": int(escrow.functions.balances(w3.to_checksum_address(buyer)).call()),
         "seller_escrow": int(escrow.functions.balances(w3.to_checksum_address(seller)).call()),
     }
+    if fee_recipient:
+        out["fee_recipient_escrow"] = int(
+            escrow.functions.balances(w3.to_checksum_address(fee_recipient)).call()
+        )
+    return out
 
 
 def escrow_payment(rpc_url: str, deployed: dict[str, Any], payment_id: int) -> dict[str, Any]:
@@ -1104,6 +1147,56 @@ def escrow_payment(rpc_url: str, deployed: dict[str, Any], payment_id: int) -> d
         "expiresAt": int(expires_at), "state": int(state),
         "captured": int(raw[5]) if len(raw) >= 6 else None,
     }
+
+
+def escrow_supports_fee(rpc_url: str, escrow_addr: str) -> bool:
+    """True when the DEPLOYED bytecode exposes the Escrow v3 `FEE_BPS()` public
+    immutable getter — the deployment-generation gate for the M14 fee asserts.
+    Events have no runtime-bytecode selectors, so the immutable getter is the
+    reliable v3 probe (an Escrow v1/v2 deployment simply means the contracts
+    lane has not landed for this run yet)."""
+    w3 = w3_at(rpc_url)
+    selector = w3.keccak(text="FEE_BPS()")[:4]
+    code = w3.eth.get_code(w3.to_checksum_address(escrow_addr))
+    return bytes(selector) in bytes(code)
+
+
+def escrow_fee_taken_logs(rpc_url: str, deployed: dict[str, Any], payment_id: int,
+                          from_block: int) -> list[dict[str, Any]]:
+    """Decoded Escrow v3 FeeTaken logs for `payment_id` since `from_block`
+    (paymentId is indexed → exact per-payment filter). Empty list = no fee
+    events observed in the range."""
+    w3 = w3_at(rpc_url)
+    escrow = w3.eth.contract(
+        address=w3.to_checksum_address(deployed["escrow"]), abi=ESCROW_ABI
+    )
+    events = escrow.events.FeeTaken().get_logs(
+        argument_filters={"paymentId": int(payment_id)}, from_block=int(from_block)
+    )
+    return [
+        {
+            "fee": int(e["args"]["fee"]),
+            "sellerAmount": int(e["args"]["sellerAmount"]),
+            "tx": e["transactionHash"].hex(),
+        }
+        for e in events
+    ]
+
+
+def assert_refund_tx_has_no_fee(rpc_url: str, deployed: dict[str, Any],
+                                tx_hash: str, label: str) -> None:
+    """M14 refund PIN: refunds are ALWAYS zero-fee — the refund transaction
+    receipt must carry ZERO FeeTaken logs. Safe against v1/v2 deployments too
+    (they never emit the topic, so decoding yields nothing)."""
+    w3 = w3_at(rpc_url)
+    escrow = w3.eth.contract(
+        address=w3.to_checksum_address(deployed["escrow"]), abi=ESCROW_ABI
+    )
+    receipt = w3.eth.get_transaction_receipt(tx_hash)
+    fee_events = escrow.events.FeeTaken().process_receipt(receipt)
+    if fee_events:
+        fail_all(f"{label}: refund tx {tx_hash} emitted {len(fee_events)} FeeTaken "
+                 "log(s) — refund must be zero-fee")
 
 
 def parse_cli_value(cli_output: str, key: str) -> str:
@@ -1186,8 +1279,11 @@ def assert_call_output(out: str, prompt: str, expect_mock: bool = True) -> None:
 def onchain_settle_asserts(rpc_url: str, deployed: dict[str, Any], payment_id: int,
                            before: dict[str, int], after: dict[str, int],
                            buyer_addr: str, seller_addr: str,
+                           fee_recipient_addr: str | None = None,
+                           from_block: int = 0,
                            expected_actual: int | None = EXPECTED_ACTUAL) -> dict[str, Any]:
-    step("[7/8] On-chain asserts: Escrow Settled + balance direction")
+    step("[7/8] On-chain asserts: Escrow Settled + balance direction "
+         f"(+ M14 fee split, {E2E_FEE_BPS} bps)")
     payment = escrow_payment(rpc_url, deployed, payment_id)
     if payment["state"] != 2:
         fail_all(f"payment {payment_id} state={payment['state']} (expected 2 = Settled)")
@@ -1204,17 +1300,69 @@ def onchain_settle_asserts(rpc_url: str, deployed: dict[str, Any], payment_id: i
     if expected_actual is not None and actual != expected_actual:
         fail_all(f"settled delta {actual} != priced expectation {expected_actual} "
                  f"(before={before} after={after})")
-    if after["seller_escrow"] - before["seller_escrow"] != actual:
-        fail_all(
-            f"seller escrow delta ({after['seller_escrow'] - before['seller_escrow']}) "
-            f"!= buyer delta ({actual})"
-        )
     if actual > payment["maxAmount"]:
         fail_all(f"actual {actual} exceeds locked maxAmount {payment['maxAmount']}")
-    print(
-        f"OK: payment {payment_id} Settled, actual={actual} native "
-        f"({actual / 1e6:.6f} USDC) <= maxAmount {payment['maxAmount']}"
+
+    delta_seller = after["seller_escrow"] - before["seller_escrow"]
+    fee_recipient_is_seller = (
+        fee_recipient_addr is not None
+        and str(fee_recipient_addr).lower() == str(seller_addr).lower()
     )
+
+    # M14 (Escrow v3): the settle charges fee == amount*FEE_BPS//10_000 on the
+    # seller credit and emits FeeTaken(paymentId, fee, sellerAmount); the
+    # balances ledger credits seller += amount-fee and FEE_RECIPIENT += fee.
+    # A v1/v2 deployment (no FEE_BPS() face — contracts lane not landed for
+    # this run) never emits the event and credits the seller in full — the
+    # legacy full-credit asserts apply there instead.
+    if escrow_supports_fee(rpc_url, deployed["escrow"]):
+        fee_logs = escrow_fee_taken_logs(rpc_url, deployed, payment_id, from_block)
+        if len(fee_logs) != 1:
+            fail_all(f"FeeTaken logs {len(fee_logs)} != 1 for settled payment "
+                     f"{payment_id} (a v3 settle must emit exactly one)")
+        fee = fee_logs[0]["fee"]
+        expected_fee = actual * E2E_FEE_BPS // 10_000
+        if fee != expected_fee:
+            fail_all(f"FeeTaken fee {fee} != amount*{E2E_FEE_BPS}//10000 = {expected_fee} "
+                     f"(settled amount {actual})")
+        if fee_logs[0]["sellerAmount"] != actual - fee:
+            fail_all(f"FeeTaken sellerAmount {fee_logs[0]['sellerAmount']} != "
+                     f"amount-fee {actual - fee} (amount {actual}, fee {fee})")
+        if fee_recipient_is_seller:
+            # FEE_RECIPIENT == seller (real-chain deployer = seller): both
+            # credits merge into ONE ledger row — it must show the full amount.
+            if delta_seller != actual:
+                fail_all(f"seller(=feeRecipient) escrow delta {delta_seller} "
+                         f"!= amount {actual}")
+        else:
+            if delta_seller != actual - fee:
+                fail_all(f"seller escrow delta {delta_seller} != amount-fee "
+                         f"{actual - fee} (amount {actual}, fee {fee})")
+            if "fee_recipient_escrow" not in before or "fee_recipient_escrow" not in after:
+                fail_all("FeeTaken present but the feeRecipient balance was not "
+                         "tracked (escrow_balances must snapshot the deployer)")
+            delta_fee = after["fee_recipient_escrow"] - before["fee_recipient_escrow"]
+            if delta_fee != fee:
+                fail_all(f"feeRecipient escrow delta {delta_fee} != FeeTaken fee {fee}")
+        print(
+            f"OK: payment {payment_id} Settled, actual={actual} native "
+            f"({actual / 1e6:.6f} USDC) <= maxAmount {payment['maxAmount']}; "
+            f"M14 fee split: fee={fee} ({E2E_FEE_BPS} bps), seller +{actual - fee}, "
+            f"feeRecipient(={fee_recipient_addr}) +{fee}"
+        )
+    else:
+        print("FEE ASSERTS SKIPPED: deployed Escrow has no FEE_BPS() face "
+              "(v1/v2 — contracts lane not landed); asserting the legacy "
+              "full seller credit")
+        if delta_seller != actual:
+            fail_all(
+                f"seller escrow delta ({delta_seller}) "
+                f"!= buyer delta ({actual})"
+            )
+        print(
+            f"OK: payment {payment_id} Settled, actual={actual} native "
+            f"({actual / 1e6:.6f} USDC) <= maxAmount {payment['maxAmount']}"
+        )
     return payment
 
 
@@ -1268,7 +1416,8 @@ def settle_partial_logs(rpc_url: str, deployed: dict[str, Any], payment_id: int,
 
 def partial_settle_flow(deployed: dict[str, Any], rpc_url: str, chain_id: int,
                         base_env: dict[str, str], buyer_key: str, buyer_addr: str,
-                        seller_addr: str, served_model: str) -> None:
+                        seller_addr: str, served_model: str,
+                        fee_recipient_addr: str | None = None) -> None:
     """M13 consumer segment (fork path): one Locked payment consumed TWICE via
     a CLI-minted stateless bearer API key, then refunded for the remainder.
 
@@ -1280,9 +1429,13 @@ def partial_settle_flow(deployed: dict[str, Any], rpc_url: str, chain_id: int,
     4. On-chain + relay-view asserts: SettlePartial events accumulate exactly
        the two captured amounts while getPayment STILL reports Locked (v1
        getPayment has no captured getter — logs are the on-chain source); the
-       relay GET /payment/{id}/usage view matches.
+       relay GET /payment/{id}/usage view matches. M14 (Escrow v3): each
+       capture also emits FeeTaken(fee == amount*FEE_BPS//10000) — the CUMULATIVE
+       fee of both captures is reconciled against the ledger deltas
+       (seller += captured - fees, feeRecipient += fees).
     5. TTL elapses (wall clock + fork warp) -> CLI `refund` returns exactly
-       maxAmount - captured (Refunded event amount, payment state Refunded).
+       maxAmount - captured (Refunded event amount, payment state Refunded);
+       the refund tx carries NO FeeTaken and the buyer is credited in full.
 
     Skips (clearly labeled, never masquerading as exercised) when the
     Escrow v2 settlePartial face is not deployed yet (contracts lane pending)
@@ -1296,6 +1449,18 @@ def partial_settle_flow(deployed: dict[str, Any], rpc_url: str, chain_id: int,
             "(Escrow v2 / contracts lane not landed) — M13 segment not exercised"
         )
         return
+    # M14 fee reconciliation gate: same deployment-generation probe as the
+    # full-settle asserts (FEE_BPS() immutable getter). A v2 deployment skips
+    # the fee reconciliation with a clear label instead of failing.
+    fee_capable = escrow_supports_fee(rpc_url, deployed["escrow"])
+    if not fee_capable:
+        print("FEE RECONCILIATION SKIPPED: deployed Escrow has no FEE_BPS() face "
+              "(v1/v2 — contracts lane not landed); M14 fee asserts not exercised")
+    pre_balances = (
+        escrow_balances(rpc_url, deployed, buyer_addr, seller_addr, fee_recipient_addr)
+        if fee_capable else None
+    )
+    partial_start_block = int(w3_at(rpc_url).eth.block_number)
 
     buyer_env = cli_env(base_env, deployed, rpc_url, chain_id, buyer_key, seller_addr)
     disputes_file = E2E_DIR / ".disputes.json"
@@ -1402,6 +1567,43 @@ def partial_settle_flow(deployed: dict[str, Any], rpc_url: str, chain_id: int,
     print(f"OK: payment {partial_pid} still Locked with on-chain captured "
           f"{captured_total} native ({len(logs)} SettlePartial events)")
 
+    # M14 (Escrow v3): each capture charged fee == amount*FEE_BPS//10000 and
+    # emitted FeeTaken — reconcile the CUMULATIVE fee: per-event exact split,
+    # summed fees == ledger movements (seller += captured - fees, feeRecipient
+    # += fees) across the whole segment.
+    if fee_capable:
+        fee_logs = escrow_fee_taken_logs(rpc_url, deployed, partial_pid,
+                                         partial_start_block)
+        if len(fee_logs) != len(actuals):
+            fail_all(f"FeeTaken logs for payment {partial_pid}: {len(fee_logs)} != "
+                     f"{len(actuals)} bearer captures (one per settlePartial)")
+        for i, (fl, cap) in enumerate(zip(fee_logs, actuals), 1):
+            expected_fee = cap * E2E_FEE_BPS // 10_000
+            if fl["fee"] != expected_fee:
+                fail_all(f"FeeTaken #{i} fee {fl['fee']} != "
+                         f"amount*{E2E_FEE_BPS}//10000 = {expected_fee} (capture {cap})")
+            if fl["sellerAmount"] != cap - fl["fee"]:
+                fail_all(f"FeeTaken #{i} sellerAmount {fl['sellerAmount']} != "
+                         f"capture-fee {cap - fl['fee']} (capture {cap})")
+        fees = [fl["fee"] for fl in fee_logs]
+        total_fee = sum(fees)
+        post_balances = escrow_balances(rpc_url, deployed, buyer_addr, seller_addr,
+                                        fee_recipient_addr)
+        delta_seller = post_balances["seller_escrow"] - pre_balances["seller_escrow"]
+        if delta_seller != captured_total - total_fee:
+            fail_all(f"partial seller escrow delta {delta_seller} != "
+                     f"captured-fee {captured_total - total_fee} "
+                     f"(captured {captured_total}, fees {fees})")
+        delta_fee = (post_balances["fee_recipient_escrow"]
+                     - pre_balances["fee_recipient_escrow"])
+        if delta_fee != total_fee:
+            fail_all(f"partial feeRecipient escrow delta {delta_fee} != "
+                     f"cumulative fee {total_fee} ({fees})")
+        print(f"OK: M14 cumulative fee reconciliation: {len(actuals)} captures "
+              f"{captured_total} native -> fees {fees} (total {total_fee}, "
+              f"{E2E_FEE_BPS} bps each), seller +{captured_total - total_fee}, "
+              f"feeRecipient +{total_fee}")
+
     # Relay-side cumulative view must agree with the chain.
     usage = httpx.get(f"{relay_base}/payment/{partial_pid}/usage", timeout=10.0).json()
     if int(usage.get("captured", -1)) != captured_total:
@@ -1420,11 +1622,16 @@ def partial_settle_flow(deployed: dict[str, Any], rpc_url: str, chain_id: int,
         time.sleep(wait_s)
     if rpc_url.startswith(("http://127.0.0.1", "http://localhost")):
         warp_chain_past(rpc_url, expires_at)
+    before_refund = escrow_balances(rpc_url, deployed, buyer_addr, seller_addr,
+                                    fee_recipient_addr)
     refund_out = run_cli(["--disputes-file", str(disputes_file), "refund",
                           "--payment-id", str(partial_pid)], buyer_env)
     if f"paymentId: {partial_pid} refunded" not in refund_out:
         fail_all(f"partial refund output missing confirmation:\n{refund_out}")
     refund_tx = parse_cli_value(refund_out, "tx")
+    # M14: the refund must be zero-fee — no FeeTaken in its receipt.
+    assert_refund_tx_has_no_fee(rpc_url, deployed, refund_tx,
+                                f"partial payment {partial_pid}")
     w3 = w3_at(rpc_url)
     escrow = w3.eth.contract(
         address=w3.to_checksum_address(deployed["escrow"]), abi=ESCROW_ABI
@@ -1441,8 +1648,15 @@ def partial_settle_flow(deployed: dict[str, Any], rpc_url: str, chain_id: int,
     if payment["state"] != 3:
         fail_all(f"partial refund: payment {partial_pid} state={payment['state']} "
                  "(expected 3 = Refunded)")
+    after_refund = escrow_balances(rpc_url, deployed, buyer_addr, seller_addr,
+                                   fee_recipient_addr)
+    buyer_credit = after_refund["buyer_escrow"] - before_refund["buyer_escrow"]
+    if buyer_credit != refunded_amount:
+        fail_all(f"partial refund buyer ledger credit {buyer_credit} != "
+                 f"Refunded amount {refunded_amount} (zero-fee refund PIN)")
     print(f"OK: refund returned exactly maxAmount - captured "
-          f"({max_amount} - {captured_total} = {refunded_amount} native), payment Refunded")
+          f"({max_amount} - {captured_total} = {refunded_amount} native), "
+          f"no FeeTaken, buyer ledger +{buyer_credit}, payment Refunded")
 
 
 # ---------------------------------------------------------------------------
@@ -1563,7 +1777,7 @@ def seller_key_addr(seller_key: str) -> str:
 def buyer_flow(deployed: dict[str, Any], rpc_url: str, chain_id: int,
                base_env: dict[str, str], buyer_key: str, buyer_addr: str,
                seller_addr: str, deposit_usdc: str, served_model: str,
-               upstream_is_mock: bool) -> int:
+               upstream_is_mock: bool, fee_recipient_addr: str | None = None) -> int:
     step("[6/8] Buyer flow via CLI subprocess: deposit -> lock -> call -> refund (expired)")
     buyer_env = cli_env(base_env, deployed, rpc_url, chain_id, buyer_key, seller_addr)
     disputes_file = E2E_DIR / ".disputes.json"
@@ -1582,9 +1796,13 @@ def buyer_flow(deployed: dict[str, Any], rpc_url: str, chain_id: int,
     expires_at = int(parse_cli_value(lock_out, "expiresAt").split("unix ")[1])
     print(f"locked paymentId {refund_pid} (ttl={REFUND_TTL_S}s) for the refund path")
 
-    # Snapshot before the paid call: the settle must move exactly
-    # EXPECTED_ACTUAL out of the buyer's escrow balance into the seller's.
-    before = escrow_balances(rpc_url, deployed, buyer_addr, seller_addr)
+    # Snapshot + block marker before the paid call: the settle must move exactly
+    # EXPECTED_ACTUAL out of the buyer's escrow balance into the seller's
+    # (minus the M14 protocol fee) + the feeRecipient's ledger. from_block is
+    # the FeeTaken log-search boundary (the settle txs all mine after it).
+    before = escrow_balances(rpc_url, deployed, buyer_addr, seller_addr,
+                             fee_recipient_addr)
+    pre_call_block = int(w3_at(rpc_url).eth.block_number)
 
     prompt = "Explain EIP-712 receipts in one sentence."
     call_out = run_cli(
@@ -1601,8 +1819,11 @@ def buyer_flow(deployed: dict[str, Any], rpc_url: str, chain_id: int,
     # only applies to the deterministic mock usage; a real official upstream
     # settles from its real usage (still asserted: Settled, buyer->seller flow).
     payment = onchain_settle_asserts(rpc_url, deployed, settle_pid, before,
-                                     escrow_balances(rpc_url, deployed, buyer_addr, seller_addr),
+                                     escrow_balances(rpc_url, deployed, buyer_addr,
+                                                     seller_addr, fee_recipient_addr),
                                      buyer_addr, seller_addr,
+                                     fee_recipient_addr=fee_recipient_addr,
+                                     from_block=pre_call_block,
                                      expected_actual=EXPECTED_ACTUAL if upstream_is_mock else None)
 
     # Receipt actualAmount (M9 v2): recompute the PIN settle from the receipt's
@@ -1626,14 +1847,37 @@ def buyer_flow(deployed: dict[str, Any], rpc_url: str, chain_id: int,
         time.sleep(wait_s)
     if rpc_url.startswith(("http://127.0.0.1", "http://localhost")):
         warp_chain_past(rpc_url, expires_at)
+    before_refund = escrow_balances(rpc_url, deployed, buyer_addr, seller_addr,
+                                    fee_recipient_addr)
     refund_out = run_cli(["--disputes-file", str(disputes_file), "refund",
                           "--payment-id", str(refund_pid)], buyer_env)
     if f"paymentId: {refund_pid} refunded" not in refund_out:
         fail_all(f"CLI refund output missing confirmation:\n{refund_out}")
+    refund_tx = parse_cli_value(refund_out, "tx")
+    # M14: refund is ALWAYS zero-fee — no FeeTaken may appear in its receipt,
+    # and the buyer's ledger must be credited the FULL refunded amount.
+    assert_refund_tx_has_no_fee(rpc_url, deployed, refund_tx,
+                                f"payment {refund_pid}")
+    w3 = w3_at(rpc_url)
+    escrow = w3.eth.contract(
+        address=w3.to_checksum_address(deployed["escrow"]), abi=ESCROW_ABI
+    )
+    refund_receipt = w3.eth.get_transaction_receipt(refund_tx)
+    refunded_events = escrow.events.Refunded().process_receipt(refund_receipt)
+    if len(refunded_events) != 1:
+        fail_all(f"Refunded events {len(refunded_events)} != 1 for payment {refund_pid}")
+    refunded_amount = int(refunded_events[0]["args"]["amount"])
+    after_refund = escrow_balances(rpc_url, deployed, buyer_addr, seller_addr,
+                                   fee_recipient_addr)
+    buyer_credit = after_refund["buyer_escrow"] - before_refund["buyer_escrow"]
+    if buyer_credit != refunded_amount:
+        fail_all(f"refund buyer ledger credit {buyer_credit} != Refunded amount "
+                 f"{refunded_amount} (zero-fee refund PIN)")
     payment = escrow_payment(rpc_url, deployed, refund_pid)
     if payment["state"] != 3:
         fail_all(f"refund: payment {refund_pid} state={payment['state']} (expected 3 = Refunded)")
-    print(f"OK: payment {refund_pid} Refunded (M4 refund path verified on-chain)")
+    print(f"OK: payment {refund_pid} Refunded — no FeeTaken, buyer ledger "
+          f"+{buyer_credit} native (M4 refund path + M14 zero-fee refund verified on-chain)")
     return settle_pid
 
 
@@ -1807,6 +2051,12 @@ def run(network: str) -> str | None:
         served_model = (base_env.get("E2E_MODEL") or "kimi-k2.6").strip()
     print(f"upstream: {upstream_base_url} (mock={use_mock}) model={served_model}")
 
+    # M14 fee recipient: the deployment's FEE_RECIPIENT is the DEPLOYER
+    # (Deploy.s.sol default) — anvil account 0 on the fork path; on real chains
+    # the deployer IS the seller account (deployer_key = seller_key), so the
+    # fee credit merges into the seller ledger row (handled by the asserts).
+    fee_recipient_addr = deployer_addr if cfg["anvil"] else seller_addr
+
     prepare_contracts(rpc_url, relay_port, deployed, seller_addr, seller_key,
                       buyer_addr, mint_key=deployer_key if cfg["anvil"] else None,
                       deposit_usdc=deposit_usdc, served_model=served_model,
@@ -1815,7 +2065,7 @@ def run(network: str) -> str | None:
                 relay_port, seller_key, upstream_base_url)
     buyer_flow(deployed, rpc_url, int(deployed.get("chainId") or cfg["chain_id"]),
                base_env, buyer_key, buyer_addr, seller_addr, deposit_usdc,
-               served_model, use_mock)
+               served_model, use_mock, fee_recipient_addr=fee_recipient_addr)
     if cfg["anvil"]:
         # M13 consumer segment (fork path ONLY): stateless bearer API key,
         # per-call partial captures on a still-Locked payment, then refund the
@@ -1823,7 +2073,8 @@ def run(network: str) -> str | None:
         # the relay bearer/usage face (skips with a clear label otherwise).
         partial_settle_flow(deployed, rpc_url,
                             int(deployed.get("chainId") or cfg["chain_id"]),
-                            base_env, buyer_key, buyer_addr, seller_addr, served_model)
+                            base_env, buyer_key, buyer_addr, seller_addr,
+                            served_model, fee_recipient_addr=fee_recipient_addr)
     return None
 
 
