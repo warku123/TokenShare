@@ -6,6 +6,7 @@ upstream is a local threaded HTTP server whose behavior each test selects.
 from __future__ import annotations
 
 import hashlib
+import base64
 import json
 import sys
 import threading
@@ -64,6 +65,10 @@ class FakeChain:
     valid: bool = True
     ttl_delta: int = 600
     max_amount: int = 1_000_000
+    # M13: on-chain payment buyer (bearer cross-check knob) + settlePartial.
+    payment_buyer: str = BUYER
+    settle_partial_calls: list[tuple[int, int]] = []
+    settle_partial_fails: bool = False
     listing_active: bool = True
     listing_registered: bool = True
     models: list[str] = ["gpt-4o-mini", ""]
@@ -91,6 +96,9 @@ class FakeChain:
         cls.valid = True
         cls.ttl_delta = 600
         cls.max_amount = 1_000_000
+        cls.payment_buyer = BUYER
+        cls.settle_partial_calls = []
+        cls.settle_partial_fails = False
         cls.listing_active = True
         cls.listing_registered = True
         cls.models = ["gpt-4o-mini", ""]
@@ -101,7 +109,7 @@ class FakeChain:
     def get_payment(self, payment_id: int) -> dict[str, Any]:
         type(self).payment_reads += 1
         return {
-            "buyer": BUYER,
+            "buyer": type(self).payment_buyer,
             "seller": SELLER,
             "maxAmount": type(self).max_amount,
             "expiresAt": int(FROZEN) + type(self).ttl_delta,
@@ -155,6 +163,13 @@ class FakeChain:
         if type(self).settle_fails:
             raise RuntimeError("rpc down")
         type(self).settle_calls.append((payment_id, actual_amount))
+        return {"status": 1}
+
+    def settle_partial(self, payment_id: int, amount: int) -> dict[str, Any]:
+        """M13-D mirror of ChainClient.settle_partial."""
+        if type(self).settle_partial_fails:
+            raise RuntimeError("rpc down")
+        type(self).settle_partial_calls.append((payment_id, amount))
         return {"status": 1}
 
 
@@ -415,3 +430,53 @@ def post_chat(
 ) -> Any:
     hdrs = signed_headers(raw_body, payment_id, key) if headers is None else headers
     return client.post("/v1/chat/completions", content=raw_body, headers=hdrs)
+
+
+# --------------------------------------------------------------------------
+# M13 bearer api-key helpers (console-side key assembly mirror)
+# --------------------------------------------------------------------------
+def b64url(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def mint_api_key(
+    payment_id: int = 42,
+    expiry: int | None = None,
+    max_amount: int = 1_000_000,
+    buyer: str = BUYER,
+    key: str = BUYER_KEY,
+) -> str:
+    """PIN (C-lane mirror): sign `TokenShare API key
+    grant|paymentId={p}|expiry={e}|maxAmount={m}` (EIP-191 text) and wrap
+    `tsk1.<b64url(payload_json)>.<b64url(sig_hex)>` with
+    payload={"p","e","m","b"}."""
+    e = int(FROZEN) + 600 if expiry is None else expiry
+    payload = {"p": payment_id, "e": e, "m": max_amount, "b": buyer}
+    msg = (
+        f"TokenShare API key grant|paymentId={payload['p']}"
+        f"|expiry={payload['e']}|maxAmount={payload['m']}"
+    )
+    sig = Account.from_key(key).sign_message(encode_defunct(text=msg)).signature.hex()
+    if not sig.startswith("0x"):
+        sig = "0x" + sig
+    return (
+        "tsk1."
+        + b64url(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+        + "."
+        + b64url(sig.encode("ascii"))
+    )
+
+
+def bearer_headers(api_key: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+
+def wait_until(condition: Any, timeout: float = 5.0) -> bool:
+    """Poll a background-thread condition (fire-and-forget flush) with a
+    deadline; returns the last condition value."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.01)
+    return bool(condition())

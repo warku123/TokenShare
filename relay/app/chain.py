@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from eth_account import Account
+from eth_utils import keccak
 from web3 import Web3
 from web3.contract import Contract
 from web3.exceptions import ContractLogicError
@@ -104,6 +105,38 @@ def _is_nonce_conflict(exc: BaseException) -> bool:
     """True when the exception is a same-nonce send rejection."""
     text = f"{type(exc).__name__} {exc}".lower()
     return any(marker in text for marker in _NONCE_CONFLICT_MARKERS)
+
+
+# ---------------------------------------------------------------------------
+# M13-D Escrow v2 partial settle (PIN-verbatim selector encoding)
+#
+# `settlePartial(uint256,uint256)` — Locked 态可多次调用，链上 captured 累计
+# (≤maxAmount)，不改 payment 状态。The contracts lane lands in parallel, so
+# the Foundry artifact may not yet carry settlePartial in its ABI: the
+# calldata is therefore encoded straight from the PIN signature instead of
+# `escrow.functions.settlePartial(...)` (byte-identical once the artifact
+# refreshes; selector c97ac54c).
+# ---------------------------------------------------------------------------
+_SETTLE_PARTIAL_SIGNATURE = "settlePartial(uint256,uint256)"
+# Hardcoded PIN selector, cross-checked against keccak at call time.
+_SETTLE_PARTIAL_SELECTOR = "c97ac54c"
+
+
+def _encode_settle_partial_calldata(payment_id: int, amount: int) -> str:
+    """0x-prefixed calldata for settlePartial(uint256,uint256):
+    4-byte selector + two 32-byte big-endian uint256 words."""
+    selector = keccak(_SETTLE_PARTIAL_SIGNATURE.encode("ascii"))[:4].hex()
+    if selector != _SETTLE_PARTIAL_SELECTOR:
+        raise RuntimeError(
+            "settlePartial selector drift: PIN says "
+            f"{_SETTLE_PARTIAL_SELECTOR}, keccak gives {selector}"
+        )
+    return (
+        "0x"
+        + selector
+        + payment_id.to_bytes(32, "big").hex()
+        + amount.to_bytes(32, "big").hex()
+    )
 
 
 class ChainClient:
@@ -247,6 +280,11 @@ class ChainClient:
                 "gas": 120_000,
             }
         )
+        return self._sign_send_wait(tx)
+
+    def _sign_send_wait(self, tx: dict[str, Any]) -> TxReceipt:
+        """Fee fields → sign → send → receipt-wait tail shared by settle and
+        settle_partial. Caller must hold _SETTLE_LOCK (see settle)."""
         # EIP-1559 fee fields; fall back to legacy pricing for non-1559 nodes.
         latest = self._w3.eth.get_block("latest")
         if latest.get("baseFeePerGas") is not None:
@@ -261,6 +299,21 @@ class ChainClient:
         raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
         tx_hash = self._w3.eth.send_raw_transaction(raw)
         return self._w3.eth.wait_for_transaction_receipt(tx_hash)
+
+    def _send_escrow_tx(self, data: str) -> TxReceipt:
+        """Escrow write with PRE-ENCODED calldata (M13 settlePartial — the
+        artifact ABI may not carry the function yet). Same envelope as
+        _build_sign_send_settle: seller `from`, gas 120_000, configured
+        chainId. Caller must hold _SETTLE_LOCK."""
+        tx: dict[str, Any] = {
+            "to": self.escrow.address,
+            "from": self._account.address,
+            "nonce": self._w3.eth.get_transaction_count(self._account.address),
+            "chainId": self._w3.eth.chain_id,
+            "gas": 120_000,
+            "data": data,
+        }
+        return self._sign_send_wait(tx)
 
     def settle(self, payment_id: int, actual_amount: int) -> TxReceipt:
         """Send Escrow.settle(paymentId, actual) from the seller account and
@@ -281,3 +334,26 @@ class ChainClient:
                     raise
             # Nonce conflicted anyway: retry once with a freshly fetched nonce.
             return self._build_sign_send_settle(payment_id, actual_amount)
+
+    def settle_partial(self, payment_id: int, amount: int) -> TxReceipt:
+        """Send Escrow v2 settlePartial(paymentId, amount) from the seller
+        account and wait for the receipt (M13-D). Same failure contract as
+        settle: raises on revert/send failure — callers treat ANY exception as
+        partial-flush-failed (never swallow the LLM response). Shares the
+        module-level nonce lock and the EIP-1559 build with settle; exactly
+        ONE refetch-nonce retry on a same-nonce rejection.
+
+        Calldata is PIN-selector-encoded (see _encode_settle_partial_calldata)
+        so this works before/after the contracts lane refreshes the artifact.
+        On-chain the call accumulates captured (≤maxAmount) without changing
+        the payment state; a revert (e.g. OverMax after a relay restart lost
+        the local ledger) surfaces as a normal exception to the caller."""
+        data = _encode_settle_partial_calldata(payment_id, amount)
+        with _SETTLE_LOCK:
+            try:
+                return self._send_escrow_tx(data)
+            except Exception as exc:
+                if not _is_nonce_conflict(exc):
+                    raise
+            # Nonce conflicted anyway: retry once with a freshly fetched nonce.
+            return self._send_escrow_tx(data)

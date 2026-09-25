@@ -16,6 +16,14 @@ Request pipeline (BUILD_SPEC §6.2, PIN-verbatim semantics):
        tx failure → X-Settle-Status: settle-failed, response still returned
     7. Any OpenAI failure → never settle (buyer can refund after ttl)
 
+M13 dual auth (PIN): the legacy path above is unchanged. A request carrying
+`Authorization: Bearer tsk1.<payload>.<sig>` instead takes the stateless
+API-key path (_chat_completions_bearer): EIP-191 recover against the mint
+message, hard expiry check, NO 409 margin guard, per-call capture into an
+in-memory ledger {paymentId: captured} with settlePartial flush at
+maxAmount×0.9 / TTL-window (synchronous) or fire-and-forget (otherwise);
+every call still gets an X-Receipt.
+
 All amounts are native USDC units (6 dp). Zero hardcoded addresses/chainIds —
 everything comes from env config; the seller key never appears in logs.
 """
@@ -23,12 +31,15 @@ everything comes from env config; the seller key never appears in logs.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
 import os
+import threading
 import time
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 import httpx
@@ -87,6 +98,9 @@ class RelayState:
             chain_id=config.chain_id,
         )
         self.receipts = ReceiptStore()
+        # M13-D in-memory partial-settle ledger {paymentId: entry}. Resets on
+        # restart — see PartialSettleLedger for the conservative semantics.
+        self.ledger = PartialSettleLedger()
         # httpx client for OpenAI forwarding. Client-level timeout stays open
         # (streaming responses are long-lived); non-stream requests apply a
         # bounded per-request timeout (UPSTREAM_TIMEOUT_NON_STREAM).
@@ -529,6 +543,311 @@ def get_receipt(payment_id: int) -> dict[str, Any]:
     return receipt
 
 
+# ------------------------------------------------------- M13 bearer + partial
+
+# PIN key format: `tsk1.<b64url(payload_json)>.<b64url(sig_hex)>`,
+# payload={"p":paymentId,"e":expiry,"m":maxAmount,"b":buyer}.
+BEARER_SCHEME = "bearer "
+BEARER_KEY_PREFIX = "tsk1."
+# PIN mint message (EIP-191 text, C-lane console signs exactly this):
+# `TokenShare API key grant|paymentId={p}|expiry={e}|maxAmount={m}`.
+BEARER_GRANT_MESSAGE = "TokenShare API key grant"
+
+# Immediate flush threshold: captured >= maxAmount × 0.9 (PIN). Integer math.
+_FLUSH_NUM = 9
+_FLUSH_DEN = 10
+
+# X-Settle-Status values of the bearer partial path (legacy values untouched):
+#   partial-flush-settled  immediate flush tx confirmed
+#   partial-flush-failed   immediate flush tx/send failed (response kept)
+#   partial-flush-pending  fire-and-forget flush scheduled (post-response)
+#   partial-flush-none     nothing flushable this call (dust / budget spent)
+
+
+class _LedgerEntry:
+    __slots__ = ("captured", "pending", "max_amount")
+
+    def __init__(self, max_amount: int) -> None:
+        self.captured = 0
+        self.pending = 0
+        self.max_amount = max_amount
+
+
+class PartialSettleLedger:
+    """In-memory capture ledger {paymentId: entry} for the bearer partial
+    path (M13-B/D).
+
+    RESTART SEMANTICS (decided, conservative): the ledger is memory-only; a
+    relay restart resets every paymentId's captured to 0. Escrow v2 at PIN
+    time exposes no captured getter (getPayment carries no captured field),
+    so the relay cannot reseed from chain. Risk, per the M13 PIN: a replayed
+    capture after restart can push settlePartial past the contract's own
+    captured≤maxAmount cap — that tx reverts and surfaces as
+    partial-flush-failed (never swallowing the LLM response; buyer refund
+    intact). If the contracts lane later adds a getter, only `captured_of`
+    below needs wiring — nothing else touches this class."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._entries: dict[int, _LedgerEntry] = {}
+
+    def plan_capture(self, payment_id: int, actual: int, max_amount: int) -> int:
+        """PIN clamp: capture = min(actual, maxAmount - captured); below 1
+        native unit nothing is recorded (dust absorbed). Returns the captured
+        amount (0 = nothing recorded)."""
+        with self._lock:
+            entry = self._entries.get(payment_id)
+            if entry is None:
+                entry = _LedgerEntry(max_amount)
+                self._entries[payment_id] = entry
+            capture = min(actual, entry.max_amount - entry.captured)
+            if capture < 1:
+                return 0
+            entry.captured += capture
+            entry.pending += capture
+            return capture
+
+    def take_pending(self, payment_id: int) -> int:
+        """Atomically claim the un-flushed amount (0 when nothing pending)."""
+        with self._lock:
+            entry = self._entries.get(payment_id)
+            if entry is None:
+                return 0
+            amount = entry.pending
+            entry.pending = 0
+            return amount
+
+    def restore_pending(self, payment_id: int, amount: int) -> None:
+        """Put a failed flush back so the next request retries it."""
+        with self._lock:
+            entry = self._entries.get(payment_id)
+            if entry is not None:
+                entry.pending += amount
+
+    def captured(self, payment_id: int) -> int:
+        with self._lock:
+            entry = self._entries.get(payment_id)
+            return entry.captured if entry is not None else 0
+
+    def pending(self, payment_id: int) -> int:
+        with self._lock:
+            entry = self._entries.get(payment_id)
+            return entry.pending if entry is not None else 0
+
+    def snapshot(self, payment_id: int) -> tuple[int, int | None]:
+        """(captured, max_amount | None) — max_amount None when this process
+        never saw the payment (usage endpoint falls back to getPayment)."""
+        with self._lock:
+            entry = self._entries.get(payment_id)
+            if entry is None:
+                return 0, None
+            return entry.captured, entry.max_amount
+
+    def captured_of(self, payment_id: int) -> int:  # future chain-getter seam
+        """Single wiring point if a chain captured getter lands later."""
+        return self.captured(payment_id)
+
+
+@dataclass(frozen=True)
+class BearerGrant:
+    payment_id: int
+    expiry: int
+    max_amount: int
+    buyer: str
+    signature: str
+
+
+def _b64url_decode(part: str) -> bytes:
+    """Strict base64url: non-alphabet characters (validate=True) and bad
+    padding raise ValueError — any decode failure maps to 401 upstream."""
+    padding = "=" * (-len(part) % 4)
+    return base64.b64decode(part + padding, altchars=b"-_", validate=True)
+
+
+def _grant_int(payload: dict[str, Any], field: str) -> int:
+    """Grant payload integer field: JSON int or decimal string (bools and
+    anything else rejected → 401, aligned with the X-Payment-Id face)."""
+    value = payload.get(field)
+    if isinstance(value, bool):
+        raise HTTPException(status_code=401, detail=f"api key payload {field!r} invalid")
+    if isinstance(value, int) and value >= 0:
+        return value
+    if isinstance(value, str) and value.isascii() and value.isdigit():
+        return int(value)
+    raise HTTPException(status_code=401, detail=f"api key payload {field!r} invalid")
+
+
+def _decode_bearer_key(authorization: str | None) -> BearerGrant:
+    """M13-B layer decode: `Authorization: Bearer tsk1.<payload>.<sig>`.
+
+    Any of the three layers failing (scheme/prefix, payload JSON+fields,
+    signature hex) → 401 BEFORE any RPC — same 401 semantics as the legacy
+    X-Payment-Id path. This validates the ENVELOPE only; the EIP-191 recover,
+    the buyer match and the expiry check run in _verify_bearer_grant."""
+    header = (authorization or "").strip()
+    if not header.lower().startswith(BEARER_SCHEME):
+        raise HTTPException(status_code=401, detail="missing bearer api key")
+    key = header[len(BEARER_SCHEME):].strip()
+    parts = key.split(".")
+    if len(parts) != 3 or not key.startswith(BEARER_KEY_PREFIX):
+        raise HTTPException(status_code=401, detail="malformed api key")
+
+    # Layer 2: payload JSON {p, e, m, b}.
+    try:
+        payload = json.loads(_b64url_decode(parts[1]).decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="api key payload undecodable") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=401, detail="api key payload must be a JSON object")
+    payment_id = _grant_int(payload, "p")
+    expiry = _grant_int(payload, "e")
+    max_amount = _grant_int(payload, "m")
+    buyer = payload.get("b")
+    if not isinstance(buyer, str) or not buyer.lower().startswith("0x"):
+        raise HTTPException(status_code=401, detail="api key payload buyer invalid")
+
+    # Layer 3: signature (65-byte hex string, 0x optional on the wire).
+    try:
+        signature = _b64url_decode(parts[2]).decode("ascii").strip()
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="api key signature undecodable") from exc
+    if not signature.startswith("0x"):
+        signature = "0x" + signature
+
+    return BearerGrant(
+        payment_id=payment_id,
+        expiry=expiry,
+        max_amount=max_amount,
+        buyer=buyer,
+        signature=signature,
+    )
+
+
+def _verify_bearer_grant(grant: BearerGrant, payment: dict[str, Any]) -> None:
+    """EIP-191 recover over the PIN mint message; recovered must equal the
+    payload buyer AND the on-chain payment buyer (getPayment cross-check).
+    Hard expiry: now >= expiry → 401. The legacy 409 FORWARD_MARGIN guard is
+    intentionally NOT applied on this path (PIN: the bearer partial mode must
+    survive many calls as ttl approaches — expiry replaces the margin)."""
+    if int(time.time()) >= grant.expiry:
+        raise HTTPException(status_code=401, detail="api key expired")
+    msg = (
+        f"{BEARER_GRANT_MESSAGE}|paymentId={grant.payment_id}"
+        f"|expiry={grant.expiry}|maxAmount={grant.max_amount}"
+    )
+    try:
+        recovered = Account.recover_message(
+            encode_defunct(text=msg), signature=grant.signature
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="api key signature invalid") from exc
+    if recovered.lower() != grant.buyer.lower():
+        raise HTTPException(status_code=401, detail="api key signer is not the granted buyer")
+    if recovered.lower() != str(payment["buyer"]).lower():
+        raise HTTPException(status_code=401, detail="api key buyer does not match payment buyer")
+
+
+async def _flush_pending_sync(st: RelayState, payment_id: int) -> bool:
+    """Immediate flush: settlePartial(pending) on a worker thread, awaited
+    BEFORE the response goes out. Failure keeps the pending amount (next
+    request retries) and returns False — the response is never swallowed."""
+    amount = st.ledger.take_pending(payment_id)
+    if amount <= 0:
+        return True
+    try:
+        await asyncio.to_thread(st.chain.settle_partial, payment_id, amount)
+        return True
+    except Exception:
+        logger.exception(
+            "partial settle flush failed paymentId=%s amount=%s", payment_id, amount
+        )
+        st.ledger.restore_pending(payment_id, amount)
+        return False
+
+
+def _flush_pending_bg(st: RelayState, payment_id: int) -> None:
+    """Fire-and-forget flush body (its own thread; sync chain calls are fine
+    off the event loop). Same failure contract: pending restored, logged."""
+    amount = st.ledger.take_pending(payment_id)
+    if amount <= 0:
+        return
+    try:
+        st.chain.settle_partial(payment_id, amount)
+    except Exception:
+        logger.exception(
+            "background partial flush failed paymentId=%s amount=%s",
+            payment_id,
+            amount,
+        )
+        st.ledger.restore_pending(payment_id, amount)
+
+
+async def _partial_capture_and_maybe_flush(
+    st: RelayState,
+    payment_id: int,
+    usage: Usage,
+    prices: Prices,
+    max_amount: int,
+    expires_at: int,
+    model: str,
+) -> tuple[str, dict[str, Any]]:
+    """M13 partial settle orchestration for ONE served call.
+
+    capture = min(actual, maxAmount - captured), dust (<1 native) absorbed;
+    X-Receipt ALWAYS issued with the call's own (unclamped) actualAmount;
+    flush policy (PIN):
+      captured >= maxAmount×0.9  OR  ttl below FORWARD_MARGIN_S → immediate
+      synchronous settlePartial; otherwise fire-and-forget thread.
+    Returns (X-Settle-Status value, receipt) — the caller stamps the response
+    headers (streaming has no headers left to stamp; the store holds it)."""
+    actual = compute_actual(usage, prices)
+    st.ledger.plan_capture(payment_id, actual, max_amount)
+
+    receipt = _build_receipt(st, payment_id, usage, actual, model)
+    st.receipts.put(payment_id, receipt)
+
+    if st.ledger.pending(payment_id) <= 0:
+        return "partial-flush-none", receipt
+
+    now = int(time.time())
+    immediate = (
+        st.ledger.captured(payment_id) * _FLUSH_DEN >= max_amount * _FLUSH_NUM
+        or expires_at - now < st.config.forward_margin_s
+    )
+    if immediate:
+        ok = await _flush_pending_sync(st, payment_id)
+        status = "partial-flush-settled" if ok else "partial-flush-failed"
+    else:
+        threading.Thread(
+            target=_flush_pending_bg, args=(st, payment_id), daemon=True
+        ).start()
+        status = "partial-flush-pending"
+    return status, receipt
+
+
+@app.get("/payment/{payment_id}/usage")
+async def payment_usage(payment_id: int) -> dict[str, Any]:
+    """Accrued-usage view (M13): {paymentId, captured, maxAmount, remaining}.
+
+    `captured` is the relay's accrued total (may lead the on-chain captured
+    counter while a background flush is in flight; resets to 0 on restart —
+    see PartialSettleLedger). `maxAmount` comes from the ledger entry when
+    this process has served the payment, otherwise from Escrow.getPayment.
+    Unauthenticated by design (same posture as GET /receipt/{id})."""
+    st = _get_state()
+    captured, entry_max = st.ledger.snapshot(payment_id)
+    max_amount = entry_max
+    if max_amount is None:
+        payment = await asyncio.to_thread(st.chain.get_payment, payment_id)
+        max_amount = int(payment["maxAmount"])
+    return {
+        "paymentId": payment_id,
+        "captured": captured,
+        "maxAmount": max_amount,
+        "remaining": max(0, max_amount - captured),
+    }
+
+
 # ------------------------------------------------------------ signature check
 
 
@@ -740,10 +1059,15 @@ async def _forward_stream(
     prices: Prices,
     max_amount: int,
     model: str,
+    *,
+    partial_expires_at: int | None = None,
 ) -> StreamingResponse:
     """Transparent SSE passthrough. Usage is taken from the final chunk (with
     injected stream_options); settle happens after the stream drains — for a
-    streaming response the outcome is observable via GET /receipt/{paymentId}."""
+    streaming response the outcome is observable via GET /receipt/{paymentId}.
+
+    partial_expires_at=None → legacy one-shot settle (unchanged); an int
+    selects the M13 bearer partial path (capture + threshold/TTL flush)."""
     request_body = _inject_stream_options(body)
     try:
         req = st.http.build_request("POST", CHAT_COMPLETIONS_PATH, json=request_body)
@@ -790,13 +1114,21 @@ async def _forward_stream(
                 payment_id,
             )
             return
-        settled, actual = await _try_settle(st, payment_id, usage, prices, max_amount)
-        if settled:
-            st.receipts.put(payment_id, _build_receipt(st, payment_id, usage, actual, model))
+        if partial_expires_at is None:
+            settled, actual = await _try_settle(st, payment_id, usage, prices, max_amount)
+            if settled:
+                st.receipts.put(payment_id, _build_receipt(st, payment_id, usage, actual, model))
+            else:
+                logger.info(
+                    "stream settle-failed paymentId=%s (buyer may refund after ttl)",
+                    payment_id,
+                )
         else:
+            status, _receipt = await _partial_capture_and_maybe_flush(
+                st, payment_id, usage, prices, max_amount, partial_expires_at, model
+            )
             logger.info(
-                "stream settle-failed paymentId=%s (buyer may refund after ttl)",
-                payment_id,
+                "stream partial settle paymentId=%s status=%s", payment_id, status
             )
 
     return StreamingResponse(
@@ -839,7 +1171,19 @@ def _relay_sse_event(event: bytes, usage_holder: dict[str, Usage | None]) -> byt
 async def chat_completions(request: Request) -> Any:
     st = _get_state()
     raw_body = await request.body()
+    # M13 dual auth, same priority: a Bearer tsk1.… header routes to the
+    # stateless API-key path; anything else keeps the legacy path untouched.
+    auth = (request.headers.get("Authorization") or "").strip()
+    if auth.lower().startswith(BEARER_SCHEME) and auth[len(BEARER_SCHEME):].strip().startswith(
+        BEARER_KEY_PREFIX
+    ):
+        return await _chat_completions_bearer(st, request, raw_body)
+    return await _chat_completions_legacy(st, request, raw_body)
 
+
+async def _chat_completions_legacy(st: RelayState, request: Request, raw_body: bytes) -> Any:
+    """Legacy X-Payment-Id + X-Signature path — PIN semantics, byte-for-byte
+    unchanged by M13."""
     # 1a. Payment id header (decimal string per PIN).
     payment_id = _parse_payment_id(request.headers.get("X-Payment-Id"))
     payment_id_str = str(payment_id)
@@ -929,3 +1273,100 @@ async def chat_completions(request: Request) -> Any:
     return await _settle_and_stamp_headers(
         st, payment_id, usage, prices, int(payment["maxAmount"]), response, model_name
     )
+
+
+async def _chat_completions_bearer(st: RelayState, request: Request, raw_body: bytes) -> Any:
+    """M13 bearer API-key path (stateless key, partial settle).
+
+    Pipeline: decode the tsk1 key envelope (401 before any RPC) → one
+    getPayment read → EIP-191 recover vs payload buyer AND payment buyer +
+    hard expiry (all 401) → listing/model/provider/prices gates (400s, shared
+    with legacy) → Escrow.isValid (402) — the legacy 409 FORWARD_MARGIN guard
+    is intentionally skipped (PIN) → forward → capture into the ledger +
+    threshold/TTL settlePartial flush → X-Receipt (per call) + X-Settle-Status.
+    """
+    grant = _decode_bearer_key(request.headers.get("Authorization"))
+    payment = await asyncio.to_thread(st.chain.get_payment, grant.payment_id)
+    _verify_bearer_grant(grant, payment)
+
+    listing = await _load_listing(st)
+    try:
+        body = json.loads(raw_body)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+    _check_model(listing, body)
+    _check_model_provider_consistency(body)
+    model_name = str(body["model"])
+
+    try:
+        prices = await asyncio.to_thread(
+            st.chain.get_price, st.chain.seller_address, model_name
+        )
+    except NotActive as exc:
+        raise HTTPException(
+            status_code=400, detail="listing inactive or unregistered"
+        ) from exc
+    except ModelNotFound as exc:
+        raise HTTPException(
+            status_code=400, detail="model not in listing.models"
+        ) from exc
+
+    # NO 409 margin guard here — PIN: the bearer path replaces it with the
+    # hard expiry check in _verify_bearer_grant.
+
+    min_amount = estimate_min_amount(
+        prices, st.config.prompt_token_cap, st.config.completion_token_cap
+    )
+    valid = await asyncio.to_thread(
+        st.chain.is_valid, grant.payment_id, st.chain.seller_address, min_amount
+    )
+    if not valid:
+        raise HTTPException(
+            status_code=402, detail="payment invalid (unpaid/wrong seller/expired)"
+        )
+
+    # Capture budget: the grant's m clamped by the on-chain maxAmount. An
+    # inflated m (self-minted by the buyer) would otherwise turn every flush
+    # into a doomed settlePartial revert — min() keeps the ledger bounded by
+    # what the contract will actually accept.
+    max_amount = min(int(payment["maxAmount"]), grant.max_amount)
+    expires_at = int(payment["expiresAt"])
+
+    if body.get("stream"):
+        return await _forward_stream(
+            st,
+            body,
+            grant.payment_id,
+            prices,
+            max_amount,
+            model_name,
+            partial_expires_at=expires_at,
+        )
+
+    try:
+        upstream = await st.http.post(
+            CHAT_COMPLETIONS_PATH,
+            json=body,
+            timeout=UPSTREAM_TIMEOUT_NON_STREAM,
+        )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"upstream error: {exc}") from exc
+
+    if upstream.status_code != 200:
+        raise HTTPException(status_code=502, detail=upstream.text[:2000])
+
+    try:
+        payload = upstream.json()
+        usage = _extract_usage(payload.get("usage"))
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=502, detail=f"bad upstream payload: {exc}") from exc
+
+    response = JSONResponse(status_code=200, content=payload)
+    status, receipt = await _partial_capture_and_maybe_flush(
+        st, grant.payment_id, usage, prices, max_amount, expires_at, model_name
+    )
+    response.headers["X-Settle-Status"] = status
+    response.headers["X-Receipt"] = encode_x_receipt(receipt)
+    return response
