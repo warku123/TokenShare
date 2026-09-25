@@ -260,6 +260,7 @@ def test_bearer_accumulator_clamps_across_calls(
         "captured": 470,
         "maxAmount": 470,
         "remaining": 0,
+        "revoked": False,
     }
 
     # Third call: budget spent → SEC1-1 gate refuses with remaining/minAmount.
@@ -330,6 +331,7 @@ def test_bearer_grant_max_smaller_than_chain(
         "captured": 200,
         "maxAmount": 200,
         "remaining": 0,
+        "revoked": False,
     }
 
 
@@ -393,6 +395,7 @@ def test_entry_budget_refreshed_per_request(
         "captured": 600,
         "maxAmount": 600,
         "remaining": 0,
+        "revoked": False,
     }
 
 
@@ -479,6 +482,7 @@ def test_usage_endpoint_seeds_chain_captured(client: Any, fake_chain: Any) -> No
         "captured": 500,
         "maxAmount": 1_000_000,
         "remaining": 999_500,
+        "revoked": False,
     }
 
 
@@ -517,6 +521,7 @@ def test_usage_endpoint_views(client_small_caps: Any, fake_chain: Any) -> None:
         "captured": 0,
         "maxAmount": 1_000_000,
         "remaining": 1_000_000,
+        "revoked": False,
     }
     unknown = client_small_caps.get("/payment/7/usage")  # never served
     assert unknown.status_code == 200
@@ -530,6 +535,7 @@ def test_usage_endpoint_views(client_small_caps: Any, fake_chain: Any) -> None:
         "captured": 315,
         "maxAmount": 350,
         "remaining": 35,
+        "revoked": False,
     }
 
 

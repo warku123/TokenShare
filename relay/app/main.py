@@ -26,6 +26,17 @@ every call still gets an X-Receipt.
 
 All amounts are native USDC units (6 dp). Zero hardcoded addresses/chainIds —
 everything comes from env config; the seller key never appears in logs.
+
+M13-R api-key revocation: the buyer kills the bearer key(s) minted for a
+payment via POST /payment/{id}/revoke — an EIP-191-signed
+`TokenShare API key revoke|paymentId={p}|expiry={e}` message, verified
+against the CHAIN's getPayment (path-id + on-chain expiresAt binding,
+recovered signer == payment.buyer) and recorded in an in-memory revoked
+set. The bearer call path checks that set right after _verify_bearer_grant
+→ 401 "revoked" (ahead of every 402 gate). The set is process-local BY
+DESIGN: it is lost on restart; exposure stays bounded because every grant
+hard-expires at payment.expiresAt (TTL backstop) and spend is capped by the
+on-chain maxAmount (economic backstop) — no persistence layer.
 """
 
 from __future__ import annotations
@@ -101,6 +112,15 @@ class RelayState:
         # M13-D in-memory partial-settle ledger {paymentId: entry}. Resets on
         # restart — see PartialSettleLedger for the conservative semantics.
         self.ledger = PartialSettleLedger()
+        # M13-R in-memory bearer-key revocations {paymentId}. HONEST RESTART
+        # SEMANTICS: this set is process-local and LOST on restart — there is
+        # deliberately no persistence. The exposure after a restart stays
+        # bounded by two natural backstops: (a) TTL — every grant hard-expires
+        # at payment.expiresAt regardless of revocation state, so a forgotten
+        # revocation dies with the grant; (b) economics — the SEC1-1 budget
+        # admission gates cap total spend at the payment's on-chain maxAmount,
+        # so a resurrected key can never spend beyond what the buyer escrowed.
+        self.revoked_api_keys: set[int] = set()
         # httpx client for OpenAI forwarding. Client-level timeout stays open
         # (streaming responses are long-lived); non-stream requests apply a
         # bounded per-request timeout (UPSTREAM_TIMEOUT_NON_STREAM).
@@ -552,6 +572,12 @@ BEARER_KEY_PREFIX = "tsk1."
 # PIN mint message (EIP-191 text, C-lane console signs exactly this):
 # `TokenShare API key grant|paymentId={p}|expiry={e}|maxAmount={m}`.
 BEARER_GRANT_MESSAGE = "TokenShare API key grant"
+# M13-R revoke message (EIP-191 text, buyer signs exactly this to kill the
+# key(s) of a payment): `TokenShare API key revoke|paymentId={p}|expiry={e}`.
+# Deliberately a DIFFERENT literal prefix from the mint message — a revoke
+# signature can never be replayed as an api-key mint signature (or minted
+# keys' signatures as revocations): the recovered signer differs.
+BEARER_REVOKE_MESSAGE = "TokenShare API key revoke"
 
 # Immediate flush threshold: captured >= maxAmount × 0.9 (PIN). Integer math.
 _FLUSH_NUM = 9
@@ -874,14 +900,18 @@ async def _partial_capture_and_maybe_flush(
 
 @app.get("/payment/{payment_id}/usage")
 async def payment_usage(payment_id: int) -> dict[str, Any]:
-    """Accrued-usage view (M13): {paymentId, captured, maxAmount, remaining}.
+    """Accrued-usage view (M13): {paymentId, captured, maxAmount, remaining,
+    revoked}.
 
     `captured` is chain-SEEDED via capturedOf when this process has no entry
     (SEC1-3) — a restarted relay reports the real accrued total instead of
     resetting to 0; it may still lead the on-chain counter while a background
     flush is in flight. `maxAmount` comes from the ledger's effective budget
-    when present, otherwise from Escrow.getPayment. Unauthenticated by design
-    (same posture as GET /receipt/{id})."""
+    when present, otherwise from Escrow.getPayment. `revoked` (M13-R) reports
+    whether this process has the payment's bearer key in its in-memory
+    revocation set (false after a restart even for a revoked key — see
+    RelayState). Unauthenticated by design (same posture as GET
+    /receipt/{id})."""
     st = _get_state()
     captured = await asyncio.to_thread(
         st.ledger.seed_and_get,
@@ -898,7 +928,98 @@ async def payment_usage(payment_id: int) -> dict[str, Any]:
         "captured": captured,
         "maxAmount": max_amount,
         "remaining": max(0, max_amount - captured),
+        "revoked": payment_id in st.revoked_api_keys,
     }
+
+
+@app.post("/payment/{payment_id}/revoke")
+async def payment_revoke(payment_id: int, request: Request) -> dict[str, Any]:
+    """M13-R: revoke the bearer API key(s) minted for a payment.
+
+    body: {"message": "TokenShare API key revoke|paymentId={p}|expiry={e}",
+           "signature": "0x…"}  (EIP-191 text via encode_defunct).
+
+    The message is parsed into THREE pipe segments and each is bound to
+    authoritative state BEFORE the signer is trusted:
+      1. prefix == "TokenShare API key revoke" verbatim (a grant/mint message
+         or any other text → 401 — signature classes never mix);
+      2. paymentId segment == the PATH id (a revoke signed for another
+         payment cannot be replayed against this one → 401);
+      3. expiry segment == the on-chain payment.expiresAt — the SAME value
+         the mint grant carried — so a stale revoke for a previous grant
+         round of the same paymentId is rejected (→ 401).
+    The buyer comes from the CHAIN's getPayment, never from body parameters;
+    recovered signer != payment.buyer → 401. On success the paymentId joins
+    the in-memory revoked_api_keys set and the bearer call path refuses with
+    401 "revoked" ahead of every 402 budget gate.
+
+    IDEMPOTENT: revoking an already-revoked payment returns 200 again (set
+    add). RESTART HONESTY: the set is memory-only and lost on restart — see
+    RelayState.revoked_api_keys for the TTL + maxAmount backstops that keep
+    post-restart exposure bounded. No persistence, by design."""
+    st = _get_state()
+    try:
+        body = await request.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+    message = body.get("message")
+    signature = body.get("signature")
+    if not isinstance(message, str) or not message.strip():
+        raise HTTPException(status_code=400, detail="missing message")
+    if not isinstance(signature, str) or not signature.strip():
+        raise HTTPException(status_code=400, detail="missing signature")
+
+    # Segment parse — verbatim prefix + decimal paymentId/expiry. Any
+    # structural deviation is a 401 (signature-verification failure class),
+    # decided with pure CPU BEFORE any chain read.
+    parts = message.split("|")
+    if (
+        len(parts) != 3
+        or parts[0] != BEARER_REVOKE_MESSAGE
+        or not parts[1].startswith("paymentId=")
+        or not parts[2].startswith("expiry=")
+    ):
+        raise HTTPException(status_code=401, detail="revoke message malformed")
+    pid_raw = parts[1][len("paymentId="):]
+    exp_raw = parts[2][len("expiry="):]
+    if not (pid_raw.isascii() and pid_raw.isdigit()) or not (
+        exp_raw.isascii() and exp_raw.isdigit()
+    ):
+        raise HTTPException(status_code=401, detail="revoke message malformed")
+    # Misplaced-signature replay guard: the signed paymentId must be the one
+    # in the path (decimal per PIN).
+    if int(pid_raw) != payment_id:
+        raise HTTPException(
+            status_code=401, detail="revoke message paymentId does not match path"
+        )
+
+    # On-chain binding: expiry must equal the CURRENT grant's expiresAt (the
+    # same value mint carried), and the signer must be the payment's on-chain
+    # buyer — getPayment is authoritative, body parameters are never trusted.
+    payment = await asyncio.to_thread(st.chain.get_payment, payment_id)
+    if int(exp_raw) != int(payment["expiresAt"]):
+        raise HTTPException(
+            status_code=401, detail="revoke message expiry does not match payment"
+        )
+    try:
+        recovered = Account.recover_message(
+            encode_defunct(text=message), signature=signature
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="revoke signature invalid") from exc
+    if str(recovered).lower() != str(payment["buyer"]).lower():
+        raise HTTPException(
+            status_code=401, detail="revoke signer is not the payment buyer"
+        )
+
+    already = payment_id in st.revoked_api_keys
+    st.revoked_api_keys.add(payment_id)  # set add → naturally idempotent
+    logger.info(
+        "bearer api key revoked paymentId=%s (alreadyRevoked=%s)", payment_id, already
+    )
+    return {"paymentId": payment_id, "revoked": True, "alreadyRevoked": already}
 
 
 # ------------------------------------------------------------ signature check
@@ -1359,7 +1480,8 @@ async def _chat_completions_bearer(st: RelayState, request: Request, raw_body: b
 
     Pipeline: decode the tsk1 key envelope (401 before any RPC) → one
     getPayment read → EIP-191 recover vs payload buyer AND payment buyer +
-    hard expiry (all 401) → listing/model/provider/prices gates (400s, shared
+    hard expiry (all 401) → M13-R revocation gate (401 "revoked", ahead of
+    every later 400/402) → listing/model/provider/prices gates (400s, shared
     with legacy) → Escrow.isValid (402) — the legacy 409 FORWARD_MARGIN guard
     is intentionally skipped (PIN) → forward → capture into the ledger +
     threshold/TTL settlePartial flush → X-Receipt (per call) + X-Settle-Status.
@@ -1367,6 +1489,15 @@ async def _chat_completions_bearer(st: RelayState, request: Request, raw_body: b
     grant = _decode_bearer_key(request.headers.get("Authorization"))
     payment = await asyncio.to_thread(st.chain.get_payment, grant.payment_id)
     _verify_bearer_grant(grant, payment)
+
+    # M13-R revocation gate — FIRST among the post-grant gates: a revoked key
+    # reports 401 "revoked" ahead of every 400/402 (listing/model/prices/
+    # isValid/budget). Ordering note: the grant's own hard expiry lives inside
+    # _verify_bearer_grant, so a key that is BOTH expired and revoked reports
+    # "api key expired" (the contract pins the revoked check to this point).
+    # Memory-only: lost on restart — TTL + maxAmount backstops (RelayState).
+    if grant.payment_id in st.revoked_api_keys:
+        raise HTTPException(status_code=401, detail="revoked")
 
     listing = await _load_listing(st)
     try:
