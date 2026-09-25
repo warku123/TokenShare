@@ -285,16 +285,10 @@
       const res = await T.fetchMarketListings(T.readProvider());
       state.listings = res.listings.filter((l) => l.registered);
     } catch { return; }
-    const opts = state.listings.map((l) =>
-      `<option value="${T.esc(l.operator)}" ${l.active ? "" : "disabled"}>` +
-      `${T.truncAddr(l.operator)} · ${T.esc(T.hostOf(l.endpoint))}${l.active ? "" : " (inactive)"}</option>`
-    ).join("");
-    for (const id of ["b-seller", "c-seller"]) {
-      const sel = $(id);
-      const prev = sel.value;
-      sel.innerHTML = `<option value="">— choose seller —</option>` + opts;
-      sel.value = prev;
-    }
+    /* feed the searchable pickers (they keep the picked operator in the
+       hidden inputs b-seller / c-seller across refreshes) */
+    bSellerPick.refresh();
+    cSellerPick.refresh();
     syncSellerInfo();
     syncCallModels();
   }
@@ -1071,6 +1065,170 @@
   /* ═══ BUYER tab ═══════════════════════════════════════════ */
 
   /* — seller pickers info — */
+  /* searchable seller picker (one component, LOCK + CALL instances).
+     The picked operator lives in the hidden input (#b-seller / #c-seller),
+     so every downstream reader ($("…").value, listingOf) is unchanged.
+     Filter: substring over operator address / host / model names.
+     Keyboard: ↑/↓ highlight, Enter picks, Esc restores + closes.
+     Health dots ride a shared per-operator cache (lazy /health probe of
+     the rendered rows only, silent degrade like the market cards). */
+  const sellerHealth = new Map(); /* operator → {ok, ms} | {ok:false} */
+
+  function sellerPicker(ids, onPick) {
+    const hidden = $(ids.hidden), input = $(ids.input), list = $(ids.list);
+    let rows = [];   /* currently rendered (filtered) listings */
+    let hi = -1;     /* highlighted row index */
+
+    const label = (l) => `${T.truncAddr(l.operator)} · ${T.hostOf(l.endpoint)}`;
+    const close = () => { list.hidden = true; input.setAttribute("aria-expanded", "false"); hi = -1; };
+    const restoreLabel = () => {
+      const l = listingOf(hidden.value);
+      input.value = l ? label(l) : "";
+    };
+
+    function paintDots() {
+      for (const l of rows) {
+        const h = sellerHealth.get(l.operator);
+        if (!h) continue;
+        const dot = list.querySelector(`[data-dot="${l.operator}"]`);
+        if (!dot) continue;
+        dot.classList.add(h.ok ? "ok" : "off");
+        dot.title = h.ok ? `relay /health OK · ${h.ms}ms` : "relay unreachable — or CORS not enabled";
+      }
+    }
+    function probeDots() {
+      for (const l of rows.slice(0, 12)) { /* cap: only what's rendered, only unknown */
+        if (sellerHealth.has(l.operator)) continue;
+        sellerHealth.set(l.operator, undefined); /* in-flight marker */
+        T.probeHealth(l.endpoint).then((r) => {
+          sellerHealth.set(l.operator, r.ok ? { ok: true, ms: r.ms } : { ok: false });
+          paintDots();
+        }).catch(() => sellerHealth.delete(l.operator));
+      }
+    }
+
+    function rowHTML(l, i) {
+      const p = (l.prices || []).find(Boolean);
+      const chips = l.models.slice(0, 3).map((m) => `<span class="mtag">${T.esc(m)}</span>`).join("") +
+        (l.models.length > 3 ? `<span class="mtag">+${l.models.length - 3}</span>` : "");
+      return (
+        `<div class="spick-row${l.active ? "" : " off"}" role="option" data-i="${i}" data-op="${T.esc(l.operator)}">` +
+          `<div class="spick-top">` +
+            `<span class="hdot" data-dot="${T.esc(l.operator)}"></span>` +
+            `<span class="spick-addr">${T.truncAddr(l.operator)}</span>` +
+            `<span class="spick-host">${T.esc(T.hostOf(l.endpoint))}</span>` +
+            (l.active ? `<span class="badge">ACTIVE</span>` : `<span class="badge off">INACTIVE</span>`) +
+          `</div>` +
+          (chips ? `<div class="spick-models">${chips}</div>` : "") +
+          (p ? `<div class="spick-price">c $${T.fmtUsdc(p.cachedIn)} · i $${T.fmtUsdc(p.input)} · o $${T.fmtUsdc(p.output)} · min ≥ $${T.fmtUsdc(T.minAmountEstimate(p))}</div>` : "") +
+        `</div>`
+      );
+    }
+
+    function paint() {
+      list.querySelectorAll(".spick-row").forEach((el) => {
+        const on = Number(el.dataset.i) === hi;
+        el.classList.toggle("sel", on);
+        el.setAttribute("aria-selected", String(on));
+      });
+      const el = hi >= 0 && list.querySelector(`[data-i="${hi}"]`);
+      if (el) el.scrollIntoView({ block: "nearest" });
+    }
+
+    function render() {
+      const q = input.value.trim().toLowerCase();
+      rows = state.listings.filter((l) =>
+        !q || l.operator.toLowerCase().includes(q) ||
+        T.hostOf(l.endpoint).toLowerCase().includes(q) ||
+        l.models.some((m) => m.toLowerCase().includes(q)));
+      hi = rows.findIndex((l) => l.active);
+      list.innerHTML = rows.length
+        ? rows.map(rowHTML).join("")
+        : `<div class="spick-empty">${state.listings.length
+            ? "no sellers match — try an address, host, or model substring"
+            : "no sellers on-chain yet (or RPC unreachable) — the market page shows the live set"}</div>`;
+      paint();
+      paintDots();
+      probeDots();
+    }
+
+    function open() {
+      render();
+      list.hidden = false;
+      input.setAttribute("aria-expanded", "true");
+    }
+
+    function pick(i) {
+      const l = rows[i];
+      if (!l || !l.active) return; /* INACTIVE rows are visible but not pickable (old <select disabled>) */
+      hidden.value = l.operator;
+      input.value = label(l);
+      close();
+      onPick(l.operator);
+    }
+
+    input.addEventListener("focus", () => {
+      /* a picked label would filter the list to itself — clear it so the
+         full set shows; blur/esc restores it when nothing new is picked */
+      const l = listingOf(hidden.value);
+      if (l && input.value === label(l)) input.value = "";
+      open();
+    });
+    input.addEventListener("input", open);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        if (list.hidden) return open();
+        const pickable = rows.map((l, i) => (l.active ? i : -1)).filter((i) => i >= 0);
+        if (!pickable.length) return;
+        const pos = pickable.indexOf(hi);
+        hi = pickable[(pos + (e.key === "ArrowDown" ? 1 : pickable.length - 1)) % pickable.length];
+        paint();
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        const i = hi >= 0 ? hi : rows.findIndex((l) => l.active);
+        if (i >= 0) pick(i);
+      } else if (e.key === "Escape") {
+        e.stopPropagation();
+        restoreLabel();
+        close();
+        input.blur();
+      }
+    });
+    input.addEventListener("blur", () => {
+      /* delay so a row mousedown (preventDefault) wins the race */
+      setTimeout(() => { restoreLabel(); close(); }, 120);
+    });
+    list.addEventListener("mousedown", (e) => {
+      const row = e.target.closest(".spick-row");
+      if (!row) return;
+      e.preventDefault(); /* keep focus — no blur race with pick() */
+      pick(Number(row.dataset.i));
+    });
+
+    return {
+      /* listings reloaded — keep the pick if the operator still exists */
+      refresh() {
+        if (hidden.value && !listingOf(hidden.value)) { hidden.value = ""; }
+        restoreLabel();
+        if (!list.hidden) render();
+      },
+      /* programmatic pick (LOCK→CALL mirror, lock success) — silent, no onPick */
+      set(op) {
+        const l = listingOf(op);
+        hidden.value = l ? l.operator : "";
+        restoreLabel();
+      },
+    };
+  }
+
+  const bSellerPick = sellerPicker(
+    { hidden: "b-seller", input: "b-seller-q", list: "b-seller-list" },
+    () => syncSellerInfo());
+  const cSellerPick = sellerPicker(
+    { hidden: "c-seller", input: "c-seller-q", list: "c-seller-list" },
+    () => syncCallModels());
+
   function syncSellerInfo() {
     const l = listingOf($("b-seller").value);
     const info = $("b-lock-info");
@@ -1087,11 +1245,9 @@
       `<div class="kv"><span>PRICES /1M · MIN EST</span><b>${rows || "—"}</b></div>`;
     $("b-lock-hint").textContent =
       `≥ priciest-model estimate $${T.fmtUsdc(maxMin)} (in×200k + out×32k caps; the tier of the called model applies)`;
-    /* mirror into call tab */
-    const csel = $("c-seller");
-    if (!csel.value) { csel.value = l.operator; syncCallModels(); }
+    /* mirror into call tab (silent — no onPick loop) */
+    if (!$("c-seller").value) { cSellerPick.set(l.operator); syncCallModels(); }
   }
-  $("b-seller").addEventListener("change", syncSellerInfo);
 
   /* — lock pre-check: the LOCK card shows the live escrow balance
        (state.escrowBal, refreshed by refreshBalances() after connect and
@@ -1207,7 +1363,7 @@
       });
       renderSessionLocks();
       $("c-payment").value = pid.toString();
-      if (!$("c-seller").value) { $("c-seller").value = seller; syncCallModels(); }
+      if (!$("c-seller").value) { cSellerPick.set(seller); syncCallModels(); }
     } else {
       $("b-payment-id").innerHTML = `<span class="dim mono">Locked — paymentId in the Locked event (see tx)</span>`;
     }
@@ -1221,7 +1377,6 @@
     if (!l) { sel.innerHTML = `<option value="">— seller first —</option>`; return; }
     sel.innerHTML = l.models.map((m) => `<option value="${T.esc(m)}">${T.esc(m)}</option>`).join("");
   }
-  $("c-seller").addEventListener("change", syncCallModels);
 
   function termLine(term, html) {
     const div = document.createElement("div");

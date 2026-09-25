@@ -93,8 +93,10 @@ Monad testnet (chainId 10143) · Escrow/Registry/USDC 已部署（见 `web/confi
 
 - [ ] 余额卡：钱包 USDC + Escrow `balances(me)`；WITHDRAW 输入金额→tx 流→余额刷新
 - [ ] DEPOSIT： allowance 不足时 `approve → deposit` 两笔步进；充足时 approve 自动跳过
-- [ ] LOCK：选卖家（下拉=Registry 链上枚举，RPC 失败降级 config sellers，与市场页同源）→ 按模型逐行显示三档价 + 各模型 minAmount 估计（in×200k+out×32k caps)；hint 取最贵模型估计，低于它给黄色提醒但仍可发；成功→大字 paymentId（点击复制）+ 自动带入 CALL DEMO
-- [ ] LOCK 余额预校验：LOCK 卡顶部内嵌实时 `ESCROW balances(me)`（连接即拉取，deposit/withdraw/lock/refund 成功后刷新）；MAX AMOUNT > 余额时 `[ LOCK ]` 禁点 + 红字「insufficient escrow balance — deposit $N more (escrow $X < lock $Y)」；金额降回余额内即自动解禁（实测：余额 2.999674、填 10 → 禁点 + 提示 deposit $7.000326 more）
+- [ ] LOCK：选卖家（可搜索下拉=Registry 链上枚举，RPC 失败降级 config sellers，与市场页同源）→ 按模型逐行显示三档价 + 各模型 minAmount 估计（in×200k+out×32k caps)；hint 取最贵模型估计，低于它给黄色提醒但仍可发；成功→大字 paymentId（点击复制）+ 自动带入 CALL DEMO
+- [ ] LOCK 大卡布局：BUYER 页首卡=全宽 LOCK hero（左列 seller 选择器+模型价目 mini-info，右列 live 余额+MAX AMOUNT/TTL+按钮+paymentId），CALL DEMO 次卡全宽，BALANCES/DEPOSIT/REFUND 资金组三等分轻卡，DISPUTES 殿后全宽；≤1020px 时 hero 左右列塌成纵向（分隔线转顶部虚线）
+- [ ] seller 可搜索下拉（LOCK+CALL 同组件）：聚焦弹全量列表（截断地址+host+ACTIVE/INACTIVE 徽章+≤3 模型 chips+首模型三档价/min 一行+健康延迟点懒探测）；输入按地址/host/模型名子串过滤；↑/↓ 移动高亮、Enter 选中、Esc 恢复并关闭、失焦/点击外部恢复；INACTIVE 行灰色不可选；无匹配显示提示、链上无 seller（或 RPC 不可达）显示降级空态；LOCK 选中后 CALL 处自动带入（silent，不联动循环）；10+ seller 列表滚动可用
+- [ ] LOCK 余额预校验：LOCK 卡内嵌实时 `ESCROW balances(me)`（连接即拉取，deposit/withdraw/lock/refund 成功后刷新）；MAX AMOUNT > 余额时 `[ LOCK ]` 禁点 + 红字「insufficient escrow balance — deposit $N more (escrow $X < lock $Y)」；金额降回余额内即自动解禁（实测：余额 2.999674、填 10 → 禁点 + 提示 deposit $7.000326 more）
 - [ ] Escrow revert 人话：绕过预校验造成链上 revert（如另一窗口先 lock 把钱占走再发，或未到期 refund 触发 TtlNotElapsed）→ tx 行显示带参数的人话（如「insufficient escrow balance — escrow $2.999674 < requested $10; deposit $7.000326 more first (InsufficientBalance)」），不再出现 unknown custom error
 - [ ] CALL DEMO:model 下拉=所选卖家 listing models；prompt → `[ SIGN + CALL ]`
   - 终端 trace:EIP-191 msg 明文（`POST|/v1/chat/completions|<64hex>|<paymentId>`)→ MetaMask personal_sign → POST

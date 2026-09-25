@@ -122,6 +122,69 @@
   <!-- ════════════ BUYER ════════════ -->
   <section class="panel" id="panel-buyer" role="tabpanel" aria-labelledby="tab-buyer" hidden>
 
+    <!-- lock — the buyer's core move gets the full-width hero -->
+    <article class="card rv lock-hero">
+      <h2 class="card-title">LOCK<span class="card-tag">Escrow.lock → paymentId · pick a seller, size the cap, sign once</span></h2>
+      <div class="card-body lock-grid">
+        <div class="lock-side">
+          <label class="fld"><span class="fld-lbl">SELLER <i>search by address, host, or model — ↑↓ + enter, esc closes</i></span>
+            <div class="spick">
+              <input type="hidden" id="b-seller">
+              <input type="text" class="spick-input" id="b-seller-q" placeholder="— choose seller —" autocomplete="off" spellcheck="false"
+                     role="combobox" aria-expanded="false" aria-controls="b-seller-list" aria-label="seller search">
+              <div class="spick-list" id="b-seller-list" role="listbox" hidden></div>
+            </div>
+          </label>
+          <div class="mini-info" id="b-lock-info"><p class="empty-hint">pick a seller to see per-model tier prices and the minAmount estimate.</p></div>
+        </div>
+        <div class="lock-main">
+          <div class="bal-row"><span>ESCROW balances(me) <i>live</i></span><b class="mono" id="b-lock-bal">—</b></div>
+          <div class="fld-row">
+            <label class="fld"><span class="fld-lbl">MAX AMOUNT <i>USDC</i></span>
+              <input type="text" inputmode="decimal" id="b-max" placeholder="0.05"></label>
+            <label class="fld"><span class="fld-lbl">TTL <i>seconds</i></span>
+              <input type="number" id="b-ttl" value="600" min="60" step="60"></label>
+          </div>
+          <p class="fld-hint" id="b-lock-hint">≥ the seller's priciest-model estimate (in×200k + out×32k caps) — see per-model tiers on the market page</p>
+          <p class="fld-hint err" id="b-lock-bal-note" hidden></p>
+          <button class="btn btn-wide" id="b-lock-btn" type="button">[ LOCK ]</button>
+          <div class="txbox" id="b-lock-tx"></div>
+          <div class="pid-box" id="b-payment-id"></div>
+        </div>
+      </div>
+    </article>
+
+    <!-- call demo -->
+    <article class="card rv call-card">
+      <h2 class="card-title">CALL DEMO<span class="card-tag">sign → relay → verify receipt</span></h2>
+      <div class="card-body">
+        <div class="call-grid">
+          <label class="fld"><span class="fld-lbl">SELLER</span>
+            <div class="spick">
+              <input type="hidden" id="c-seller">
+              <input type="text" class="spick-input" id="c-seller-q" placeholder="— choose seller —" autocomplete="off" spellcheck="false"
+                     role="combobox" aria-expanded="false" aria-controls="c-seller-list" aria-label="seller search">
+              <div class="spick-list" id="c-seller-list" role="listbox" hidden></div>
+            </div></label>
+          <label class="fld"><span class="fld-lbl">MODEL <i>= seller's listed models</i></span>
+            <select id="c-model"><option value="">— seller first —</option></select></label>
+          <label class="fld"><span class="fld-lbl">PAYMENT ID <i>from a lock above, or paste</i></span>
+            <input type="text" inputmode="numeric" id="c-payment" list="c-payment-list" placeholder="42" spellcheck="false" autocomplete="off">
+            <datalist id="c-payment-list"></datalist></label>
+        </div>
+        <label class="fld"><span class="fld-lbl">PROMPT <i>body = {"model", "messages":[user]} — zero extra fields (Kimi 400s on temperature)</i></span>
+          <textarea id="c-prompt" rows="3" placeholder="Explain EIP-712 in one sentence." spellcheck="false">Explain EIP-712 in one sentence.</textarea></label>
+        <button class="btn btn-wide" id="c-send" type="button">[ SIGN + CALL ]</button>
+
+        <div class="term call-term">
+          <div class="term-bar"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span><span class="term-title">call trace — EIP-191 signature, relay response, usage, settle status</span></div>
+          <div class="term-body call-out" id="c-out"><div><span class="t-d">trace renders here — the EIP-191 message, the response, three-tier usage, X-Settle-Status</span></div></div>
+        </div>
+        <div class="rcpt" id="c-receipt" hidden></div>
+      </div>
+    </article>
+
+    <!-- funds — light maintenance group -->
     <div class="grid-3">
       <!-- balances -->
       <article class="card rv">
@@ -149,55 +212,6 @@
         </div>
       </article>
 
-      <!-- lock -->
-      <article class="card rv">
-        <h2 class="card-title">LOCK<span class="card-tag">Escrow.lock → paymentId</span></h2>
-        <div class="card-body">
-          <div class="bal-row"><span>ESCROW balances(me) <i>live</i></span><b class="mono" id="b-lock-bal">—</b></div>
-          <label class="fld"><span class="fld-lbl">SELLER <i>from the market listings</i></span>
-            <select id="b-seller"><option value="">— choose seller —</option></select></label>
-          <div class="mini-info" id="b-lock-info"><p class="empty-hint">pick a seller to see per-model tier prices and the minAmount estimate.</p></div>
-          <div class="fld-row">
-            <label class="fld"><span class="fld-lbl">MAX AMOUNT <i>USDC</i></span>
-              <input type="text" inputmode="decimal" id="b-max" placeholder="0.05"></label>
-            <label class="fld"><span class="fld-lbl">TTL <i>seconds</i></span>
-              <input type="number" id="b-ttl" value="600" min="60" step="60"></label>
-          </div>
-          <p class="fld-hint" id="b-lock-hint">≥ the seller's priciest-model estimate (in×200k + out×32k caps) — see per-model tiers on the market page</p>
-          <p class="fld-hint err" id="b-lock-bal-note" hidden></p>
-          <button class="btn btn-wide" id="b-lock-btn" type="button">[ LOCK ]</button>
-          <div class="txbox" id="b-lock-tx"></div>
-          <div class="pid-box" id="b-payment-id"></div>
-        </div>
-      </article>
-    </div>
-
-    <!-- call demo -->
-    <article class="card rv call-card">
-      <h2 class="card-title">CALL DEMO<span class="card-tag">sign → relay → verify receipt</span></h2>
-      <div class="card-body">
-        <div class="call-grid">
-          <label class="fld"><span class="fld-lbl">SELLER</span>
-            <select id="c-seller"><option value="">— choose seller —</option></select></label>
-          <label class="fld"><span class="fld-lbl">MODEL <i>= seller's listed models</i></span>
-            <select id="c-model"><option value="">— seller first —</option></select></label>
-          <label class="fld"><span class="fld-lbl">PAYMENT ID <i>from a lock above, or paste</i></span>
-            <input type="text" inputmode="numeric" id="c-payment" list="c-payment-list" placeholder="42" spellcheck="false" autocomplete="off">
-            <datalist id="c-payment-list"></datalist></label>
-        </div>
-        <label class="fld"><span class="fld-lbl">PROMPT <i>body = {"model", "messages":[user]} — zero extra fields (Kimi 400s on temperature)</i></span>
-          <textarea id="c-prompt" rows="3" placeholder="Explain EIP-712 in one sentence." spellcheck="false">Explain EIP-712 in one sentence.</textarea></label>
-        <button class="btn btn-wide" id="c-send" type="button">[ SIGN + CALL ]</button>
-
-        <div class="term call-term">
-          <div class="term-bar"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span><span class="term-title">call trace — EIP-191 signature, relay response, usage, settle status</span></div>
-          <div class="term-body call-out" id="c-out"><div><span class="t-d">trace renders here — the EIP-191 message, the response, three-tier usage, X-Settle-Status</span></div></div>
-        </div>
-        <div class="rcpt" id="c-receipt" hidden></div>
-      </div>
-    </article>
-
-    <div class="grid-2">
       <!-- refund -->
       <article class="card rv">
         <h2 class="card-title">REFUND<span class="card-tag">Escrow.refund — after ttl</span></h2>
@@ -209,16 +223,16 @@
           <div class="txbox" id="r-tx"></div>
         </div>
       </article>
-
-      <!-- disputes -->
-      <article class="card rv">
-        <h2 class="card-title">DISPUTES<span class="card-tag">localStorage ledger</span></h2>
-        <div class="card-body">
-          <div class="disp-list" id="d-list"></div>
-          <button class="btn btn-sm btn-ghost" id="d-clear" type="button" hidden>[ CLEAR ]</button>
-        </div>
-      </article>
     </div>
+
+    <!-- disputes -->
+    <article class="card rv">
+      <h2 class="card-title">DISPUTES<span class="card-tag">localStorage ledger</span></h2>
+      <div class="card-body">
+        <div class="disp-list" id="d-list"></div>
+        <button class="btn btn-sm btn-ghost" id="d-clear" type="button" hidden>[ CLEAR ]</button>
+      </div>
+    </article>
   </section>
 
 </main>
