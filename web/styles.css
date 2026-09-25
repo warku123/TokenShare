@@ -976,6 +976,9 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
 .mint-key:hover { border-color: var(--green); }
 .mint-warn { font-family: var(--mono); font-size: 11px; color: var(--amber); line-height: 1.7; }
 .mint-warn b { color: var(--amber); font-weight: 700; }
+.mint-curl { cursor: pointer; }
+.mint-curl:hover { border-color: var(--green-dim); }
+.usage-warn { font-size: 10.5px; line-height: 1.5; }
 .wsel.mint .preview { max-height: 150px; overflow: auto; }
 
 /* ═══ CONSOLE RESPONSIVE ═══ */

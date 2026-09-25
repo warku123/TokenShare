@@ -211,6 +211,12 @@ window.TS = (() => {
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
     }[c]));
 
+  /* POSIX single-quote escaping for copy-paste shell snippets: wrap in
+     '…' with every inner ' written as '\'' — the result is inert in sh
+     regardless of the payload ($, `, ;, ", newlines). Chain-controlled
+     strings (endpoint, model names) must never reach a snippet raw. */
+  const shQuote = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+
   const truncAddr = (a) => (a && a.length > 12 ? `${a.slice(0, 6)}…${a.slice(-4)}` : a || "");
   const addrLink = (a) => `${cfg.explorer}/address/${a}`;
   const txLink = (h) => `${cfg.explorer}/tx/${h}`;
@@ -1124,7 +1130,7 @@ window.TS = (() => {
     PROMPT_TOKEN_CAP, COMPLETION_TOKEN_CAP,
     readProvider, registry, escrow, usdc,
     toNative, fmtUsdc, fmtUsdcTrim, fmtInt,
-    esc, truncAddr, addrLink, txLink, joinUrl, hostOf, sameAddr, isZeroAddr,
+    esc, shQuote, truncAddr, addrLink, txLink, joinUrl, hostOf, sameAddr, isZeroAddr,
     probeHealth, probeInfo, installCopyHandlers, fetchJson, fetchListing, fetchListings,
     priceFor, minAmountEstimate, maxMinAmountEstimate,
     marketBoard, probeListings, fetchSellerSet, fetchMarketListings, SELLER_PAGE,

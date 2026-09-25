@@ -1376,7 +1376,6 @@
     document.body.appendChild(overlay);
 
     const body = overlay.querySelector(".wsel-body");
-    const l = listingOf(seller);
     (async () => {
       let p;
       try { p = await T.escrow(T.readProvider()).getPayment(paymentId); }
@@ -1384,6 +1383,11 @@
         body.innerHTML = `<p class="empty-hint err">read failed — ${T.esc(T.humanizeEscrowErr(e) || e.shortMessage || e.message)}</p>`;
         return;
       }
+      /* C2 fix: endpoint/base_url resolve off the ON-CHAIN lock seller —
+         a forged SESSION LOCKS row (localStorage) can no longer steer the
+         key/curl example at an attacker's server */
+      const l = listingOf(p.seller);
+      const tampered = seller && !T.sameAddr(seller, p.seller);
       const st = T.PAYMENT_STATES[Number(p.state)] || "?";
       const expiry = Number(p.expiresAt);
       const expiryStr = new Date(expiry * 1000).toLocaleString();
@@ -1391,6 +1395,9 @@
       const mintable = st === "Locked" && !expired;
       const msg = T.buildMintMessage(paymentId, expiry, p.maxAmount);
       body.innerHTML =
+        (tampered
+          ? `<p class="empty-hint err">⚠ this row's seller (${T.esc(T.truncAddr(seller))}) ≠ the on-chain lock seller (${T.esc(T.truncAddr(p.seller))}) — the localStorage entry looks tampered; using the on-chain seller</p>`
+          : "") +
         `<div class="kv"><span>PAYMENT</span><b class="mono">#${T.esc(paymentId)} · ${st}${expired ? " · EXPIRED" : ""}</b></div>` +
         `<div class="kv"><span>SELLER</span><b class="mono">${T.esc(T.truncAddr(p.seller))}</b></div>` +
         `<div class="kv"><span>MAX AMOUNT</span><b class="mono">$${T.fmtUsdc(p.maxAmount)}</b></div>` +
@@ -1419,8 +1426,17 @@
   }
 
   function renderMintResult(body, { paymentId, key, endpoint, model, expiryStr, maxAmount }) {
+    /* C1 fix: the snippet speaks in $BASE_URL/$API_KEY placeholders, with
+       every value assigned through POSIX single-quote escaping (shQuote) —
+       chain-controlled strings (endpoint, model) stay inert even with
+       quotes/$()/backticks/newlines in them */
     const curl = endpoint
-      ? `curl ${endpoint}${T.RELAY_CHAT_PATH} \\\n  -H "Authorization: Bearer ${key}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"${model || "MODEL"}","messages":[{"role":"user","content":"hi"}]}'`
+      ? `BASE_URL=${T.shQuote(endpoint)}\n` +
+        `API_KEY=${T.shQuote(key)}\n\n` +
+        `curl "$BASE_URL${T.RELAY_CHAT_PATH}" \\\n` +
+        `  -H "Authorization: Bearer $API_KEY" \\\n` +
+        `  -H "Content-Type: application/json" \\\n` +
+        `  -d ${T.shQuote(JSON.stringify({ model: model || "MODEL", messages: [{ role: "user", content: "hi" }] }))}`
       : "";
     body.innerHTML =
       `<div class="kv"><span>STATUS</span><b class="ok">✓ key minted — payment #${T.esc(paymentId)}</b></div>` +
@@ -1428,31 +1444,45 @@
         `<div class="mint-key mono wrap-anywhere" data-copy="${T.esc(key)}" title="click to copy">${T.esc(key)}</div></div>` +
       (endpoint
         ? `<div class="kv"><span>BASE URL</span><b class="mono wrap-anywhere" data-copy="${T.esc(endpoint)}" title="click to copy">${T.esc(endpoint)}</b></div>` +
-          `<div class="fld"><span class="fld-lbl">CURL <i>OpenAI-compatible</i></span><pre class="preview mono wrap-anywhere">${T.esc(curl)}</pre></div>`
+          `<div class="fld"><span class="fld-lbl">CURL <i>OpenAI-compatible · values assigned above, click the block to copy</i></span>` +
+          `<pre class="preview mono wrap-anywhere mint-curl" data-copy="${T.esc(curl)}" title="click to copy the full snippet">${T.esc(curl)}</pre></div>`
         : "") +
       `<p class="mint-warn">⚠ stateless &amp; <b>non-revocable</b> — a leak can spend up to <b>$${T.fmtUsdc(maxAmount)}</b> (this lock's max). ` +
       `The key dies with the lock TTL (${T.esc(expiryStr)}); relay rejects it afterwards. Mint a fresh key per lock.</p>`;
   }
 
   /* — M13 USAGE: relay's accrued-usage view, inline under the lock row — */
-  async function fetchUsage(paymentId, seller) {
+  async function fetchUsage(paymentId, sellerRow) {
     const panel = document.querySelector(`[data-usage-panel="${paymentId}"]`);
     if (!panel) return;
-    const refreshBtn = `<button class="btn btn-sm btn-ghost" type="button" data-usage-refresh="${T.esc(paymentId)}" data-seller="${T.esc(seller)}">[ REFRESH ]</button>`;
+    const refreshBtn = `<button class="btn btn-sm btn-ghost" type="button" data-usage-refresh="${T.esc(paymentId)}" data-seller="${T.esc(sellerRow)}">[ REFRESH ]</button>`;
     panel.hidden = false;
-    panel.innerHTML = `<span class="dim mono">GET /payment/${T.esc(paymentId)}/usage …</span>`;
+    panel.innerHTML = `<span class="dim mono">reading lock + GET /payment/${T.esc(paymentId)}/usage …</span>`;
+    /* C2: the endpoint resolves off the ON-CHAIN lock seller — a forged
+       localStorage row must not redirect the usage call. Falls back to the
+       row value (with a note) only when the chain read itself fails. */
+    let seller = sellerRow, warn = "";
+    try {
+      const p = await T.escrow(T.readProvider()).getPayment(paymentId);
+      if (sellerRow && !T.sameAddr(sellerRow, p.seller)) {
+        warn = `<div class="usage-warn bad mono">⚠ row seller ${T.esc(T.truncAddr(sellerRow))} ≠ on-chain ${T.esc(T.truncAddr(p.seller))} — localStorage entry tampered? using the on-chain seller</div>`;
+      }
+      seller = p.seller;
+    } catch {
+      warn = `<div class="usage-warn dim mono">chain read failed — endpoint falls back to the local row seller</div>`;
+    }
     const l = listingOf(seller);
     if (!l) {
-      panel.innerHTML = `<span class="dim">seller not in the current listings — endpoint unknown (RPC hiccup? refresh the page)</span>`;
+      panel.innerHTML = warn + `<span class="dim">seller not in the current listings — endpoint unknown (RPC hiccup? refresh the page)</span>`;
       return;
     }
     const r = await T.fetchJson(T.joinUrl(l.endpoint, `/payment/${paymentId}/usage`), {}, 15000);
     if (r.corsOrNetwork) {
-      panel.innerHTML = `<span class="bad mono">relay unreachable (${r.error === "timeout" ? "timeout after 15s" : "network/CORS"})</span> ` + refreshBtn;
+      panel.innerHTML = warn + `<span class="bad mono">relay unreachable (${r.error === "timeout" ? "timeout after 15s" : "network/CORS"})</span> ` + refreshBtn;
       return;
     }
     if (!r.ok || !r.body) {
-      panel.innerHTML = `<span class="bad mono">HTTP ${r.status} — usage unavailable</span> ` + refreshBtn;
+      panel.innerHTML = warn + `<span class="bad mono">HTTP ${r.status} — usage unavailable</span> ` + refreshBtn;
       return;
     }
     /* native 6dp ints; relay accrued total may lead the on-chain counter
@@ -1461,7 +1491,7 @@
     const max = BigInt(Math.trunc(Number(r.body.maxAmount)));
     const rem = BigInt(Math.trunc(Number(r.body.remaining)));
     const pct = max > 0n ? Number((cap * 10000n) / max) / 100 : 0;
-    panel.innerHTML =
+    panel.innerHTML = warn +
       `<div class="usage-line mono">captured <b>$${T.fmtUsdc(cap)}</b> · remaining <b>$${T.fmtUsdc(rem)}</b> · max <b>$${T.fmtUsdc(max)}</b></div>` +
       `<div class="usage-bar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"><i style="width:${pct}%"></i></div>` +
       `<div class="usage-foot"><span class="dim">${new Date().toLocaleTimeString()} · relay-accrued view (may lead on-chain captured during flush)</span>${refreshBtn}</div>`;
