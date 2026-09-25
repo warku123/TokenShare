@@ -11,6 +11,7 @@ RELAY_SELLER_KEY account (the seller designated in the payment).
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,8 @@ from web3.types import TxReceipt
 
 from .config import ConfigError
 from .pricing import Prices
+
+_LOG = logging.getLogger(__name__)
 
 # Foundry artifact locations relative to the repo root (relay/app/chain.py).
 _REPO_ROOT: Path = Path(__file__).resolve().parents[2]
@@ -153,6 +156,31 @@ def _encode_captured_of_calldata(payment_id: int) -> str:
     """0x-prefixed calldata for capturedOf(uint256)."""
     selector = _check_selector(_CAPTURED_OF_SIGNATURE, _CAPTURED_OF_SELECTOR)
     return "0x" + selector + payment_id.to_bytes(32, "big").hex()
+
+
+# ---------------------------------------------------------------------------
+# Settle gas policy (fix-34): estimate-first, never a flat guess.
+#
+# Escrow v3 settle WITH the protocol fee measured 132,608 gas on-chain — the
+# old flat 120_000 out-of-gas-reverted the tx; settlePartial (104,042) was
+# borderline. Same philosophy as the e2e runner's gas_for: probe
+# eth_estimateGas, then ×1.3 + 20k headroom. The flat fallback below is used
+# ONLY when the estimate itself fails (RPC hiccup) — a genuine contract
+# revert at estimate time is indistinguishable from an RPC hiccup there, so
+# the fallback keeps ONE honest on-chain verdict via the receipt status check
+# in _sign_send_wait.
+# ---------------------------------------------------------------------------
+_SETTLE_GAS_HEADROOM = 1.3
+_SETTLE_GAS_BUFFER = 20_000
+_SETTLE_GAS_FALLBACK = 300_000
+
+
+class SettleError(RuntimeError):
+    """A settle/settlePartial tx was MINED but reverted on-chain
+    (receipt.status != 1 — out-of-gas or a contract revert such as
+    OverMax/BelowCaptured). This is never a success: callers treat it like
+    any settle failure (X-Settle-Status: settle-failed / partial-flush-failed)
+    and must never swallow the LLM response."""
 
 
 class ChainClient:
@@ -292,10 +320,34 @@ class ChainClient:
 
     # ------------------------------------------------------------------ write
 
+    def _estimate_settle_gas(self, tx: dict[str, Any]) -> int:
+        """Estimate-first gas (gas_for philosophy): probe the tx without its
+        'gas' field via eth_estimateGas, then ×1.3 + 20k headroom. On ANY
+        estimate failure fall back to _SETTLE_GAS_FALLBACK with a WARNING —
+        never a silent flat guess below the real cost (Escrow v3 settle with
+        the protocol fee needs 132,608 gas; the old flat 120_000
+        out-of-gas-reverted on-chain)."""
+        probe = {key: value for key, value in tx.items() if key != "gas"}
+        try:
+            raw = int(self._w3.eth.estimate_gas(probe))
+        except Exception as exc:  # noqa: BLE001 — any RPC/estimate failure
+            _LOG.warning(
+                "settle gas estimate failed (%s); falling back to %s gas",
+                exc,
+                _SETTLE_GAS_FALLBACK,
+            )
+            return _SETTLE_GAS_FALLBACK
+        return int(raw * _SETTLE_GAS_HEADROOM) + _SETTLE_GAS_BUFFER
+
     def _build_sign_send_settle(self, payment_id: int, actual_amount: int) -> TxReceipt:
         """One fetch-nonce → build → sign → send → receipt-wait pass. Caller
         must hold _SETTLE_LOCK (see settle)."""
         chain_id = self._w3.eth.chain_id
+        # "gas" present → build_transaction skips its own eth_estimateGas;
+        # the estimate-first policy below fills the real value instead. The
+        # placeholder gasPrice keeps build_transaction off the dynamic-fee
+        # RPC probes (eth_maxPriorityFeePerGas/eth_feeHistory) — the REAL
+        # fee fields are set afterwards in _sign_send_wait.
         tx: dict[str, Any] = self.escrow.functions.settle(
             payment_id, actual_amount
         ).build_transaction(
@@ -303,9 +355,11 @@ class ChainClient:
                 "from": self._account.address,
                 "nonce": self._w3.eth.get_transaction_count(self._account.address),
                 "chainId": chain_id,
-                "gas": 120_000,
+                "gas": _SETTLE_GAS_FALLBACK,
+                "gasPrice": 1_000_000_000,
             }
         )
+        tx["gas"] = self._estimate_settle_gas(tx)
         return self._sign_send_wait(tx)
 
     def _sign_send_wait(self, tx: dict[str, Any]) -> TxReceipt:
@@ -324,21 +378,35 @@ class ChainClient:
         signed = self._account.sign_transaction(tx)
         raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
         tx_hash = self._w3.eth.send_raw_transaction(raw)
-        return self._w3.eth.wait_for_transaction_receipt(tx_hash)
+        receipt = self._w3.eth.wait_for_transaction_receipt(tx_hash)
+        # A MINED tx can still have reverted on-chain (out-of-gas / contract
+        # revert → status 0). Without this check the relay reported
+        # X-Settle-Status: settled for on-chain failures (fix-34 e2e: the
+        # buyer saw a fake success while Escrow never settled). Missing
+        # status (pre-Byzantium chains) counts as success.
+        status = int(receipt.get("status", 1))
+        if status != 1:
+            raise SettleError(
+                f"settle tx {tx_hash.hex()} mined but reverted on-chain "
+                f"(receipt.status={status}, gasUsed={int(receipt.get('gasUsed', 0))})"
+            )
+        return receipt
 
     def _send_escrow_tx(self, data: str) -> TxReceipt:
         """Escrow write with PRE-ENCODED calldata (M13 settlePartial — the
         artifact ABI may not carry the function yet). Same envelope as
-        _build_sign_send_settle: seller `from`, gas 120_000, configured
-        chainId. Caller must hold _SETTLE_LOCK."""
+        _build_sign_send_settle: seller `from`, estimate-first gas (see
+        _estimate_settle_gas), configured chainId. Caller must hold
+        _SETTLE_LOCK."""
         tx: dict[str, Any] = {
             "to": self.escrow.address,
             "from": self._account.address,
             "nonce": self._w3.eth.get_transaction_count(self._account.address),
             "chainId": self._w3.eth.chain_id,
-            "gas": 120_000,
+            "gas": _SETTLE_GAS_FALLBACK,
             "data": data,
         }
+        tx["gas"] = self._estimate_settle_gas(tx)
         return self._sign_send_wait(tx)
 
     def settle(self, payment_id: int, actual_amount: int) -> TxReceipt:
@@ -351,7 +419,11 @@ class ChainClient:
         two settles can never grab the same nonce (concurrency fix C1). A
         node-side same-nonce rejection that still slips through (e.g. an
         out-of-band sender on the same account) triggers exactly ONE
-        refetch-nonce → re-sign → resend attempt before failing."""
+        refetch-nonce → re-sign → resend attempt before failing.
+
+        Gas is estimate-first (see _estimate_settle_gas) and a MINED-but-
+        reverted receipt raises SettleError (see _sign_send_wait) — either
+        way callers see settle-failed, never a fake success."""
         with _SETTLE_LOCK:
             try:
                 return self._build_sign_send_settle(payment_id, actual_amount)
@@ -373,7 +445,9 @@ class ChainClient:
         so this works before/after the contracts lane refreshes the artifact.
         On-chain the call accumulates captured (≤maxAmount) without changing
         the payment state; a revert (e.g. OverMax after a relay restart lost
-        the local ledger) surfaces as a normal exception to the caller."""
+        the local ledger) surfaces as a normal exception to the caller — for
+        a MINED-but-reverted receipt specifically as SettleError (same
+        failure contract as settle)."""
         data = _encode_settle_partial_calldata(payment_id, amount)
         with _SETTLE_LOCK:
             try:

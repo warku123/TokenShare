@@ -21,7 +21,7 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from fastapi.testclient import TestClient
 
-from relay.app.chain import ModelNotFound, NotActive
+from relay.app.chain import ModelNotFound, NotActive, SettleError
 from relay.app.pricing import Prices
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -62,6 +62,11 @@ class FakeChain:
     listing_reads: int = 0
     valid_calls: list[tuple[int, str, int]] = []
     settle_fails: bool = False
+    # fix-34: receipt status the fake chain reports for the settle/settlePartial
+    # tx; 0 simulates a MINED-but-reverted tx — like the real ChainClient, the
+    # fake raises SettleError instead of returning a fake success receipt.
+    settle_receipt_status: int = 1
+    settle_partial_receipt_status: int = 1
     valid: bool = True
     ttl_delta: int = 600
     max_amount: int = 1_000_000
@@ -97,6 +102,8 @@ class FakeChain:
         cls.listing_reads = 0
         cls.valid_calls = []
         cls.settle_fails = False
+        cls.settle_receipt_status = 1
+        cls.settle_partial_receipt_status = 1
         cls.valid = True
         cls.ttl_delta = 600
         cls.max_amount = 1_000_000
@@ -169,14 +176,24 @@ class FakeChain:
         if type(self).settle_fails:
             raise RuntimeError("rpc down")
         type(self).settle_calls.append((payment_id, actual_amount))
-        return {"status": 1}
+        if type(self).settle_receipt_status != 1:
+            raise SettleError(
+                "settle tx mined but reverted on-chain "
+                f"(receipt.status={type(self).settle_receipt_status})"
+            )
+        return {"status": type(self).settle_receipt_status}
 
     def settle_partial(self, payment_id: int, amount: int) -> dict[str, Any]:
         """M13-D mirror of ChainClient.settle_partial."""
         if type(self).settle_partial_fails:
             raise RuntimeError("rpc down")
         type(self).settle_partial_calls.append((payment_id, amount))
-        return {"status": 1}
+        if type(self).settle_partial_receipt_status != 1:
+            raise SettleError(
+                "settlePartial tx mined but reverted on-chain "
+                f"(receipt.status={type(self).settle_partial_receipt_status})"
+            )
+        return {"status": type(self).settle_partial_receipt_status}
 
     def captured_of(self, payment_id: int) -> int:
         """SEC1-3 mirror of ChainClient.captured_of."""
