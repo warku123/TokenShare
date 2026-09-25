@@ -31,7 +31,8 @@ contract EscrowTest is Test {
     function setUp() public {
         usdc = new MockUSDC();
         // Existing suite runs fee-free (feeBps = 0): zero behavioral delta.
-        escrow = new Escrow(usdc, 0, treasury);
+        // The TEST CONTRACT is the fee-config owner (setFee/setFeeRecipient).
+        escrow = new Escrow(usdc, address(this), 0, treasury);
         vm.warp(START_TIME); // deterministic timestamps
     }
 
@@ -721,7 +722,7 @@ contract EscrowTest is Test {
     ///      call, hence no reentrancy surface.
     function test_SettlePartial_NoExternalTokenCalls() public {
         MaliciousToken token = new MaliciousToken();
-        escrow = new Escrow(IERC20(address(token)), 0, treasury);
+        escrow = new Escrow(IERC20(address(token)), address(this), 0, treasury);
 
         address b = makeAddr("b");
         token.mint(b, 100e6);
@@ -855,7 +856,7 @@ contract EscrowTest is Test {
     ///      withdraw business-executable absent the guard).
     function _setupAttack() internal returns (MaliciousToken token, MaliciousAttacker attacker) {
         token = new MaliciousToken();
-        escrow = new Escrow(IERC20(address(token)), 0, treasury);
+        escrow = new Escrow(IERC20(address(token)), address(this), 0, treasury);
         attacker = new MaliciousAttacker(escrow, IERC20(address(token)));
         token.setHook(address(attacker)); // the attacker is the hook, NOT the escrow
 
@@ -923,7 +924,7 @@ contract EscrowTest is Test {
     ///      blocks (Locked -> Settled/Refunded terminal transitions).
     function test_SettleRefund_NoExternalTokenCalls() public {
         MaliciousToken token = new MaliciousToken();
-        escrow = new Escrow(IERC20(address(token)), 0, treasury);
+        escrow = new Escrow(IERC20(address(token)), address(this), 0, treasury);
         // no hook registered: the token behaves as a plain ERC-20 here
 
         address b = makeAddr("b");
@@ -1085,10 +1086,11 @@ contract EscrowTest is Test {
     // protocol fee (Escrow v3)
     // =====================================================================
 
-    /// @dev Deploy a fee-charging escrow against the shared MockUSDC and make
-    ///      it the active `escrow` so _deposit/_lock/_stateOf keep working.
+    /// @dev Deploy a fee-charging escrow against the shared MockUSDC (test
+    ///      contract is the owner) and make it the active `escrow` so
+    ///      _deposit/_lock/_stateOf keep working.
     function _newFeeEscrow(uint16 feeBps) internal returns (Escrow) {
-        escrow = new Escrow(usdc, feeBps, treasury);
+        escrow = new Escrow(usdc, address(this), feeBps, treasury);
         return escrow;
     }
 
@@ -1105,24 +1107,199 @@ contract EscrowTest is Test {
 
     function test_RevertConstructor_FeeBpsAbove10000() public {
         vm.expectRevert(Escrow.BadFeeConfig.selector);
-        new Escrow(usdc, 10_001, treasury);
+        new Escrow(usdc, address(this), 10_001, treasury);
     }
 
     function test_Constructor_FeeBpsUpperBound10000Allowed() public {
-        Escrow e = new Escrow(usdc, 10_000, treasury);
+        Escrow e = new Escrow(usdc, address(this), 10_000, treasury);
         assertEq(e.FEE_BPS(), 10_000, "upper bound accepted");
         assertEq(e.FEE_RECIPIENT(), treasury, "recipient stored");
+        assertEq(e.owner(), address(this), "owner stored");
     }
 
     function test_RevertConstructor_ZeroFeeRecipient() public {
         vm.expectRevert(Escrow.BadFeeConfig.selector);
-        new Escrow(usdc, 100, address(0));
+        new Escrow(usdc, address(this), 100, address(0));
     }
 
-    function test_Constructor_FeeConfigImmutables() public {
-        Escrow e = new Escrow(usdc, 250, treasury);
+    /// @dev v3.1: fee config lives in STORAGE (owner-adjustable), but the
+    ///      public getters keep the same names/shapes as the old immutables.
+    function test_Constructor_FeeConfigStored() public {
+        Escrow e = new Escrow(usdc, address(this), 250, treasury);
         assertEq(e.FEE_BPS(), 250, "FEE_BPS exposed");
         assertEq(e.FEE_RECIPIENT(), treasury, "FEE_RECIPIENT exposed");
+        assertEq(e.owner(), address(this), "owner exposed");
+    }
+
+    // --- setFee: permission + bounds + event -----------------------------
+
+    /// @dev Only the owner may adjust the fee; everyone else reverts NotOwner
+    ///      and settlement keeps working untouched under the OLD rate.
+    function test_RevertSetFee_NotOwner() public {
+        _newFeeEscrow(100);
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+
+        vm.prank(thirdParty);
+        vm.expectRevert(abi.encodeWithSelector(Escrow.NotOwner.selector, thirdParty));
+        escrow.setFee(200);
+
+        vm.prank(buyer);
+        vm.expectRevert(abi.encodeWithSelector(Escrow.NotOwner.selector, buyer));
+        escrow.setFee(0);
+
+        assertEq(escrow.FEE_BPS(), 100, "rate unchanged after reverts");
+
+        // settle still charges the pre-change rate
+        vm.prank(seller);
+        escrow.settle(pid, 4e6);
+        assertEq(escrow.balances(treasury), 40_000, "old rate still in force");
+    }
+
+    /// @dev Owner can raise the fee; FeeChanged carries old and new values.
+    function test_SetFee_Happy_EmitsFeeChanged() public {
+        _newFeeEscrow(100);
+
+        vm.expectEmit(true, false, false, true, address(escrow));
+        emit Escrow.FeeChanged(address(this), 100, 200);
+        escrow.setFee(200);
+
+        assertEq(escrow.FEE_BPS(), 200, "rate updated");
+    }
+
+    /// @dev Boundaries: 0 (demo free path) and 10_000 (100%) accepted,
+    ///      10_001 rejected with BadFeeConfig and state untouched.
+    function test_SetFee_Boundaries() public {
+        _newFeeEscrow(100);
+
+        escrow.setFee(10_000);
+        assertEq(escrow.FEE_BPS(), 10_000, "upper bound accepted");
+
+        vm.expectRevert(Escrow.BadFeeConfig.selector);
+        escrow.setFee(10_001);
+        assertEq(escrow.FEE_BPS(), 10_000, "revert left rate untouched");
+
+        escrow.setFee(0);
+        assertEq(escrow.FEE_BPS(), 0, "zero accepted (demo free path)");
+    }
+
+    // --- setFeeRecipient -------------------------------------------------
+
+    function test_SetFeeRecipient_Happy() public {
+        _newFeeEscrow(100);
+        address newTreasury = makeAddr("newTreasury");
+
+        vm.expectEmit(true, false, false, true, address(escrow));
+        emit Escrow.FeeRecipientChanged(address(this), treasury, newTreasury);
+        escrow.setFeeRecipient(newTreasury);
+
+        assertEq(escrow.FEE_RECIPIENT(), newTreasury, "recipient updated");
+
+        // subsequent captures accrue to the NEW recipient only
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+        vm.prank(seller);
+        escrow.settlePartial(pid, 4e6);
+        assertEq(escrow.balances(newTreasury), 40_000, "new treasury credited");
+        assertEq(escrow.balances(treasury), 0, "old treasury gets nothing");
+    }
+
+    function test_RevertSetFeeRecipient_ZeroAddress() public {
+        _newFeeEscrow(100);
+        vm.expectRevert(Escrow.BadFeeConfig.selector);
+        escrow.setFeeRecipient(address(0));
+        assertEq(escrow.FEE_RECIPIENT(), treasury, "recipient unchanged on revert");
+    }
+
+    function test_RevertSetFeeRecipient_NotOwner() public {
+        _newFeeEscrow(100);
+        vm.prank(thirdParty);
+        vm.expectRevert(abi.encodeWithSelector(Escrow.NotOwner.selector, thirdParty));
+        escrow.setFeeRecipient(thirdParty);
+        assertEq(escrow.FEE_RECIPIENT(), treasury, "recipient unchanged on revert");
+    }
+
+    // --- fee timepoint semantics (pinned) ---------------------------------
+
+    /// @dev TIMEPOINT SEMANTICS: an in-progress (Locked) payment pays the rate
+    ///      CURRENT at each capture — setFee mid-flight applies to the NEXT
+    ///      transaction only; the earlier capture is not retro-charged.
+    function test_Fee_InProgressPayment_UsesRateAtExecutionTime() public {
+        _newFeeEscrow(100);
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+
+        // capture #1 at 100 bps: fee 30_000
+        vm.prank(seller);
+        escrow.settlePartial(pid, 3e6);
+
+        // owner doubles the rate mid-flight
+        escrow.setFee(200);
+
+        // capture #2 (same payment!) at the NEW 200 bps: fee 4e6*200/10_000 = 80_000
+        vm.expectEmit(true, false, false, true, address(escrow));
+        emit Escrow.FeeTaken(pid, 80_000, 3_920_000);
+        vm.prank(seller);
+        escrow.settlePartial(pid, 4e6);
+
+        assertEq(escrow.balances(treasury), 30_000 + 80_000, "each capture at its own rate");
+        assertEq(escrow.balances(seller), 2_970_000 + 3_920_000, "seller net per capture");
+        assertEq(escrow.capturedOf(pid), 7e6, "captured is gross across rate change");
+
+        // settle top-up also at the new rate: top-up 3e6 -> fee 60_000
+        vm.prank(seller);
+        escrow.settle(pid, 10e6);
+        assertEq(escrow.balances(treasury), 30_000 + 80_000 + 60_000, "settle top-up at current rate");
+    }
+
+    /// @dev Lowering the rate to 0 mid-flight takes effect from the next
+    ///      transaction on — the demo path back to fee-free.
+    function test_Fee_SetFeeToZero_FreeFromNextTx() public {
+        _newFeeEscrow(100);
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+
+        vm.prank(seller);
+        escrow.settlePartial(pid, 4e6); // fee 40_000
+        escrow.setFee(0);
+
+        vm.prank(seller);
+        escrow.settle(pid, 8e6); // top-up 4e6 now FREE
+        assertEq(escrow.balances(treasury), 40_000, "no fee after zeroing");
+        assertEq(escrow.balances(seller), 3_960_000 + 4e6, "seller credited gross");
+    }
+
+    /// @dev Self-audit: the owner has NO fund path — setFee/setFeeRecipient
+    ///      only touch config; the owner is credited ONLY as fee recipient
+    ///      through the normal ledger, and `withdraw` still only pays out the
+    ///      caller's own credited balance.
+    function test_Owner_HasNoPrivilegedFundPath() public {
+        _newFeeEscrow(100);
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+
+        vm.prank(seller);
+        escrow.settlePartial(pid, 4e6); // fee 40_000 to treasury
+
+        // owner powers end at fee config
+        escrow.setFee(10_000);
+        escrow.setFeeRecipient(address(this)); // owner IS the treasury now
+
+        vm.prank(seller);
+        escrow.settle(pid, 10e6); // top-up 6e6 at 100% -> all to the new treasury
+
+        assertEq(escrow.balances(address(this)), 6e6, "owner credited via fee ledger only");
+        assertEq(escrow.balances(seller), 3_960_000, "seller keeps net capture");
+        assertEq(escrow.balances(buyer), 90e6, "buyer untouched");
+
+        // withdraw remains self-custodial: the owner pulls its OWN ledger like anyone
+        escrow.withdraw(6e6);
+        assertEq(escrow.balances(address(this)), 0, "own ledger drained");
+
+        vm.expectRevert(
+            abi.encodeWithSelector(Escrow.InsufficientBalance.selector, 1, 0)
+        );
+        escrow.withdraw(1); // nothing left: no hidden admin faucet
     }
 
     // --- settle fee -------------------------------------------------------

@@ -27,7 +27,23 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  *   `settlePartial` capture) is charged `FEE_BPS` basis points, rounded down;
  *   the fee accrues to `FEE_RECIPIENT` in the balances ledger — zero external
  *   calls. Refunds are NEVER charged: the buyer always gets back the full
- *   remaining escrow. Both parameters are immutable, fixed at deployment.
+ *   remaining escrow. FEE_BPS is owner-adjustable via `setFee` (can go to 0)
+ *   and FEE_RECIPIENT via `setFeeRecipient`.
+ *
+ * FEE TIMEPOINT SEMANTICS: the fee is read from storage at execution time.
+ *   A capture/settle pays the fee rate that is CURRENT when its transaction
+ *   executes — `setFee` affects all subsequent transactions, including
+ *   captures on payments locked before the change. No per-payment fee
+ *   snapshot is kept (minimal demo face).
+ *
+ * MINIMAL OWNER FACE (v3): `owner` is set once at construction (the deployer
+ *   in the default path) and has EXACTLY two powers: `setFee` (0..10_000 bps)
+ *   and `setFeeRecipient`. There is deliberately NO transferOwnership /
+ *   renounceOwnership / pausing / upgrade surface — demo scope. The owner has
+ *   NO fund path: every token movement flows through the permissionless
+ *   deposit/lock/settle/refund/withdraw state machine; the owner can only
+ *   ever receive fees as `FEE_RECIPIENT` in the balances ledger, same as any
+ *   other credited account.
  *
  * UNITS: all amounts are native USDC units, i.e. USDC's 6 decimal places.
  *         1 USDC = 1_000_000 (1e6). No 18-decimal conversion happens anywhere
@@ -38,10 +54,10 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  * hardcoded anywhere in this file. The same bytecode is deployed unchanged on
  * Base Sepolia and Monad testnet.
  *
- * NON-UPGRADEABLE: plain constructor deployment, no proxy, no owner/admin,
- * no privileged entry points. Every mutating function is permissionless except
- * `settle` and `settlePartial`, which are restricted to the seller designated
- * at lock time.
+ * NON-UPGRADEABLE: plain constructor deployment, no proxy. Every mutating
+ * function is permissionless except `settle`/`settlePartial` (restricted to
+ * the seller designated at lock time) and the two fee-config setters
+ * (`setFee`/`setFeeRecipient`, restricted to `owner`).
  */
 contract Escrow is ReentrancyGuard {
     using SafeERC20 for IERC20;
@@ -95,20 +111,27 @@ contract Escrow is ReentrancyGuard {
     /// @notice The settlement token (USDC, 6 decimals). Set once at deployment.
     IERC20 public immutable USDC;
 
-    /// @notice Protocol fee in basis points (1 bp = 0.01%), charged on every
-    ///         seller credit (settle top-up / settlePartial capture) and
-    ///         accrued to `FEE_RECIPIENT`. Bounded to <= 10_000 (100%) by the
-    ///         constructor. Set once at deployment — no admin face.
-    uint16 public immutable FEE_BPS;
-
-    /// @notice Recipient of the protocol fee (platform treasury; the deployer
-    ///         in the default deployment path). Never zero — enforced by the
-    ///         constructor. Set once at deployment.
-    address public immutable FEE_RECIPIENT;
-
     /*//////////////////////////////////////////////////////////////////////////
                                     STORAGE
     //////////////////////////////////////////////////////////////////////////*/
+
+    /// @notice Current protocol fee in basis points (1 bp = 0.01%), charged on
+    ///         every seller credit (settle top-up / settlePartial capture) and
+    ///         accrued to `FEE_RECIPIENT`. Owner-adjustable via `setFee`,
+    ///         bounded to <= 10_000 (100%); 0 disables the fee. READ AT
+    ///         EXECUTION TIME: captures/settles pay whatever rate is current
+    ///         when their transaction lands.
+    uint16 public FEE_BPS;
+
+    /// @notice Recipient of the protocol fee (platform treasury; the deployer
+    ///         in the default deployment path). Never zero — enforced by the
+    ///         constructor and `setFeeRecipient`. Owner-adjustable.
+    address public FEE_RECIPIENT;
+
+    /// @notice Fee-config administrator, fixed at construction (deployer in
+    ///         the default path). Powers limited to `setFee` and
+    ///         `setFeeRecipient` — see MINIMAL OWNER FACE in the header.
+    address public owner;
 
     /// @notice Withdrawable USDC balance per account, in USDC native units (6 dp).
     ///         Amounts locked into payments are NOT included here (they moved
@@ -169,8 +192,13 @@ contract Escrow is ReentrancyGuard {
     error BelowCaptured(uint256 paymentId, uint256 actual, uint256 captured);
 
     /// @notice Deployment-time fee configuration is invalid: feeBps > 10_000
-    ///         or the fee recipient is the zero address.
+    ///         or the fee recipient is the zero address. Also reused by the
+    ///         owner setters for the same class of invalid fee config.
     error BadFeeConfig();
+
+    /// @notice Only the fee-config owner may call `setFee`/`setFeeRecipient`.
+    /// @param caller Address that attempted the call.
+    error NotOwner(address caller);
 
     /*//////////////////////////////////////////////////////////////////////////
                                      EVENTS
@@ -208,6 +236,13 @@ contract Escrow is ReentrancyGuard {
     ///         credited amount minus the fee.
     event FeeTaken(uint256 indexed paymentId, uint256 fee, uint256 sellerAmount);
 
+    /// @notice The owner changed the protocol fee rate (v3). Takes effect for
+    ///         every transaction mined after this one (timepoint semantics).
+    event FeeChanged(address indexed by, uint16 oldBps, uint16 newBps);
+
+    /// @notice The owner changed the fee recipient (v3).
+    event FeeRecipientChanged(address indexed by, address oldRecipient, address newRecipient);
+
     /// @notice An expired lock was refunded to the buyer's balance.
     event Refunded(uint256 indexed paymentId, address indexed buyer, uint256 amount, address indexed caller);
 
@@ -235,13 +270,56 @@ contract Escrow is ReentrancyGuard {
 
     /// @param usdc_ ERC-20 settlement token (USDC, 6 decimals). Chain-specific
     ///              address is supplied by the deployer configuration, never hardcoded.
-    /// @param feeBps_ Protocol fee in basis points (1 bp = 0.01%); <= 10_000.
+    /// @param owner_ Fee-config administrator (`setFee`/`setFeeRecipient` only;
+    ///               no fund path). The deployer in the default path.
+    /// @param feeBps_ Initial protocol fee in basis points (1 bp = 0.01%);
+    ///                <= 10_000. Use 0 for a fee-free demo deployment.
     /// @param feeRecipient_ Treasury receiving the fee; must not be zero.
-    constructor(IERC20 usdc_, uint16 feeBps_, address feeRecipient_) {
+    constructor(IERC20 usdc_, address owner_, uint16 feeBps_, address feeRecipient_) {
         if (feeBps_ > 10_000 || feeRecipient_ == address(0)) revert BadFeeConfig();
         USDC = usdc_;
+        owner = owner_;
         FEE_BPS = feeBps_;
         FEE_RECIPIENT = feeRecipient_;
+    }
+
+    /*//////////////////////////////////////////////////////////////////////////
+                              OWNER FEE CONFIG (v3)
+    //////////////////////////////////////////////////////////////////////////*/
+
+    /// @dev Reverts unless the caller is the fee-config owner.
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert NotOwner(msg.sender);
+        _;
+    }
+
+    /**
+     * @notice Change the protocol fee rate (owner only). `newBps = 0` disables
+     *         the fee entirely (demo default); 10_000 = 100% upper bound.
+     * @dev TIMEPOINT SEMANTICS: takes effect for every settle/settlePartial
+     *      transaction mined AFTER this one — captures on payments locked
+     *      before the change pay the new rate too (no per-payment snapshot).
+     *      No transferOwnership/renounce surface exists: `owner` is fixed at
+     *      construction (demo trade-off, see header).
+     * @param newBps New fee in basis points; must be <= 10_000.
+     */
+    function setFee(uint16 newBps) external onlyOwner {
+        if (newBps > 10_000) revert BadFeeConfig();
+        uint16 oldBps = FEE_BPS;
+        FEE_BPS = newBps;
+        emit FeeChanged(msg.sender, oldBps, newBps);
+    }
+
+    /**
+     * @notice Change the fee recipient treasury (owner only). The zero address
+     *         is rejected so fees can never be silently burned.
+     * @param newRecipient New treasury address.
+     */
+    function setFeeRecipient(address newRecipient) external onlyOwner {
+        if (newRecipient == address(0)) revert BadFeeConfig();
+        address oldRecipient = FEE_RECIPIENT;
+        FEE_RECIPIENT = newRecipient;
+        emit FeeRecipientChanged(msg.sender, oldRecipient, newRecipient);
     }
 
     /*//////////////////////////////////////////////////////////////////////////
@@ -317,7 +395,9 @@ contract Escrow is ReentrancyGuard {
      *      The protocol fee (Escrow v3) is charged ONLY on the newly credited
      *      top-up (`actual - captured`): advances already paid their fee when
      *      captured via `settlePartial`, so nothing is double-charged. The
-     *      buyer's refund share (`maxAmount - actual`) is never charged.
+     *      buyer's refund share (`maxAmount - actual`) is never charged. The
+     *      RATE is whatever `FEE_BPS` holds when this transaction executes
+     *      (owner-adjustable; see `setFee`).
      * @param paymentId Id returned by `lock`.
      * @param actual    Cumulative amount owed to the seller, in USDC native
      *                  units (6 dp); must satisfy captured <= actual <= maxAmount.
@@ -375,7 +455,10 @@ contract Escrow is ReentrancyGuard {
      *      capture is a meaningless no-op here, unlike `settle(actual=0)`).
      *      The protocol fee (Escrow v3) is charged on `amount`, rounded down;
      *      `captured` accumulates the GROSS amount so refund/settle remainders
-     *      are unaffected by the fee split.
+     *      are unaffected by the fee split. The RATE is whatever `FEE_BPS`
+     *      holds when this transaction executes (owner-adjustable; see
+     *      `setFee` — a rate change applies to the next capture of an
+     *      already-locked payment).
      * @param paymentId Id returned by `lock`.
      * @param amount    Amount to capture now, in USDC native units (6 dp).
      */

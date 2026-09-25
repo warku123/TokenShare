@@ -41,12 +41,13 @@ import {MockUSDC} from "../src/MockUSDC.sol";
  *   USDC_ADDR (optional) — existing ERC-20 USDC (6dp) to use as the settlement
  *   token. When empty/absent, a fresh MockUSDC is deployed and the artifact
  *   records `usdcIsMock: true`.
- *   FEE_BPS (optional, default 100 = 1%) — Escrow protocol fee in basis points,
- *   charged on every seller credit (settle top-up / settlePartial capture).
+ *   FEE_BPS (optional, default 0 = fee-free demo) — Escrow protocol fee in
+ *   basis points, charged on every seller credit (settle top-up /
+ *   settlePartial capture). Owner-adjustable on-chain afterwards via
+ *   `setFee` (0..10_000).
  *   FEE_RECIPIENT (optional, default deployer) — treasury receiving the fee;
  *   defaulting to the deployer means the platform (deployer) is the treasury.
- *   Both are immutable per Escrow deployment; redeploy via runEscrowOnly to
- *   pick up new values.
+ *   The Escrow `owner` (fee-config admin) is always the deployer.
  *
  * Output: contracts/deployed.json
  *   {network, chainId, escrow, registry, usdc, usdcIsMock, deployer, deployedAt}
@@ -66,10 +67,11 @@ contract Deploy is Script {
         bool usdcIsMock = false;
 
         // ------------------------------------------------------------------
-        // Protocol fee (Escrow v3): env FEE_BPS (default 100 = 1%) and
-        // FEE_RECIPIENT (default deployer => platform == deployer).
+        // Protocol fee (Escrow v3): env FEE_BPS (default 0 = fee-free demo,
+        // owner-adjustable on-chain via setFee) and FEE_RECIPIENT (default
+        // deployer => platform == deployer). Escrow owner = deployer.
         // ------------------------------------------------------------------
-        uint16 feeBps = uint16(vm.envOr("FEE_BPS", uint256(100)));
+        uint16 feeBps = uint16(vm.envOr("FEE_BPS", uint256(0)));
         address feeRecipient = vm.envOr("FEE_RECIPIENT", deployer);
 
         vm.startBroadcast();
@@ -78,8 +80,8 @@ contract Deploy is Script {
             usdc = address(mock);
             usdcIsMock = true;
         }
-        // Constructor params per src/ signatures: Escrow(IERC20 usdc_, uint16 feeBps_, address feeRecipient_), Registry().
-        Escrow escrow = new Escrow(IERC20(usdc), feeBps, feeRecipient);
+        // Constructor params per src/ signature: Escrow(IERC20 usdc_, address owner_, uint16 feeBps_, address feeRecipient_). Registry().
+        Escrow escrow = new Escrow(IERC20(usdc), deployer, feeBps, feeRecipient);
         Registry registry = new Registry();
         vm.stopBroadcast();
 
@@ -166,9 +168,10 @@ contract Deploy is Script {
      *         rewrites the `escrow` field of the EXISTING deployed.json,
      *         preserving registry/usdc/usdcIsMock. Escrow balances do NOT
      *         carry over — buyers must re-deposit against the new Escrow.
-     *         Fee config is immutable per deployment: FEE_BPS/FEE_RECIPIENT
-     *         are read from the CURRENT env (defaults: 100 bps, deployer),
-     *         NOT from the old artifact. Run on the SAME chain as the
+     *         Fee config is owner-adjustable on-chain (setFee/setFeeRecipient);
+     *         initial values come from the CURRENT env (defaults: 0 bps
+     *         fee-free demo, deployer recipient+owner), NOT from the old
+     *         artifact. Run on the SAME chain as the
      *         original artifact; the artifact must already exist.
      */
     function runEscrowOnly(string calldata network) external {
@@ -180,11 +183,11 @@ contract Deploy is Script {
         uint256 chainId = block.chainid;
         address deployer = msg.sender;
 
-        uint16 feeBps = uint16(vm.envOr("FEE_BPS", uint256(100)));
+        uint16 feeBps = uint16(vm.envOr("FEE_BPS", uint256(0)));
         address feeRecipient = vm.envOr("FEE_RECIPIENT", deployer);
 
         vm.startBroadcast();
-        Escrow escrow = new Escrow(IERC20(usdc), feeBps, feeRecipient);
+        Escrow escrow = new Escrow(IERC20(usdc), deployer, feeBps, feeRecipient);
         vm.stopBroadcast();
 
         string memory json = "deployed";
