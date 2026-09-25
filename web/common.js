@@ -551,6 +551,46 @@ window.TS = (() => {
     return obj;
   }
 
+  /* ══════════════════════════════════════════════════════════
+     M13 buyer API key (PIN 「M13」 B/C) — byte-compatible with
+     cli/tokenshare_cli/signing.py mint_api_key:
+
+       message = "TokenShare API key grant|paymentId={p}|expiry={e}|maxAmount={m}"
+       key     = "tsk1." + b64url(payload_json) + "." + b64url(sig_hex_ascii)
+       payload = {"p":paymentId,"e":expiry,"m":maxAmount,"b":buyer}
+                 compact separators, field order pinned p,e,m,b
+
+     The signature is EIP-191 over the message text (signer.signMessage ≡
+     eth_account.encode_defunct(text=…)); the sig segment encodes the
+     130-char lowercase hex (65 bytes, no 0x) as ASCII.
+     ══════════════════════════════════════════════════════════ */
+  const MINT_MESSAGE_PREFIX = "TokenShare API key grant";
+  const API_KEY_PREFIX = "tsk1";
+
+  const buildMintMessage = (paymentId, expiry, maxAmount) =>
+    `${MINT_MESSAGE_PREFIX}|paymentId=${BigInt(paymentId).toString(10)}` +
+    `|expiry=${BigInt(expiry).toString(10)}|maxAmount=${BigInt(maxAmount).toString(10)}`;
+
+  /* unpadded base64url (mirror of _b64url in signing.py / the X-Receipt emit) */
+  function b64urlEncode(bytes) {
+    let bin = "";
+    for (const b of bytes) bin += String.fromCharCode(b);
+    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+
+  /* assemble the tsk1 key from the wallet signature; throws unless the
+     signature is exactly 65 bytes. buyer = checksummed address string. */
+  function assembleApiKey({ paymentId, expiry, maxAmount, buyer, signature }) {
+    const sigHex = String(signature).replace(/^0x/i, "").toLowerCase();
+    if (!/^[0-9a-f]{130}$/.test(sigHex)) throw new Error("mint signature is not 65 bytes");
+    /* manual JSON — BigInt-safe integer rendering + pinned field order */
+    const payloadJson =
+      `{"p":${BigInt(paymentId).toString(10)},"e":${BigInt(expiry).toString(10)},` +
+      `"m":${BigInt(maxAmount).toString(10)},"b":${JSON.stringify(String(buyer))}}`;
+    const enc = new TextEncoder();
+    return `${API_KEY_PREFIX}.${b64urlEncode(enc.encode(payloadJson))}.${b64urlEncode(enc.encode(sigHex))}`;
+  }
+
   /* Mirrors cli/tokenshare_cli/receipt.py verify_receipt:
      0 domain verbatim (name/version + chainId) · 1 recover ·
      2 recovered == seller · 3 message.seller == seller · 4 paymentId */
@@ -1091,6 +1131,7 @@ window.TS = (() => {
     RELAY_CHAT_PATH, buildEip191Message,
     RECEIPT_DOMAIN_NAME, RECEIPT_DOMAIN_VERSION, RECEIPT_TYPES,
     decodeReceiptHeader, verifyReceipt,
+    MINT_MESSAGE_PREFIX, API_KEY_PREFIX, buildMintMessage, b64urlEncode, assembleApiKey,
     decodeEscrowErr, humanizeEscrowErr, lockShortfall,
     txLine, runTx, parseLockedPaymentId,
     locks, disputes, relayErrorCopy,

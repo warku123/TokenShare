@@ -953,6 +953,31 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
 .spick-price { font-family: var(--mono); font-size: 10.5px; color: var(--faint); }
 .spick-empty { padding: 14px 12px; font-family: var(--mono); font-size: 11px; color: var(--faint); line-height: 1.6; }
 
+/* ═══ M13: session locks list + mint modal + usage ═══ */
+.locks-list { display: flex; flex-direction: column; gap: 8px; }
+.lock-row { border: 1px solid var(--line); background: var(--bg-2); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.lock-row-top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 12px; }
+.lock-pid { color: var(--green); font-weight: 700; }
+.lock-when { margin-left: auto; font-size: 10.5px; }
+.lock-usage { border-top: 1px dashed var(--line); padding-top: 8px; display: flex; flex-direction: column; gap: 7px; font-size: 11.5px; }
+.usage-line b { color: var(--text); font-weight: 400; }
+.usage-bar { height: 6px; background: var(--bg); border: 1px solid var(--line); }
+.usage-bar > i { display: block; height: 100%; background: var(--green-dim); transition: width .4s ease; }
+.usage-foot { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+
+/* mint modal — wider than the wallet selector, same chrome */
+.wsel.mint { max-width: 560px; }
+.wsel-body { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.mint-key {
+  border: 1px solid var(--green-dim); background: rgba(61,220,151,0.05);
+  padding: 10px 12px; font-size: 11.5px; line-height: 1.7; cursor: pointer;
+  color: var(--text); user-select: all;
+}
+.mint-key:hover { border-color: var(--green); }
+.mint-warn { font-family: var(--mono); font-size: 11px; color: var(--amber); line-height: 1.7; }
+.mint-warn b { color: var(--amber); font-weight: 700; }
+.wsel.mint .preview { max-height: 150px; overflow: auto; }
+
 /* ═══ CONSOLE RESPONSIVE ═══ */
 @media (max-width: 1020px) {
   .grid-3 { grid-template-columns: 1fr 1fr; }

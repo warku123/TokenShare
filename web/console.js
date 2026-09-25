@@ -1314,6 +1314,7 @@
     const list = $("c-payment-list");
     const rlist = $("r-payment-list");
     const opts = [];
+    const rows = [];
     for (const l of mine) {
       try {
         const pid = T.esc(String(l.paymentId ?? "?"));
@@ -1321,12 +1322,164 @@
         let max = null;
         try { max = T.fmtUsdc(l.maxAmount); } catch { max = null; } /* formatUnits throws on garbage */
         opts.push(`<option value="${pid}">#${pid} · ${seller}${max != null ? ` · max $${max}` : " · max ?"}</option>`);
+        /* visible SESSION LOCKS row (M13: mint + usage per lock) — only
+           entries with a decimal paymentId become actionable rows */
+        if (/^\d+$/.test(String(l.paymentId ?? ""))) {
+          const when = l.ts ? new Date(l.ts).toLocaleString() : "?";
+          rows.push(
+            `<div class="lock-row">` +
+              `<div class="lock-row-top">` +
+                `<span class="lock-pid mono">#${pid}</span>` +
+                `<span class="mono dim">${seller}</span>` +
+                (max != null ? `<span class="mono dim">max $${max}</span>` : "") +
+                `<span class="lock-when dim">${T.esc(when)}</span>` +
+                `<button class="btn btn-sm btn-ghost" type="button" data-mint="${pid}" data-seller="${T.esc(String(l.seller || ""))}">[ MINT API KEY ]</button>` +
+                `<button class="btn btn-sm btn-ghost" type="button" data-usage="${pid}" data-seller="${T.esc(String(l.seller || ""))}">[ USAGE ]</button>` +
+              `</div>` +
+              `<div class="lock-usage" data-usage-panel="${pid}" hidden></div>` +
+            `</div>`);
+        }
       } catch { /* unexpected shape — skip the row entirely */ }
     }
     const html = opts.join("");
     list.innerHTML = html;
     rlist.innerHTML = html;
+    $("locks-list").innerHTML = rows.join("") ||
+      `<p class="empty-hint">no locks in this browser yet — a successful LOCK lands here; mint a stateless API key for agents or watch accrued usage.</p>`;
   }
+
+  /* — M13 MINT API KEY modal (wsel chrome; singleton; innerHTML + esc like
+       the listing renders, key rides data-copy → global click-to-copy) — */
+  function openMintModal(paymentId, seller) {
+    if (needWallet() || needConfig()) return;
+    const overlay = document.createElement("div");
+    overlay.className = "wsel-overlay";
+    overlay.innerHTML =
+      `<div class="wsel mint" role="dialog" aria-modal="true" aria-label="mint api key">` +
+        `<div class="wsel-bar"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span>` +
+          `<span class="wsel-title">mint api key — payment #${T.esc(paymentId)}</span></div>` +
+        `<div class="wsel-body"><p class="empty-hint">reading getPayment(${T.esc(paymentId)}) …</p></div>` +
+        `<div class="wsel-foot"><span class="wsel-hint">esc / click outside to close</span>` +
+          `<button class="wsel-cancel" type="button">[ CLOSE ]</button></div>` +
+      `</div>`;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const close = () => {
+      document.removeEventListener("keydown", onKey, true);
+      document.body.style.overflow = prevOverflow;
+      overlay.remove();
+    };
+    const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); close(); } };
+    document.addEventListener("keydown", onKey, true);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector(".wsel-cancel").addEventListener("click", close);
+    document.body.appendChild(overlay);
+
+    const body = overlay.querySelector(".wsel-body");
+    const l = listingOf(seller);
+    (async () => {
+      let p;
+      try { p = await T.escrow(T.readProvider()).getPayment(paymentId); }
+      catch (e) {
+        body.innerHTML = `<p class="empty-hint err">read failed — ${T.esc(T.humanizeEscrowErr(e) || e.shortMessage || e.message)}</p>`;
+        return;
+      }
+      const st = T.PAYMENT_STATES[Number(p.state)] || "?";
+      const expiry = Number(p.expiresAt);
+      const expiryStr = new Date(expiry * 1000).toLocaleString();
+      const expired = expiry * 1000 <= Date.now();
+      const mintable = st === "Locked" && !expired;
+      const msg = T.buildMintMessage(paymentId, expiry, p.maxAmount);
+      body.innerHTML =
+        `<div class="kv"><span>PAYMENT</span><b class="mono">#${T.esc(paymentId)} · ${st}${expired ? " · EXPIRED" : ""}</b></div>` +
+        `<div class="kv"><span>SELLER</span><b class="mono">${T.esc(T.truncAddr(p.seller))}</b></div>` +
+        `<div class="kv"><span>MAX AMOUNT</span><b class="mono">$${T.fmtUsdc(p.maxAmount)}</b></div>` +
+        `<div class="kv"><span>EXPIRES</span><b class="mono">${T.esc(expiryStr)}</b></div>` +
+        (l ? `<div class="kv"><span>BASE URL</span><b class="mono wrap-anywhere">${T.esc(l.endpoint)}</b></div>` : "") +
+        `<p class="fld-hint">one EIP-191 signature mints a stateless key bound to this lock — agents use it as the OpenAI api_key against the seller's relay:</p>` +
+        `<pre class="preview mono wrap-anywhere">${T.esc(msg)}</pre>` +
+        (mintable
+          ? `<button class="btn btn-wide" type="button" data-mint-go>[ SIGN + MINT ]</button>`
+          : `<p class="empty-hint err">${st !== "Locked" ? `payment is ${st} — a key only works while the lock is Locked` : "lock expired — refund and re-lock for a fresh key"}</p>`);
+      const go = body.querySelector("[data-mint-go]");
+      if (go) go.addEventListener("click", () => guard(go, async () => {
+        let sig;
+        try { sig = await state.signer.signMessage(msg); }
+        catch (e) {
+          body.insertAdjacentHTML("beforeend",
+            `<p class="empty-hint err">signing ${(e && e.code === "ACTION_REJECTED") ? "rejected in wallet" : "failed"} — ${T.esc((e && (e.shortMessage || e.message)) || "")}</p>`);
+          return;
+        }
+        const key = T.assembleApiKey({
+          paymentId, expiry, maxAmount: p.maxAmount, buyer: state.address, signature: sig,
+        });
+        renderMintResult(body, { paymentId, key, endpoint: l ? l.endpoint : null, model: l && l.models[0], expiryStr, maxAmount: p.maxAmount });
+      }));
+    })();
+  }
+
+  function renderMintResult(body, { paymentId, key, endpoint, model, expiryStr, maxAmount }) {
+    const curl = endpoint
+      ? `curl ${endpoint}${T.RELAY_CHAT_PATH} \\\n  -H "Authorization: Bearer ${key}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"${model || "MODEL"}","messages":[{"role":"user","content":"hi"}]}'`
+      : "";
+    body.innerHTML =
+      `<div class="kv"><span>STATUS</span><b class="ok">✓ key minted — payment #${T.esc(paymentId)}</b></div>` +
+      `<div class="fld"><span class="fld-lbl">API KEY <i>click to copy — shown once, not stored anywhere</i></span>` +
+        `<div class="mint-key mono wrap-anywhere" data-copy="${T.esc(key)}" title="click to copy">${T.esc(key)}</div></div>` +
+      (endpoint
+        ? `<div class="kv"><span>BASE URL</span><b class="mono wrap-anywhere" data-copy="${T.esc(endpoint)}" title="click to copy">${T.esc(endpoint)}</b></div>` +
+          `<div class="fld"><span class="fld-lbl">CURL <i>OpenAI-compatible</i></span><pre class="preview mono wrap-anywhere">${T.esc(curl)}</pre></div>`
+        : "") +
+      `<p class="mint-warn">⚠ stateless &amp; <b>non-revocable</b> — a leak can spend up to <b>$${T.fmtUsdc(maxAmount)}</b> (this lock's max). ` +
+      `The key dies with the lock TTL (${T.esc(expiryStr)}); relay rejects it afterwards. Mint a fresh key per lock.</p>`;
+  }
+
+  /* — M13 USAGE: relay's accrued-usage view, inline under the lock row — */
+  async function fetchUsage(paymentId, seller) {
+    const panel = document.querySelector(`[data-usage-panel="${paymentId}"]`);
+    if (!panel) return;
+    const refreshBtn = `<button class="btn btn-sm btn-ghost" type="button" data-usage-refresh="${T.esc(paymentId)}" data-seller="${T.esc(seller)}">[ REFRESH ]</button>`;
+    panel.hidden = false;
+    panel.innerHTML = `<span class="dim mono">GET /payment/${T.esc(paymentId)}/usage …</span>`;
+    const l = listingOf(seller);
+    if (!l) {
+      panel.innerHTML = `<span class="dim">seller not in the current listings — endpoint unknown (RPC hiccup? refresh the page)</span>`;
+      return;
+    }
+    const r = await T.fetchJson(T.joinUrl(l.endpoint, `/payment/${paymentId}/usage`), {}, 15000);
+    if (r.corsOrNetwork) {
+      panel.innerHTML = `<span class="bad mono">relay unreachable (${r.error === "timeout" ? "timeout after 15s" : "network/CORS"})</span> ` + refreshBtn;
+      return;
+    }
+    if (!r.ok || !r.body) {
+      panel.innerHTML = `<span class="bad mono">HTTP ${r.status} — usage unavailable</span> ` + refreshBtn;
+      return;
+    }
+    /* native 6dp ints; relay accrued total may lead the on-chain counter
+       while a background settlePartial flush is in flight */
+    const cap = BigInt(Math.trunc(Number(r.body.captured)));
+    const max = BigInt(Math.trunc(Number(r.body.maxAmount)));
+    const rem = BigInt(Math.trunc(Number(r.body.remaining)));
+    const pct = max > 0n ? Number((cap * 10000n) / max) / 100 : 0;
+    panel.innerHTML =
+      `<div class="usage-line mono">captured <b>$${T.fmtUsdc(cap)}</b> · remaining <b>$${T.fmtUsdc(rem)}</b> · max <b>$${T.fmtUsdc(max)}</b></div>` +
+      `<div class="usage-bar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"><i style="width:${pct}%"></i></div>` +
+      `<div class="usage-foot"><span class="dim">${new Date().toLocaleTimeString()} · relay-accrued view (may lead on-chain captured during flush)</span>${refreshBtn}</div>`;
+  }
+
+  /* lock-row actions (delegated — rows re-render with renderSessionLocks) */
+  $("locks-list").addEventListener("click", (e) => {
+    const mintBtn = e.target.closest("[data-mint]");
+    if (mintBtn) { openMintModal(mintBtn.dataset.mint, mintBtn.dataset.seller); return; }
+    const refBtn = e.target.closest("[data-usage-refresh]");
+    if (refBtn) { fetchUsage(refBtn.dataset.usageRefresh, refBtn.dataset.seller); return; }
+    const usBtn = e.target.closest("[data-usage]");
+    if (usBtn) {
+      const panel = document.querySelector(`[data-usage-panel="${usBtn.dataset.usage}"]`);
+      if (panel && !panel.hidden) { panel.hidden = true; return; } /* toggle off */
+      fetchUsage(usBtn.dataset.usage, usBtn.dataset.seller);
+    }
+  });
 
   /* guard() unconditionally re-enables the button in its finally — the
      trailing .finally re-applies the balance gate after every click run */
@@ -1357,6 +1510,13 @@
     if (pid !== null) {
       state.lastPaymentId = pid;
       $("b-payment-id").innerHTML = `<span class="pid-label">PAYMENT ID — click to copy</span><span class="pid" data-copy="${pid.toString()}" title="click to copy">${pid.toString()}</span>`;
+      /* M13: one-tap mint straight off the fresh lock */
+      const mintBtn = document.createElement("button");
+      mintBtn.className = "btn btn-sm";
+      mintBtn.type = "button";
+      mintBtn.textContent = "[ MINT API KEY ]";
+      mintBtn.addEventListener("click", () => openMintModal(pid.toString(), seller));
+      $("b-payment-id").appendChild(mintBtn);
       T.locks.add({
         paymentId: pid.toString(), buyer: state.address, seller,
         maxAmount: max.toString(), ttl, txHash: rcpt.hash, ts: Date.now(),
