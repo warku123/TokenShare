@@ -11,6 +11,19 @@
 
   document.documentElement.classList.add("js");
 
+  /* ── mobile nav toggle (same pattern as app.js) ── */
+  const navToggle = document.querySelector(".nav-toggle");
+  const topnav = document.getElementById("topnav");
+  if (navToggle && topnav) {
+    const setNav = (open) => {
+      topnav.classList.toggle("open", open);
+      navToggle.setAttribute("aria-expanded", String(open));
+      navToggle.textContent = open ? "[ CLOSE ]" : "[ MENU ]";
+    };
+    navToggle.addEventListener("click", () => setNav(!topnav.classList.contains("open")));
+    topnav.addEventListener("click", (e) => { if (e.target.closest("a")) setNav(false); });
+  }
+
   /* ── dom ─────────────────────────────────────────────────── */
   const listingsEl = $("listings");
   const noticeEl = $("mkt-notice");

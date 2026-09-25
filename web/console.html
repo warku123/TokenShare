@@ -13,7 +13,8 @@
 <header class="topbar">
   <div class="wrap topbar-in">
     <a class="brand" href="index.html">TOKENSHARE<span class="brand-dim"> / console</span></a>
-    <nav class="topnav" aria-label="Sections">
+    <button class="nav-toggle" aria-expanded="false" aria-controls="topnav" aria-label="Toggle navigation">[ MENU ]</button>
+    <nav class="topnav" id="topnav" aria-label="Sections">
       <a href="index.html#market">MARKET</a>
       <a href="market.html">FULL&nbsp;MARKET</a>
       <a href="index.html#mechanism">MECHANISM</a>
@@ -42,6 +43,10 @@
         <button class="btn btn-sm btn-ghost" id="wallet-switch" type="button">[ SWITCH ACCOUNT ]</button>
         <button class="btn btn-sm btn-ghost" id="wallet-disconnect" type="button">[ DISCONNECT ]</button>
       </div>
+      <p class="wallet-faucets" id="wallet-faucets" hidden>
+        low on testnet funds? <a href="https://faucet.monad.xyz" target="_blank" rel="noopener">MON faucet ↗</a> (gas) ·
+        <a href="https://faucet.circle.com" target="_blank" rel="noopener">USDC faucet ↗</a> (pick Monad testnet)
+      </p>
       <p class="wallet-note" id="wallet-note" hidden></p>
     </div>
   </section>
@@ -122,19 +127,19 @@
   <!-- ════════════ BUYER ════════════ -->
   <section class="panel" id="panel-buyer" role="tabpanel" aria-labelledby="tab-buyer" hidden>
 
-    <!-- the flow — one glance, five steps -->
+    <!-- the flow — one glance, five steps, each jumps to its card -->
     <p class="flow-line rv" aria-label="buyer flow">
       <span class="flow-lbl">FLOW</span>
-      <span class="flow-step"><b>1</b>DEPOSIT</span><span class="flow-arr">→</span>
-      <span class="flow-step"><b>2</b>LOCK</span><span class="flow-arr">→</span>
-      <span class="flow-step"><b>3</b>MINT KEY</span><span class="flow-arr">→</span>
-      <span class="flow-step"><b>4</b>CALL / USAGE</span><span class="flow-arr">→</span>
-      <span class="flow-step"><b>5</b>REFUND</span>
+      <a class="flow-step" href="#card-deposit"><b>1</b>DEPOSIT</a><span class="flow-arr">→</span>
+      <a class="flow-step" href="#card-lock"><b>2</b>LOCK</a><span class="flow-arr">→</span>
+      <a class="flow-step" href="#card-locks"><b>3</b>MINT KEY</a><span class="flow-arr">→</span>
+      <a class="flow-step" href="#card-call"><b>4</b>CALL / USAGE</a><span class="flow-arr">→</span>
+      <a class="flow-step" href="#card-refund"><b>5</b>REFUND</a>
       <span class="flow-tail">spend by real usage — whatever's left comes back</span>
     </p>
 
     <!-- lock — the buyer's core move gets the full-width hero -->
-    <article class="card rv lock-hero">
+    <article class="card rv lock-hero" id="card-lock">
       <h2 class="card-title">LOCK<span class="card-tag">Escrow.lock → paymentId · pick a seller, size the cap, sign once</span></h2>
       <div class="card-body lock-grid">
         <p class="step-hint">Step 2 · set aside a budget cap for one seller. Keys and calls spend from it while the TTL runs — when the TTL lapses, whatever's left is yours to refund.</p>
@@ -159,6 +164,7 @@
           </div>
           <p class="fld-hint" id="b-lock-hint">≥ the seller's priciest-model estimate (in×200k + out×32k caps) — see per-model tiers on the market page</p>
           <p class="fld-hint err" id="b-lock-bal-note" hidden></p>
+          <a class="btn btn-sm btn-dep" id="b-dep-first" href="#card-deposit" hidden>[ DEPOSIT FIRST ↓ ]</a>
           <button class="btn btn-wide" id="b-lock-btn" type="button">[ LOCK ]</button>
           <div class="txbox" id="b-lock-tx"></div>
           <div class="pid-box" id="b-payment-id"></div>
@@ -167,7 +173,7 @@
     </article>
 
     <!-- api keys — minted-key metadata + relay-side revoke -->
-    <article class="card rv">
+    <article class="card rv" id="card-apikeys">
       <h2 class="card-title">API KEYS<span class="card-tag">localStorage metadata · key bodies never stored — revoke via relay</span></h2>
       <div class="card-body">
         <p class="step-hint">Keys you mint land here — metadata only, never the key itself. Watch spend per key, copy its base_url for your agent, or REVOKE a leaked key: instant, relay-side, no chain tx.</p>
@@ -176,7 +182,7 @@
     </article>
 
     <!-- call demo -->
-    <article class="card rv call-card">
+    <article class="card rv call-card" id="card-call">
       <h2 class="card-title">CALL DEMO<span class="card-tag">sign → relay → verify receipt</span></h2>
       <div class="card-body">
         <p class="step-hint">Step 4 · try a call by hand — you sign each request in the wallet, the relay meters tokens and pulls the cost from a lock. Agents skip this card; they use a minted key.</p>
@@ -207,7 +213,7 @@
     </article>
 
     <!-- session locks — mint keys & watch usage per lock -->
-    <article class="card rv">
+    <article class="card rv" id="card-locks">
       <h2 class="card-title">SESSION LOCKS<span class="card-tag">localStorage · this browser — mint agent keys, watch accrued usage</span></h2>
       <div class="card-body">
         <p class="step-hint">Step 3 · your locks live in this browser. MINT turns one into an OpenAI-compatible api key for agents — it spends by real usage, up to the lock's max. USAGE opens the live meter.</p>
@@ -218,7 +224,7 @@
     <!-- funds — light maintenance group -->
     <div class="grid-3">
       <!-- balances -->
-      <article class="card rv">
+      <article class="card rv" id="card-balances">
         <h2 class="card-title">BALANCES<span class="card-tag">USDC · Escrow</span></h2>
         <div class="card-body">
           <p class="step-hint">Wallet USDC vs the escrow pot. WITHDRAW moves escrow balance back to your wallet.</p>
@@ -234,7 +240,7 @@
       </article>
 
       <!-- deposit -->
-      <article class="card rv">
+      <article class="card rv" id="card-deposit">
         <h2 class="card-title">DEPOSIT<span class="card-tag">approve → deposit</span></h2>
         <div class="card-body">
           <p class="step-hint">Step 1 · move USDC into the escrow contract. Locks draw from this pot and leftovers return here — the contract holds the money, never the seller.</p>
@@ -246,7 +252,7 @@
       </article>
 
       <!-- refund -->
-      <article class="card rv">
+      <article class="card rv" id="card-refund">
         <h2 class="card-title">REFUND<span class="card-tag">Escrow.refund — after ttl</span></h2>
         <div class="card-body">
           <p class="step-hint">Step 5 · TTL lapsed? The uncaptured remainder of a lock is yours again — paste the paymentId, sign, done.</p>

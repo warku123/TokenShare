@@ -96,67 +96,85 @@
      market subpage. */
   const board = listingsEl ? T.marketBoard(listingsEl) : null;
 
+  /* refresh discipline (#3): the "reading…" skeleton is FIRST-LOAD ONLY —
+     the 30s auto-refresh keeps the old cards on screen and swaps nodes
+     in place once fresh data is in. Background tabs skip the tick; an
+     in-flight guard stops interval/manual overlap. */
+  let marketBusy = false;
+  let marketLoaded = false;
+
   async function loadMarket() {
-    if (!listingsEl) return;
-
-    if (!T.cfgReady()) {
-      notice(
-        `<b>config.js not configured</b> — after deployment, copy <code class="inl">escrowAddr / registryAddr / sellers</code> ` +
-        `from <code class="inl">contracts/deployed.json</code> and the market reads the real chain.`
-      );
-      listingsEl.innerHTML = "";
-      return;
-    }
-    /* sellers array is FALLBACK-ONLY since M10 (enumeration is primary);
-       an empty array no longer blocks the preview */
-    if (!board) return;
-
-    notice("");
-    listingsEl.innerHTML =
-      `<div class="ls-loading"><span class="txl-dot is-pending"></span> reading the Registry on-chain …</div>`;
-
-    /* M10: enumerate the seller set on-chain (sellerCount + getSellers);
-       config.js sellers remain the fallback when the enumeration calls
-       are unavailable (pre-v3 Registry / RPC hiccup) */
-    let listings;
+    if (!listingsEl || marketBusy) return;
+    if (document.hidden) return; /* background tab — don't churn the DOM */
+    marketBusy = true;
     try {
-      listings = (await T.fetchMarketListings(T.readProvider())).listings;
-    } catch (e) {
-      listingsEl.innerHTML = "";
-      notice(
-        `<b>RPC unreachable</b> — failed to read ${T.esc(cfg.rpcUrl)} (network or RPC CORS).` +
-        `<span class="dim">${T.esc(e.shortMessage || e.message || "")}</span>`
-      );
-      return;
-    }
+      if (!T.cfgReady()) {
+        notice(
+          `<b>config.js not configured</b> — after deployment, copy <code class="inl">escrowAddr / registryAddr / sellers</code> ` +
+          `from <code class="inl">contracts/deployed.json</code> and the market reads the real chain.`
+        );
+        listingsEl.innerHTML = "";
+        return;
+      }
+      /* sellers array is FALLBACK-ONLY since M10 (enumeration is primary);
+         an empty array no longer blocks the preview */
+      if (!board) return;
 
-    const visible = listings.filter((l) => l.registered && !l.error);
-    if (visible.length === 0) {
-      listingsEl.innerHTML = "";
-      notice(`no registered listing from Registry enumeration or config.js sellers — check that <code class="inl">registryAddr</code> points at the current Registry, that the RPC is reachable, or that a seller has registered.`);
-      return;
-    }
+      notice("");
+      if (!marketLoaded) {
+        listingsEl.innerHTML =
+          `<div class="ls-loading"><span class="txl-dot is-pending"></span> reading the Registry on-chain …</div>`;
+      }
 
-    /* preview cap — the full paginated/filterable market lives on
-       market.html (entry panel sits right below the grid) */
-    const preview = visible.slice(0, 2);
-    const cards = board.render(preview);
+      /* M10: enumerate the seller set on-chain (sellerCount + getSellers);
+         config.js sellers remain the fallback when the enumeration calls
+         are unavailable (pre-v3 Registry / RPC hiccup) */
+      let listings;
+      try {
+        listings = (await T.fetchMarketListings(T.readProvider())).listings;
+      } catch (e) {
+        if (!marketLoaded) listingsEl.innerHTML = "";
+        notice(
+          `<b>RPC unreachable</b> — failed to read ${T.esc(cfg.rpcUrl)} (network or RPC CORS).` +
+          `<span class="dim">${T.esc(e.shortMessage || e.message || "")}</span>`
+        );
+        return;
+      }
 
-    /* stats count the full configured seller set, not the 2-card preview */
-    const active = visible.filter((l) => l.active).length;
-    if (statListings) statListings.textContent = String(visible.length);
-    if (statActive) statActive.textContent = String(active);
-    if (heroStats.listings) heroStats.listings.textContent = String(visible.length);
-    if (heroStats.active) heroStats.active.textContent = String(active);
-    if (statOnline) statOnline.textContent = "…";
-    const online = await T.probeListings(cards);
-    if (statOnline) statOnline.textContent = `${online}/${cards.length}`;
-    if (heroStats.online) heroStats.online.textContent = `${online}/${cards.length}`;
+      const visible = listings.filter((l) => l.registered && !l.error);
+      if (visible.length === 0) {
+        if (!marketLoaded) listingsEl.innerHTML = "";
+        notice(`no registered listing from Registry enumeration or config.js sellers — check that <code class="inl">registryAddr</code> points at the current Registry, that the RPC is reachable, or that a seller has registered.`);
+        return;
+      }
+
+      /* preview cap — the full paginated/filterable market lives on
+         market.html (entry panel sits right below the grid) */
+      const preview = visible.slice(0, 2);
+      const cards = board.render(preview); /* data in hand → swap in place */
+      marketLoaded = true;
+
+      /* stats count the full configured seller set, not the 2-card preview */
+      const active = visible.filter((l) => l.active).length;
+      if (statListings) statListings.textContent = String(visible.length);
+      if (statActive) statActive.textContent = String(active);
+      if (heroStats.listings) heroStats.listings.textContent = String(visible.length);
+      if (heroStats.active) heroStats.active.textContent = String(active);
+      if (statOnline) statOnline.textContent = "…";
+      T.probeListings(cards); /* paints the preview dots (count below is full-set) */
+      /* RELAYS ONLINE = the whole visible seller set, not the 2 preview
+         cards — probeHealth is 30s-TTL-cached, so the rendered pair are
+         cache hits and only the off-screen relays cost a fetch */
+      const probes = await Promise.all(visible.map((l) => T.probeHealth(l.endpoint)));
+      const onlineAll = probes.filter((r) => r.ok).length;
+      if (statOnline) statOnline.textContent = `${onlineAll}/${visible.length}`;
+      if (heroStats.online) heroStats.online.textContent = `${onlineAll}/${visible.length}`;
+    } finally { marketBusy = false; }
   }
 
   if (refreshBtn) refreshBtn.addEventListener("click", loadMarket);
   T.installCopyHandlers();
   loadMarket();
-  /* light auto-refresh keeps the demo table alive */
+  /* light auto-refresh keeps the demo table alive (skipped while hidden) */
   setInterval(loadMarket, 30000);
 })();

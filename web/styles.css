@@ -995,6 +995,53 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
 .key-note { font-size: 11px; line-height: 1.6; }
 .key-row .lock-usage { margin-top: 2px; }
 
+/* ═══ council lane-web fixes (six) ═══ */
+/* hero plain-language line — between tagline and lede, warmer than lede */
+.plainline { color: var(--text); max-width: 54ch; margin-top: 10px; font-size: 14px; line-height: 1.65; }
+/* flow steps are anchors now (#5) — inherit the line's quiet look, glow on hover */
+a.flow-step { color: var(--dim); text-decoration: none; border-bottom: 1px dashed transparent; }
+a.flow-step:hover { color: var(--green); border-bottom-color: var(--green-dim); }
+a.flow-step:hover b { color: var(--green); }
+/* anchor targets: clear the 52px topbar when jumped to */
+[id^="card-"] { scroll-margin-top: 66px; }
+/* LOCK → DEPOSIT steering button (amber, quieter than danger) */
+.btn-dep { color: var(--amber); border-color: rgba(232,180,74,0.4); background: rgba(232,180,74,0.05); text-decoration: none; align-self: flex-start; }
+.btn-dep:hover { border-color: var(--amber); background: rgba(232,180,74,0.1); color: var(--amber); }
+.wallet-faucets { font-family: var(--mono); font-size: 10.5px; color: var(--amber); line-height: 1.6; margin: 6px 0 0; }
+.wallet-faucets a { color: var(--amber); border-bottom: 1px dashed rgba(232,180,74,0.5); text-decoration: none; }
+.wallet-faucets a:hover { border-bottom-style: solid; }
+
+/* PROOF block (index, bottom of the market section) — dashed frame:
+   evidence area, visually distinct from the live board above */
+.proof { margin-top: 26px; border: 1px dashed var(--line-hi); padding: 20px; }
+.proof-head h3 { font-family: var(--mono); font-size: 13px; letter-spacing: 0.12em; color: var(--green); margin: 0 0 8px; }
+.proof-head h3::before { content: "▸ "; }
+.proof-sub { font-family: var(--mono); font-size: 11px; color: var(--faint); line-height: 1.7; margin: 0 0 16px; }
+.proof-sub a { color: var(--dim); }
+.proof-sub a:hover { color: var(--green); }
+.proof-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
+.proof-txs { display: flex; flex-direction: column; gap: 8px; }
+.proof-tx {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  border: 1px solid var(--line); background: var(--bg-2); padding: 9px 12px;
+  text-decoration: none; transition: border-color .2s;
+}
+.proof-tx:hover { border-color: var(--green-dim); }
+.proof-kind { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.12em; color: var(--green); border: 1px solid rgba(61,220,151,0.35); padding: 2px 6px; flex: none; }
+.proof-hash { font-size: 12px; color: var(--text); }
+.proof-note { font-family: var(--mono); font-size: 10.5px; color: var(--faint); flex-basis: 100%; }
+.proof-rcpt { margin: 0; }
+.proof-rcpt .term-body { max-height: none; }
+.proof-gif {
+  grid-column: 1 / -1; aspect-ratio: 16 / 9; max-height: 320px;
+  border: 1.5px dashed var(--line-hi); background: var(--bg-2);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+}
+.proof-gif-play { font-size: 26px; color: var(--faint); }
+.proof-gif-lbl { font-family: var(--mono); font-size: 12px; letter-spacing: 0.16em; color: var(--dim); }
+.proof-gif-sub { font-family: var(--mono); font-size: 10.5px; color: var(--faint); }
+@media (max-width: 860px) { .proof-grid { grid-template-columns: 1fr; } }
+
 /* ═══ buyer flow guide + per-card one-liners (UX 补件) ═══
    step-hint sits deliberately one tier BELOW .fld-hint (11px faint):
    smaller, softer — explanation, not instruction */

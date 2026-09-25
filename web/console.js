@@ -45,7 +45,28 @@
   }
   tabBtns.seller.addEventListener("click", () => selectTab("seller"));
   tabBtns.buyer.addEventListener("click", () => selectTab("buyer"));
-  selectTab(location.hash === "#buyer" ? "buyer" : "seller", false);
+  /* default landing = BUYER (the judge's happy path; the seller flow needs
+     a running relay). #seller stays explicit; card anchors (#card-deposit …)
+     land on buyer and re-scroll once the panel is unhidden */
+  const bootHash = location.hash;
+  selectTab(bootHash === "#seller" ? "seller" : "buyer", false);
+  if (/^#card-/.test(bootHash)) {
+    const t = document.getElementById(bootHash.slice(1));
+    if (t) requestAnimationFrame(() => t.scrollIntoView({ block: "start" }));
+  }
+
+  /* ── mobile nav toggle (same pattern as app.js) ── */
+  const navToggle = document.querySelector(".nav-toggle");
+  const topnav = document.getElementById("topnav");
+  if (navToggle && topnav) {
+    const setNav = (open) => {
+      topnav.classList.toggle("open", open);
+      navToggle.setAttribute("aria-expanded", String(open));
+      navToggle.textContent = open ? "[ CLOSE ]" : "[ MENU ]";
+    };
+    navToggle.addEventListener("click", () => setNav(!topnav.classList.contains("open")));
+    topnav.addEventListener("click", (e) => { if (e.target.closest("a")) setNav(false); });
+  }
 
   /* ═══ wallet bar ══════════════════════════════════════════ */
   const connectBtn = $("wallet-connect");
@@ -97,6 +118,7 @@
     const mirror = $("b-wallet-usdc-mirror");
     if (mirror) mirror.textContent = "see wallet bar ↑";
     $("b-escrow-bal").textContent = "—";
+    $("wallet-faucets").hidden = true;
     syncLockGate();
     renderWallet();
     loadMyListing();
@@ -127,8 +149,10 @@
 
   async function refreshBalances() {
     if (!state.address || !T.cfgReady()) return;
+    let walletUsdc = null;
     try {
       const bal = await T.usdc(T.readProvider()).balanceOf(state.address);
+      walletUsdc = bal;
       usdcBal.textContent = `$${T.fmtUsdc(bal)}`;
       usdcBal.title = `${T.fmtInt(bal)} native units`;
       const mirror = $("b-wallet-usdc-mirror");
@@ -140,6 +164,14 @@
       $("b-escrow-bal").textContent = `$${T.fmtUsdc(eb)}`;
       $("b-escrow-bal").title = `${T.fmtInt(eb)} native units`;
     } catch { state.escrowBal = null; $("b-escrow-bal").textContent = "—"; }
+    /* faucet hint: connected but dry — gas MON nearly out (18dp native),
+       or zero USDC in both wallet and escrow */
+    try {
+      const mon = await T.readProvider().getBalance(state.address);
+      const dry = mon < 5000000000000000n /* 0.005 MON */ ||
+        (walletUsdc === 0n && state.escrowBal === 0n);
+      $("wallet-faucets").hidden = !dry;
+    } catch { /* leave the hint as-is on a flaky read */ }
     syncLockGate(); /* lock form mirrors the balance + re-gates the button */
   }
 
@@ -1263,6 +1295,10 @@
     const bal = state.escrowBal;
     balEl.textContent = bal == null ? "—" : `$${T.fmtUsdc(bal)}`;
     balEl.title = bal == null ? "" : `${T.fmtInt(bal)} native units`;
+    /* zero escrow balance (connected, read OK) → steer to DEPOSIT first;
+       the amount gate below still covers the partial-shortfall case */
+    const depFirst = $("b-dep-first");
+    if (depFirst) depFirst.hidden = !(bal === 0n);
     const sf = T.lockShortfall(readPrice("b-max"), bal);
     note.hidden = !sf;
     note.textContent = sf ? sf.text : "";
@@ -1586,30 +1622,44 @@
     for (const pid of allPids) loadKeyRow(pid, actives.includes(pid));
   }
 
+  /* pid → seller cache (#12): a paymentId's seller is immutable on-chain
+     (set once by lock), so cache it indefinitely — kills the repeated
+     getPayment every row render / REFRESH used to cost */
+  const keySellerCache = new Map();
+  async function keySellerOf(pid) {
+    const hit = keySellerCache.get(String(pid));
+    if (hit) return hit;
+    const p = await T.escrow(T.readProvider()).getPayment(pid);
+    const seller = String(p.seller);
+    keySellerCache.set(String(pid), seller);
+    if (keySellerCache.size > 200) keySellerCache.delete(keySellerCache.keys().next().value); /* FIFO cap */
+    return seller;
+  }
+
   /* fills [ COPY BASE URL ] off the on-chain seller's listing; active rows
-     also pull the relay usage view (fetchUsage reuse, sharing the same
-     getPayment read via chainP) */
+     also pull the relay usage view (fetchUsage reuse — the cached seller
+     rides chainP as {seller}, the only field it consumes) */
   async function loadKeyRow(pid, withUsage) {
     const row = apiKeysList.querySelector(`[data-key-row="${pid}"]`);
     if (!row) return;
-    let p = null;
-    try { p = await T.escrow(T.readProvider()).getPayment(pid); }
+    let seller = null;
+    try { seller = await keySellerOf(pid); }
     catch { /* fall through — fetchUsage re-tries with its own fallback note */ }
     if (!row.isConnected) return; /* a re-render replaced this row meanwhile */
     const baseBtn = row.querySelector("[data-key-base]");
     if (baseBtn) {
-      const l = p ? listingOf(p.seller) : null;
+      const l = seller ? listingOf(seller) : null;
       if (l) {
         baseBtn.disabled = false;
         baseBtn.dataset.copy = l.endpoint; /* property assignment — no HTML parsing */
         baseBtn.title = `${l.endpoint} — click to copy (resolved from the on-chain seller)`;
       } else {
-        baseBtn.title = p
+        baseBtn.title = seller
           ? "seller not in the current listings (delisted? RPC hiccup?) — base_url unknown"
           : "chain read failed — base_url unresolved";
       }
     }
-    if (withUsage) fetchUsage(pid, p ? String(p.seller) : "", row.querySelector(`[data-key-usage="${pid}"]`), p);
+    if (withUsage) fetchUsage(pid, seller || "", row.querySelector(`[data-key-usage="${pid}"]`), seller ? { seller } : null);
   }
 
   /* 1s countdown ticker — crossing zero flips ACTIVE → EXPIRED via a
@@ -1663,11 +1713,12 @@
           return;
         }
         /* endpoint off the ON-CHAIN seller (C2) — the registry record
-           carries no seller, and localStorage is untrusted anyway */
+           carries no seller, and localStorage is untrusted anyway; the
+           pid→seller cache makes repeat revokes read-free */
         let endpoint = null;
         try {
-          const p = await T.escrow(T.readProvider()).getPayment(pid);
-          const l = listingOf(p.seller);
+          const seller = await keySellerOf(pid);
+          const l = listingOf(seller);
           if (l) endpoint = l.endpoint;
         } catch { /* fall through */ }
         if (!endpoint) { say(`relay endpoint unresolved (chain read failed or seller delisted) — refresh and retry; the key is still live`); return; }

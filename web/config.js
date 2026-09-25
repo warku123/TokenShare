@@ -10,7 +10,7 @@ window.TS_CONFIG = {
   chainName: "Monad Testnet",
   nativeCurrency: { name: "Monad", symbol: "MON", decimals: 18 },
   rpcUrl: "https://testnet-rpc.monad.xyz",
-  explorer: "https://testnet.monadscan.com",
+  explorer: "https://testnet.monadvision.com",
 
   escrowAddr: "0x157C551D145d3c4bBF8f3554c43Fb3C931D71aD5",
   registryAddr: "0xeD347cDc1761750E20C024459b38dedFb1462254",

@@ -232,18 +232,37 @@ window.TS = (() => {
   const isZeroAddr = (a) => !a || /^0x0{40}$/i.test(a);
 
   /* ── relay health probe (CORS failure → silent gray) ─────── */
+  /* ── relay /health probe cache (30s TTL + in-flight dedupe) ──
+     operator ↔ endpoint is 1:1 in the Registry, so the endpoint IS the
+     operator key. Index preview, market.html and the console pickers all
+     funnel through here — one probe per relay per 30s, total. */
+  const HEALTH_TTL_MS = 30000;
+  const healthCache = new Map(); /* endpoint → {ok, ms?, unreachable?, ts} | Promise */
+
   async function probeHealth(endpoint, timeoutMs = 5000) {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), timeoutMs);
-    const started = performance.now();
+    const hit = healthCache.get(endpoint);
+    if (hit instanceof Promise) return hit; /* same probe already in flight */
+    if (hit && Date.now() - hit.ts < HEALTH_TTL_MS) return { ok: hit.ok, ms: hit.ms, unreachable: hit.unreachable };
+    const p = (async () => {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), timeoutMs);
+      const started = performance.now();
+      try {
+        const r = await fetch(joinUrl(endpoint, "/health"), { signal: ctrl.signal, cache: "no-store" });
+        return { ok: r.ok, ms: Math.round(performance.now() - started) };
+      } catch {
+        /* network error OR CORS block — indistinguishable in browser;
+           UI shows gray dot with an explanatory title */
+        return { ok: false, unreachable: true };
+      } finally { clearTimeout(t); }
+    })();
+    healthCache.set(endpoint, p);
     try {
-      const r = await fetch(joinUrl(endpoint, "/health"), { signal: ctrl.signal, cache: "no-store" });
-      return { ok: r.ok, ms: Math.round(performance.now() - started) };
-    } catch {
-      /* network error OR CORS block — indistinguishable in browser;
-         UI shows gray dot with an explanatory title */
-      return { ok: false, unreachable: true };
-    } finally { clearTimeout(t); }
+      const r = await p;
+      healthCache.set(endpoint, { ...r, ts: Date.now() });
+      if (healthCache.size > 300) healthCache.delete(healthCache.keys().next().value); /* FIFO cap */
+      return r;
+    } catch (e) { healthCache.delete(endpoint); throw e; }
   }
 
   /* fetch JSON with timeout; classifies CORS/network failures */
@@ -296,13 +315,21 @@ window.TS = (() => {
     return i >= 0 ? listing.prices[i] || null : null;
   };
 
+  /* RPC guard: the public RPC may hang instead of failing — race every
+     enumeration/enrichment against a hard 8s so the market degrades to
+     config.js sellers instead of spinning forever */
+  const RPC_TIMEOUT_MS = 8000;
+  const withTimeout = (p, tag) => Promise.race([
+    p,
+    new Promise((_, rej) => setTimeout(() => rej(new Error(`${tag} timed out after ${RPC_TIMEOUT_MS}ms`)), RPC_TIMEOUT_MS)),
+  ]);
+
   async function fetchListings(provider) {
-    const out = [];
-    for (const addr of cfg.sellers || []) {
-      try { out.push(await fetchListing(provider, addr)); }
-      catch { out.push({ operator: addr, registered: false, error: true, models: [] }); }
-    }
-    return out;
+    /* parallel: one tick of in-flight calls instead of N serial RTTs */
+    return Promise.all((cfg.sellers || []).map(async (addr) => {
+      try { return await withTimeout(fetchListing(provider, addr), "getListing"); }
+      catch { return { operator: addr, registered: false, error: true, models: [] }; }
+    }));
   }
 
   /* ── shared v2 market card board (index preview + market.html) ──
@@ -463,7 +490,7 @@ window.TS = (() => {
   async function fetchMarketListings(provider) {
     let addrs;
     try {
-      addrs = await fetchSellerSet(provider);
+      addrs = await withTimeout(fetchSellerSet(provider), "Registry enumeration");
     } catch (e) {
       const degraded = (e && (e.shortMessage || e.message)) || "unknown";
       let fallback = [];
@@ -472,14 +499,17 @@ window.TS = (() => {
       } catch { /* dead RPC — empty market */ }
       return { listings: fallback, source: "config", degraded };
     }
-    const listings = [];
-    for (let i = 0; i < addrs.length; i++) {
+    /* parallel enrichment (was serial for…await): all getListing calls are
+       in flight in the same tick, each with the 8s guard; an unreadable or
+       hung seller degrades to a skip, never blocks the board */
+    const enriched = await Promise.all(addrs.map(async (addr, i) => {
       try {
-        const l = await fetchListing(provider, addrs[i]);
-        if (l.registered) { l._enumIndex = i; listings.push(l); }
+        const l = await withTimeout(fetchListing(provider, addr), "getListing");
+        if (l.registered) { l._enumIndex = i; return l; }
       } catch { /* unreadable seller — skip */ }
-    }
-    return { listings, source: "enum", degraded: null };
+      return null;
+    }));
+    return { listings: enriched.filter(Boolean), source: "enum", degraded: null };
   }
 
   /* PIN minAmount estimate, native units, for ONE model's price triple:

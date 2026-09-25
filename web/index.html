@@ -35,6 +35,7 @@
       <p class="kicker rv">x402 / agentic payment rails &middot; trust-minimized API supply</p>
       <h1 class="rv" style="--d:.05s">TOKEN<br>SHARE<span class="cursor" aria-hidden="true"></span></h1>
       <p class="tagline rv" style="--d:.1s">Idle official-plan quota, sold by the call. <span class="chip chip-kimi">KIMI / MOONSHOT FIRST</span></p>
+      <p class="plainline rv" style="--d:.12s">In plain words: paying for a Kimi plan you never fully burn through? Sell the leftover quota by the call — buyers pay per request, you keep the plan.</p>
       <p class="lede rv" style="--d:.15s">
         Sellers rent out the spare quota of their <b>official LLM subscription plans</b> —
         a relay holds their own platform key and forwards only to the provider's official
@@ -44,7 +45,7 @@
         No custody, no upgrade keys, no trusted third party.
       </p>
       <div class="hero-cta rv" style="--d:.2s">
-        <a class="btn" href="console.html">[ OPEN CONSOLE ]</a>
+        <a class="btn" href="console.html#buyer">[ OPEN CONSOLE ]</a>
         <a class="btn btn-ghost" href="market.html">[ BROWSE FULL MARKET ]</a>
       </div>
       <dl class="hero-stats rv" style="--d:.25s">
@@ -70,7 +71,7 @@
   <span class="t-d">settle actual</span> <span class="t-n">45552</span> <span class="t-d">· diff</span> <span class="t-n">4448</span> <span class="t-d">→ buyer balance</span>
   <span class="t-d">receipt EIP-712</span> <span class="t-g">✓ verified</span> <span class="t-d">· upstream api.moonshot.cn · kimi-for-coding</span></code></pre>
       </div>
-      <p class="term-cap">amounts are USDC native units (6 decimals)</p>
+      <p class="term-cap">illustrative trace · amounts are USDC native units (6 decimals)</p>
     </div>
   </div>
 </section>
@@ -99,6 +100,45 @@
       <span class="market-entry-l1">FULL MARKET<span class="market-entry-arrow">→</span></span>
       <span class="market-entry-l2">every seller read directly from the Registry on-chain — pagination, model filters, operator/model search, price sort</span>
     </a>
+
+    <!-- ══ PROOF — real on-chain artifacts, explorer-verifiable ══ -->
+    <div class="proof rv">
+      <div class="proof-head">
+        <h3>PROOF — DON'T TRUST THE PAGE, CLICK THE CHAIN</h3>
+        <p class="proof-sub">a full deposit → lock → per-call capture → settle round, executed on Monad testnet against Escrow
+          <a href="https://testnet.monadvision.com/address/0x157C551D145d3c4bBF8f3554c43Fb3C931D71aD5" target="_blank" rel="noopener">0x157C…71aD5 ↗</a>
+          — every link below opens the real transaction.</p>
+      </div>
+      <div class="proof-grid">
+        <div class="proof-txs">
+          <a class="proof-tx" href="https://testnet.monadvision.com/tx/0x868a516043758a2ddef6924b0655fcd4984f106a87db2040afbc8b0a10a18b19" target="_blank" rel="noopener">
+            <span class="proof-kind">DEPOSIT</span><span class="proof-hash mono">0x868a…8b19</span>
+            <span class="proof-note">5,000 units ($0.005000) into escrow · Deposited event</span></a>
+          <a class="proof-tx" href="https://testnet.monadvision.com/tx/0x79fb0a185997f70c528171d33ded2f984f5542bc4c88db857d3c96849f2f011f" target="_blank" rel="noopener">
+            <span class="proof-kind">LOCK</span><span class="proof-hash mono">0x79fb…011f</span>
+            <span class="proof-note">paymentId 1 · max 2,000 units · ttl 120s · Locked event</span></a>
+          <a class="proof-tx" href="https://testnet.monadvision.com/tx/0x4cbbf9f23ddd98a8246a303ba7dcf2be81f032880a6a5b4f9de965a3c44368d5" target="_blank" rel="noopener">
+            <span class="proof-kind">SETTLE·PARTIAL</span><span class="proof-hash mono">0x4cbb…68d5</span>
+            <span class="proof-note">per-call capture 248 units · payment stays Locked · SettlePartial event</span></a>
+          <a class="proof-tx" href="https://testnet.monadvision.com/tx/0x3329bc47a760dd0b283981570e3cb7a9ab4afc420c20c8dc646fc71a632b16a7" target="_blank" rel="noopener">
+            <span class="proof-kind">SETTLED</span><span class="proof-hash mono">0x3329…16a7</span>
+            <span class="proof-note">actual 312 to seller · 1,688 refunded to buyer · terminal state</span></a>
+        </div>
+        <div class="proof-rcpt term">
+          <div class="term-bar"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span><span class="term-title">X-Receipt — EIP-712, signed over lock #1</span></div>
+<pre class="term-body"><code><span class="t-d">domain</span>    TokenShare Relay v1 · chainId <span class="t-n">10143</span>
+<span class="t-d">paymentId</span> <span class="t-n">1</span>  <span class="t-d">· usage cached</span> <span class="t-n">12000</span> <span class="t-d">· in</span> <span class="t-n">26400</span> <span class="t-d">· out</span> <span class="t-n">2140</span>
+<span class="t-d">actual</span>    <span class="t-n">312</span> <span class="t-d">units ($0.000312) · model</span> kimi-for-coding
+<span class="t-d">upstream</span>  api.kimi.com <span class="t-d">· seller</span> 0x38c2…8Dd6
+<span class="t-d">sig</span>       0xd955…1c2c <span class="t-g">✓ verified</span> <span class="t-d">— recovers to the seller address</span></code></pre>
+        </div>
+        <div class="proof-gif" aria-label="demo video placeholder">
+          <span class="proof-gif-play">▶</span>
+          <span class="proof-gif-lbl">DEMO GIF</span>
+          <span class="proof-gif-sub">end-to-end capture lands here — slot reserved, recording in progress</span>
+        </div>
+      </div>
+    </div>
   </div>
 </section>
 
