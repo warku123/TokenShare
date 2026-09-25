@@ -122,10 +122,22 @@
   <!-- ════════════ BUYER ════════════ -->
   <section class="panel" id="panel-buyer" role="tabpanel" aria-labelledby="tab-buyer" hidden>
 
+    <!-- the flow — one glance, five steps -->
+    <p class="flow-line rv" aria-label="buyer flow">
+      <span class="flow-lbl">FLOW</span>
+      <span class="flow-step"><b>1</b>DEPOSIT</span><span class="flow-arr">→</span>
+      <span class="flow-step"><b>2</b>LOCK</span><span class="flow-arr">→</span>
+      <span class="flow-step"><b>3</b>MINT KEY</span><span class="flow-arr">→</span>
+      <span class="flow-step"><b>4</b>CALL / USAGE</span><span class="flow-arr">→</span>
+      <span class="flow-step"><b>5</b>REFUND</span>
+      <span class="flow-tail">spend by real usage — whatever's left comes back</span>
+    </p>
+
     <!-- lock — the buyer's core move gets the full-width hero -->
     <article class="card rv lock-hero">
       <h2 class="card-title">LOCK<span class="card-tag">Escrow.lock → paymentId · pick a seller, size the cap, sign once</span></h2>
       <div class="card-body lock-grid">
+        <p class="step-hint">Step 2 · set aside a budget cap for one seller. Keys and calls spend from it while the TTL runs — when the TTL lapses, whatever's left is yours to refund.</p>
         <div class="lock-side">
           <label class="fld"><span class="fld-lbl">SELLER <i>search by address, host, or model — ↑↓ + enter, esc closes</i></span>
             <div class="spick">
@@ -158,6 +170,7 @@
     <article class="card rv">
       <h2 class="card-title">API KEYS<span class="card-tag">localStorage metadata · key bodies never stored — revoke via relay</span></h2>
       <div class="card-body">
+        <p class="step-hint">Keys you mint land here — metadata only, never the key itself. Watch spend per key, copy its base_url for your agent, or REVOKE a leaked key: instant, relay-side, no chain tx.</p>
         <div class="locks-list" id="apikeys-list"></div>
       </div>
     </article>
@@ -166,6 +179,7 @@
     <article class="card rv call-card">
       <h2 class="card-title">CALL DEMO<span class="card-tag">sign → relay → verify receipt</span></h2>
       <div class="card-body">
+        <p class="step-hint">Step 4 · try a call by hand — you sign each request in the wallet, the relay meters tokens and pulls the cost from a lock. Agents skip this card; they use a minted key.</p>
         <div class="call-grid">
           <label class="fld"><span class="fld-lbl">SELLER</span>
             <div class="spick">
@@ -196,6 +210,7 @@
     <article class="card rv">
       <h2 class="card-title">SESSION LOCKS<span class="card-tag">localStorage · this browser — mint agent keys, watch accrued usage</span></h2>
       <div class="card-body">
+        <p class="step-hint">Step 3 · your locks live in this browser. MINT turns one into an OpenAI-compatible api key for agents — it spends by real usage, up to the lock's max. USAGE opens the live meter.</p>
         <div class="locks-list" id="locks-list"></div>
       </div>
     </article>
@@ -206,6 +221,7 @@
       <article class="card rv">
         <h2 class="card-title">BALANCES<span class="card-tag">USDC · Escrow</span></h2>
         <div class="card-body">
+          <p class="step-hint">Wallet USDC vs the escrow pot. WITHDRAW moves escrow balance back to your wallet.</p>
           <div class="bal-row"><span>WALLET</span><b class="mono" id="b-wallet-note"><span id="b-wallet-usdc-mirror">see wallet bar ↑</span></b></div>
           <div class="bal-row"><span>ESCROW balances(me)</span><b class="mono" id="b-escrow-bal">—</b></div>
           <div class="fld-row" style="margin-top:14px">
@@ -221,6 +237,7 @@
       <article class="card rv">
         <h2 class="card-title">DEPOSIT<span class="card-tag">approve → deposit</span></h2>
         <div class="card-body">
+          <p class="step-hint">Step 1 · move USDC into the escrow contract. Locks draw from this pot and leftovers return here — the contract holds the money, never the seller.</p>
           <label class="fld"><span class="fld-lbl">AMOUNT <i>USDC — one deposit backs many calls</i></span>
             <input type="text" inputmode="decimal" id="b-dep-amt" placeholder="0.50"></label>
           <button class="btn btn-wide" id="b-dep-btn" type="button">[ APPROVE + DEPOSIT ]</button>
@@ -232,6 +249,7 @@
       <article class="card rv">
         <h2 class="card-title">REFUND<span class="card-tag">Escrow.refund — after ttl</span></h2>
         <div class="card-body">
+          <p class="step-hint">Step 5 · TTL lapsed? The uncaptured remainder of a lock is yours again — paste the paymentId, sign, done.</p>
           <label class="fld"><span class="fld-lbl">PAYMENT ID <i>session locks suggested</i></span>
             <input type="text" inputmode="numeric" id="r-payment" list="r-payment-list" placeholder="42" spellcheck="false" autocomplete="off">
             <datalist id="r-payment-list"></datalist></label>

@@ -995,6 +995,26 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
 .key-note { font-size: 11px; line-height: 1.6; }
 .key-row .lock-usage { margin-top: 2px; }
 
+/* ═══ buyer flow guide + per-card one-liners (UX 补件) ═══
+   step-hint sits deliberately one tier BELOW .fld-hint (11px faint):
+   smaller, softer — explanation, not instruction */
+.flow-line {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em;
+  color: var(--faint); margin: -4px 0 0;
+}
+.flow-lbl { color: var(--dim); border: 1px solid var(--line); padding: 2px 7px; font-size: 9.5px; letter-spacing: 0.14em; }
+.flow-step { color: var(--dim); white-space: nowrap; }
+.flow-step b { color: var(--green-dim); font-weight: 700; margin-right: 5px; }
+.flow-arr { color: var(--faint); }
+.flow-tail { margin-left: auto; font-size: 10.5px; letter-spacing: 0.02em; }
+.step-hint { font-family: var(--mono); font-size: 10.5px; color: var(--faint); line-height: 1.6; margin: 0; opacity: 0.9; }
+.lock-grid > .step-hint { grid-column: 1 / -1; }
+@media (max-width: 640px) {
+  .flow-line { gap: 6px; font-size: 10.5px; }
+  .flow-tail { margin-left: 0; flex-basis: 100%; }
+}
+
 /* ═══ CONSOLE RESPONSIVE ═══ */
 @media (max-width: 1020px) {
   .grid-3 { grid-template-columns: 1fr 1fr; }
