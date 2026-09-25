@@ -577,6 +577,24 @@ window.TS = (() => {
     `${MINT_MESSAGE_PREFIX}|paymentId=${BigInt(paymentId).toString(10)}` +
     `|expiry=${BigInt(expiry).toString(10)}|maxAmount=${BigInt(maxAmount).toString(10)}`;
 
+  /* ══════════════════════════════════════════════════════════
+     M13 API key revoke (补件) — relay contract:
+
+       POST {relay}/payment/{id}/revoke
+       body {"message": msg, "signature": "0x…"}
+       msg = "TokenShare API key revoke|paymentId={p}|expiry={e}"
+
+     EIP-191 personal_sign over the msg UTF-8 bytes (signer.signMessage ≡
+     eth_account.encode_defunct(text=…)) — same signing style as the mint
+     grant above. 200 {"revoked":true} · repeat revoke idempotent 200 ·
+     non-buyer 401 · bearer on a revoked key → 401 detail "revoked".
+     ══════════════════════════════════════════════════════════ */
+  const REVOKE_MESSAGE_PREFIX = "TokenShare API key revoke";
+
+  const buildRevokeMessage = (paymentId, expiry) =>
+    `${REVOKE_MESSAGE_PREFIX}|paymentId=${BigInt(paymentId).toString(10)}` +
+    `|expiry=${BigInt(expiry).toString(10)}`;
+
   /* unpadded base64url (mirror of _b64url in signing.py / the X-Receipt emit) */
   function b64urlEncode(bytes) {
     let bin = "";
@@ -704,6 +722,35 @@ window.TS = (() => {
     all: () => loadJson(DISPUTES_KEY),
     add(d) { const all = disputes.all(); all.unshift(d); saveJson(DISPUTES_KEY, all.slice(0, 100)); },
     clear() { localStorage.removeItem(DISPUTES_KEY); },
+  };
+
+  /* ── minted api key metadata (localStorage) — M13 补件 ─────
+     METADATA ONLY: the tsk1 key body is shown once at mint and NEVER
+     persisted here. Records {p, e, m, model, createdAt, revokedAt?} —
+     p/m decimal strings (BigInt-safe), e unix seconds; e/m are the
+     chain truth captured at mint time (getPayment), not row data.
+     Revocation is per paymentId at the relay, so add() preserves a
+     prior revokedAt: a re-minted key for the same payment is still
+     dead there. */
+  const APIKEYS_KEY = "tokenshare.apikeys";
+
+  const apikeys = {
+    all: () => loadJson(APIKEYS_KEY),
+    add(rec) {
+      const prev = apikeys.all();
+      const old = prev.find((r) => r && String(r.p) === String(rec.p));
+      const next = prev.filter((r) => !(r && String(r.p) === String(rec.p)));
+      if (old && old.revokedAt && !rec.revokedAt) rec = { ...rec, revokedAt: old.revokedAt };
+      next.unshift(rec);
+      saveJson(APIKEYS_KEY, next.slice(0, 50));
+    },
+    markRevoked(p) {
+      const all = apikeys.all();
+      const rec = all.find((r) => r && String(r.p) === String(p));
+      if (!rec || rec.revokedAt) return;
+      rec.revokedAt = Date.now();
+      saveJson(APIKEYS_KEY, all);
+    },
   };
 
   /* ── relay /info probe (M7) — TEE + upstream policy descriptor.
@@ -1138,9 +1185,10 @@ window.TS = (() => {
     RECEIPT_DOMAIN_NAME, RECEIPT_DOMAIN_VERSION, RECEIPT_TYPES,
     decodeReceiptHeader, verifyReceipt,
     MINT_MESSAGE_PREFIX, API_KEY_PREFIX, buildMintMessage, b64urlEncode, assembleApiKey,
+    REVOKE_MESSAGE_PREFIX, buildRevokeMessage,
     decodeEscrowErr, humanizeEscrowErr, lockShortfall,
     txLine, runTx, parseLockedPaymentId,
-    locks, disputes, relayErrorCopy,
+    locks, disputes, apikeys, relayErrorCopy,
     wallet, WALLET_RDNS_KEY,
   };
 })();

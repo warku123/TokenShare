@@ -291,6 +291,9 @@
     cSellerPick.refresh();
     syncSellerInfo();
     syncCallModels();
+    /* api-key rows resolve base_url/usage off listingOf(seller) — re-render
+       now that fresh listings are in (rows degrade gracefully before this) */
+    renderApiKeys();
   }
 
   const listingOf = (op) => state.listings.find((l) => T.sameAddr(l.operator, op));
@@ -1364,10 +1367,13 @@
       `</div>`;
     const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
+    let minted = null; /* set by a successful SIGN + MINT; written to the
+                          apikeys metadata registry when the modal closes */
     const close = () => {
       document.removeEventListener("keydown", onKey, true);
       document.body.style.overflow = prevOverflow;
       overlay.remove();
+      if (minted) { T.apikeys.add(minted); renderApiKeys(); }
     };
     const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); close(); } };
     document.addEventListener("keydown", onKey, true);
@@ -1420,6 +1426,12 @@
         const key = T.assembleApiKey({
           paymentId, expiry, maxAmount: p.maxAmount, buyer: state.address, signature: sig,
         });
+        /* registry metadata — e/m from the CHAIN read above (getPayment),
+           never from the localStorage lock row; the key body is NOT stored */
+        minted = {
+          p: BigInt(paymentId).toString(10), e: expiry, m: p.maxAmount.toString(),
+          model: (l && l.models[0]) || "", createdAt: Date.now(),
+        };
         renderMintResult(body, { paymentId, key, endpoint: l ? l.endpoint : null, model: l && l.models[0], expiryStr, maxAmount: p.maxAmount });
       }));
     })();
@@ -1447,13 +1459,17 @@
           `<div class="fld"><span class="fld-lbl">CURL <i>OpenAI-compatible · values assigned above, click the block to copy</i></span>` +
           `<pre class="preview mono wrap-anywhere mint-curl" data-copy="${T.esc(curl)}" title="click to copy the full snippet">${T.esc(curl)}</pre></div>`
         : "") +
-      `<p class="mint-warn">⚠ stateless &amp; <b>non-revocable</b> — a leak can spend up to <b>$${T.fmtUsdc(maxAmount)}</b> (this lock's max). ` +
-      `The key dies with the lock TTL (${T.esc(expiryStr)}); relay rejects it afterwards. Mint a fresh key per lock.</p>`;
+      `<p class="mint-warn">⚠ stateless bearer — a leak can spend up to <b>$${T.fmtUsdc(maxAmount)}</b> (this lock's max) until revoked. ` +
+      `Kill the key any time via <b>[ REVOKE ]</b> in the API KEYS panel (relay-side, immediate); it dies with the lock TTL (${T.esc(expiryStr)}) either way. ` +
+      `Shown once — only metadata lands in the API KEYS panel, never the key itself.</p>`;
   }
 
-  /* — M13 USAGE: relay's accrued-usage view, inline under the lock row — */
-  async function fetchUsage(paymentId, sellerRow) {
-    const panel = document.querySelector(`[data-usage-panel="${paymentId}"]`);
+  /* — M13 USAGE: relay's accrued-usage view, inline under the lock row —
+     panel/chainP are optional (API KEYS panel reuses this): panel defaults
+     to the session-lock row's usage slot; chainP is a pre-read getPayment
+     result that saves the row a second chain call. */
+  async function fetchUsage(paymentId, sellerRow, panel, chainP) {
+    panel = panel || document.querySelector(`[data-usage-panel="${paymentId}"]`);
     if (!panel) return;
     const refreshBtn = `<button class="btn btn-sm btn-ghost" type="button" data-usage-refresh="${T.esc(paymentId)}" data-seller="${T.esc(sellerRow)}">[ REFRESH ]</button>`;
     panel.hidden = false;
@@ -1463,7 +1479,7 @@
        row value (with a note) only when the chain read itself fails. */
     let seller = sellerRow, warn = "";
     try {
-      const p = await T.escrow(T.readProvider()).getPayment(paymentId);
+      const p = chainP || await T.escrow(T.readProvider()).getPayment(paymentId);
       if (sellerRow && !T.sameAddr(sellerRow, p.seller)) {
         warn = `<div class="usage-warn bad mono">⚠ row seller ${T.esc(T.truncAddr(sellerRow))} ≠ on-chain ${T.esc(T.truncAddr(p.seller))} — localStorage entry tampered? using the on-chain seller</div>`;
       }
@@ -1496,6 +1512,192 @@
       `<div class="usage-bar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"><i style="width:${pct}%"></i></div>` +
       `<div class="usage-foot"><span class="dim">${new Date().toLocaleTimeString()} · relay-accrued view (may lead on-chain captured during flush)</span>${refreshBtn}</div>`;
   }
+
+  /* ═══ M13 补件: API KEYS panel — minted-key metadata + relay revoke ═══
+     The registry holds METADATA ONLY ({p,e,m,model,createdAt,revokedAt?})
+     — the key body is shown once at mint and never stored. base_url and
+     the revoke target re-resolve off the ON-CHAIN payment seller
+     (getPayment → listingOf, C2 discipline): localStorage is untrusted. */
+  const apiKeysList = $("apikeys-list");
+
+  const fmtKeyLeft = (sec) => {
+    if (sec <= 0) return "expired";
+    const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600),
+          m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    if (d > 0) return `${d}d ${h}h ${m}m left`;
+    if (h > 0) return `${h}h ${m}m ${s}s left`;
+    return `${m}m ${String(s).padStart(2, "0")}s left`;
+  };
+
+  /* ACTIVE / EXPIRED / REVOKED — EXPIRED is a pure local computation
+     (now ≥ e), the same hard check the relay applies to the bearer grant */
+  const keyStatusOf = (rec, nowSec) =>
+    rec.revokedAt ? "REVOKED" : (nowSec >= Number(rec.e) ? "EXPIRED" : "ACTIVE");
+
+  function renderApiKeys() {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const rows = [];
+    const actives = [];
+    const allPids = [];
+    for (const rec of T.apikeys.all()) {
+      try {
+        const pid = String(rec.p ?? "");
+        const e = Number(rec.e);
+        if (!/^\d+$/.test(pid) || !Number.isFinite(e) || e <= 0) continue; /* tampered/garbage — skip the row */
+        const st = keyStatusOf(rec, nowSec);
+        let max = null;
+        try { max = T.fmtUsdc(BigInt(String(rec.m))); } catch { max = null; } /* formatUnits throws on garbage */
+        const badge =
+          st === "ACTIVE" ? `<span class="kstat kstat-active">ACTIVE</span>` :
+          st === "EXPIRED" ? `<span class="kstat kstat-expired">EXPIRED</span>` :
+          `<span class="kstat kstat-revoked"><i class="rdot"></i>REVOKED</span>`;
+        const when = st === "ACTIVE"
+          ? `<span class="mono dim" data-key-cd="${e}" title="expiry countdown — the relay hard-rejects the key at zero">${fmtKeyLeft(e - nowSec)}</span>`
+          : st === "EXPIRED"
+            ? `<span class="mono dim">expired ${T.esc(new Date(e * 1000).toLocaleString())}</span>`
+            : `<span class="mono dim">revoked ${T.esc(new Date(Number(rec.revokedAt)).toLocaleString())}</span>`;
+        rows.push(
+          `<div class="lock-row key-row" data-key-row="${T.esc(pid)}">` +
+            `<div class="lock-row-top">` +
+              `<span class="lock-pid mono">#${T.esc(pid)}</span>` +
+              `<span class="mono dim">${T.esc(rec.model ? String(rec.model) : "?")}</span>` +
+              badge +
+              when +
+              `<button class="btn btn-sm btn-ghost" type="button" data-key-base="${T.esc(pid)}" disabled title="resolving base_url from the on-chain seller …">[ COPY BASE URL ]</button>` +
+              (st === "ACTIVE"
+                ? `<button class="btn btn-sm btn-danger" type="button" data-key-revoke="${T.esc(pid)}">[ REVOKE ]</button>`
+                : "") +
+            `</div>` +
+            `<div class="key-meta dim mono">` +
+              (max != null ? `max $${T.esc(max)} · ` : "") +
+              `minted ${T.esc(rec.createdAt ? new Date(Number(rec.createdAt)).toLocaleString() : "?")}` +
+            `</div>` +
+            `<div class="key-note mono" data-key-note="${T.esc(pid)}" hidden></div>` +
+            (st === "ACTIVE" ? `<div class="lock-usage" data-key-usage="${T.esc(pid)}"></div>` : "") +
+          `</div>`);
+        allPids.push(pid);
+        if (st === "ACTIVE") actives.push(pid);
+      } catch { /* unexpected shape — skip the row entirely */ }
+    }
+    apiKeysList.innerHTML = rows.join("") ||
+      `<p class="empty-hint">no api keys minted in this browser yet — MINT API KEY from a session lock. Only metadata (paymentId/expiry/max/model) is kept here; the key body is shown once at mint and never stored.</p>`;
+    /* every row resolves base_url off the chain seller (one getPayment
+       each); the relay usage pull is ACTIVE-only */
+    for (const pid of allPids) loadKeyRow(pid, actives.includes(pid));
+  }
+
+  /* fills [ COPY BASE URL ] off the on-chain seller's listing; active rows
+     also pull the relay usage view (fetchUsage reuse, sharing the same
+     getPayment read via chainP) */
+  async function loadKeyRow(pid, withUsage) {
+    const row = apiKeysList.querySelector(`[data-key-row="${pid}"]`);
+    if (!row) return;
+    let p = null;
+    try { p = await T.escrow(T.readProvider()).getPayment(pid); }
+    catch { /* fall through — fetchUsage re-tries with its own fallback note */ }
+    if (!row.isConnected) return; /* a re-render replaced this row meanwhile */
+    const baseBtn = row.querySelector("[data-key-base]");
+    if (baseBtn) {
+      const l = p ? listingOf(p.seller) : null;
+      if (l) {
+        baseBtn.disabled = false;
+        baseBtn.dataset.copy = l.endpoint; /* property assignment — no HTML parsing */
+        baseBtn.title = `${l.endpoint} — click to copy (resolved from the on-chain seller)`;
+      } else {
+        baseBtn.title = p
+          ? "seller not in the current listings (delisted? RPC hiccup?) — base_url unknown"
+          : "chain read failed — base_url unresolved";
+      }
+    }
+    if (withUsage) fetchUsage(pid, p ? String(p.seller) : "", row.querySelector(`[data-key-usage="${pid}"]`), p);
+  }
+
+  /* 1s countdown ticker — crossing zero flips ACTIVE → EXPIRED via a
+     re-render (the rebuilt row shows a static expired stamp instead) */
+  setInterval(() => {
+    const spans = apiKeysList.querySelectorAll("[data-key-cd]");
+    if (!spans.length) return;
+    const nowSec = Math.floor(Date.now() / 1000);
+    let flip = false;
+    spans.forEach((el) => {
+      const left = Number(el.dataset.keyCd) - nowSec;
+      if (left <= 0) { flip = true; return; }
+      el.textContent = fmtKeyLeft(left);
+    });
+    if (flip) renderApiKeys();
+  }, 1000);
+
+  /* REVOKE confirm — existing dangerConfirm chrome */
+  const confirmRevoke = (pid, e) => dangerConfirm({
+    ariaLabel: "confirm revoke api key",
+    title: `confirm — revoke api key · payment #${pid}`,
+    copy:
+      "Revoking kills this key immediately and cannot be undone — it stays dead until the payment TTL ends. " +
+      "Amounts already captured on-chain are unaffected; the unused balance refunds as usual after the TTL.",
+    det: `POST {relay}/payment/${pid}/revoke · EIP-191 sign "TokenShare API key revoke|paymentId=${pid}|expiry=${e}" · ` +
+      `200 {"revoked":true} (repeat revoke idempotent) · bearer calls with this key → 401 revoked`,
+    goLabel: "[ SIGN + REVOKE ]",
+  });
+
+  async function revokeKeyFlow(pid, btn) {
+    if (!/^\d+$/.test(String(pid))) return;
+    const note = apiKeysList.querySelector(`[data-key-note="${pid}"]`);
+    const say = (html, bad = true) => {
+      if (!note || !note.isConnected) return;
+      note.hidden = false;
+      note.classList.toggle("bad", bad);
+      note.innerHTML = html;
+    };
+    if (needWallet() || needConfig()) return;
+    const rec = T.apikeys.all().find((r) => r && String(r.p) === String(pid));
+    if (!rec) return; /* row came from the registry — record must exist */
+    if (!(await confirmRevoke(pid, String(rec.e)))) return;
+    try {
+      await guard(btn, async () => {
+        say(`<span class="dim">sign the revoke message in your wallet …</span>`, false);
+        const msg = T.buildRevokeMessage(rec.p, rec.e); /* throws on tampered e */
+        let sig;
+        try { sig = await state.signer.signMessage(msg); }
+        catch (e) {
+          say(`signing ${(e && e.code === "ACTION_REJECTED") ? "rejected in wallet" : "failed"} — ${T.esc((e && (e.shortMessage || e.message)) || "")}`);
+          return;
+        }
+        /* endpoint off the ON-CHAIN seller (C2) — the registry record
+           carries no seller, and localStorage is untrusted anyway */
+        let endpoint = null;
+        try {
+          const p = await T.escrow(T.readProvider()).getPayment(pid);
+          const l = listingOf(p.seller);
+          if (l) endpoint = l.endpoint;
+        } catch { /* fall through */ }
+        if (!endpoint) { say(`relay endpoint unresolved (chain read failed or seller delisted) — refresh and retry; the key is still live`); return; }
+        say(`<span class="dim">POST /payment/${T.esc(pid)}/revoke …</span>`, false);
+        const r = await T.fetchJson(T.joinUrl(endpoint, `/payment/${pid}/revoke`), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: msg, signature: sig }),
+        }, 15000);
+        if (r.corsOrNetwork) { say(`relay unreachable (${r.error === "timeout" ? "timeout after 15s" : "network/CORS"}) — the key is NOT revoked; retry`); return; }
+        if (r.ok && r.body && r.body.revoked === true) {
+          T.apikeys.markRevoked(pid);
+          renderApiKeys();
+          return;
+        }
+        const detail = r.body && r.body.detail ? String(r.body.detail) : "";
+        if (r.status === 401) { say(`relay 401 — ${T.esc(detail || "the connected wallet is not the payment buyer")} — key NOT revoked`); return; }
+        say(`HTTP ${r.status}${detail ? ` — ${T.esc(detail)}` : ""} — revoke failed; the key is still live`);
+      });
+    } catch (e) { say(`revoke failed — ${T.esc((e && (e.shortMessage || e.message)) || String(e))}`); }
+  }
+
+  /* api-key row actions (delegated — rows re-render with renderApiKeys);
+     data-copy buttons are handled by the global copy handler */
+  apiKeysList.addEventListener("click", (e) => {
+    const rvBtn = e.target.closest("[data-key-revoke]");
+    if (rvBtn) { revokeKeyFlow(rvBtn.dataset.keyRevoke, rvBtn); return; }
+    const refBtn = e.target.closest("[data-usage-refresh]");
+    if (refBtn) fetchUsage(refBtn.dataset.usageRefresh, refBtn.dataset.seller, refBtn.closest("[data-key-usage]"));
+  });
 
   /* lock-row actions (delegated — rows re-render with renderSessionLocks) */
   $("locks-list").addEventListener("click", (e) => {
@@ -1746,6 +1948,7 @@
   T.installCopyHandlers();
   renderModelZone();
   renderSessionLocks();
+  renderApiKeys();
   renderDisputes();
   updatePreview();
   loadListingsIntoSelects();

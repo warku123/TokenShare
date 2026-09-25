@@ -981,6 +981,20 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
 .usage-warn { font-size: 10.5px; line-height: 1.5; }
 .wsel.mint .preview { max-height: 150px; overflow: auto; }
 
+/* ═══ M13 补件: api keys panel (status badges + meta/note lines) ═══ */
+.kstat {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em;
+  padding: 3px 8px; border: 1px solid var(--line);
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.kstat-active { color: var(--green); border-color: rgba(61,220,151,0.4); background: rgba(61,220,151,0.06); }
+.kstat-expired { color: var(--faint); background: transparent; }
+.kstat-revoked { color: var(--red); border-color: rgba(224,108,96,0.4); background: rgba(224,108,96,0.06); }
+.kstat .rdot { width: 6px; height: 6px; border-radius: 50%; background: var(--red); box-shadow: 0 0 8px rgba(224,108,96,0.55); }
+.key-meta { font-size: 10.5px; }
+.key-note { font-size: 11px; line-height: 1.6; }
+.key-row .lock-usage { margin-top: 2px; }
+
 /* ═══ CONSOLE RESPONSIVE ═══ */
 @media (max-width: 1020px) {
   .grid-3 { grid-template-columns: 1fr 1fr; }
