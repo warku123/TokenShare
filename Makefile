@@ -49,4 +49,8 @@ test-contracts:
 
 test: test-relay test-cli test-e2e test-contracts
 
-check: test
+
+check-config-parity:
+	@python3 scripts/check-config-parity.py
+
+check: check-config-parity test

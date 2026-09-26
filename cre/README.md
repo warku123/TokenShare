@@ -51,8 +51,8 @@ and makes the answer permanent and on-chain.
 
 **Network facts (verified 2026-09-23):** Monad testnet chain id `10143`,
 RPC `https://testnet-rpc.monad.xyz`; Escrow
-`0x654c83F23669908C867f02EF3E20B2126c4753De`; Registry
-`0x27c7128F7290653f104E3080cf17576706F6b77A` (Registry v2).
+`0x157C551D145d3c4bBF8f3554c43Fb3C931D71aD5`; Registry
+`0xeD347cDc1761750E20C024459b38dedFb1462254` (Registry v2).
 
 > **Registry address — authoritative source:** always take the Registry (and
 > Escrow) address from `contracts/deployed.monad.json` at the repo root; this
