@@ -22,6 +22,7 @@ import pytest
 from eth_account._utils.legacy_transactions import Transaction
 from fastapi.testclient import TestClient
 from rlp import decode as rlp_decode
+from web3.exceptions import ContractLogicError
 
 from relay.app.chain import (
     ChainClient,
@@ -233,13 +234,40 @@ def test_settle_estimate_probe_has_no_gas_field(
 def test_settle_gas_estimate_failure_falls_back_to_300k(
     settle_rpc: SettleStubServer,
 ) -> None:
-    """Estimate failure (RPC hiccup / revert-at-estimate) → WARNING fallback
-    cap 300k — still ≥ the v3-measured 132,608, never the old flat 120k."""
-    settle_rpc.estimate_error = "execution reverted"
+    """rev-6 L1 network-class estimate failure (generic RPC error — NOT a
+    contract revert) → WARNING fallback cap 300k — still ≥ the v3-measured
+    132,608, never the old flat 120k."""
+    settle_rpc.estimate_error = "connection refused"
     receipt = _client(settle_rpc).settle(42, 315)
     assert int(receipt["status"]) == 1
     assert _sent_gas(settle_rpc) == _SETTLE_GAS_FALLBACK
     assert _sent_gas(settle_rpc) > REAL_SETTLE_GAS
+
+
+def test_settle_estimate_revert_raises_and_sends_no_tx(
+    settle_rpc: SettleStubServer,
+) -> None:
+    """rev-6 L1: a REAL contract revert at estimate time (web3 surfaces it
+    as ContractLogicError — OverMax/NotLocked/... class) propagates instead
+    of falling back to 300k: the tx is doomed, so NOTHING is sent and the
+    seller's gas is never burned on a guaranteed-failing tx."""
+    settle_rpc.estimate_error = "execution reverted"
+    with pytest.raises(ContractLogicError):
+        _client(settle_rpc).settle(42, 315)
+    assert settle_rpc.send_count == 0
+    assert settle_rpc.sent_raw == []
+
+
+def test_settle_partial_estimate_revert_raises_and_sends_no_tx(
+    settle_rpc: SettleStubServer,
+) -> None:
+    """rev-6 L1 for the settlePartial pre-encoded-calldata path: same
+    except-chain split — a revert at estimate time sends nothing."""
+    settle_rpc.estimate_error = "execution reverted"
+    with pytest.raises(ContractLogicError):
+        _client(settle_rpc).settle_partial(42, 315)
+    assert settle_rpc.send_count == 0
+    assert settle_rpc.sent_raw == []
 
 
 def test_settle_partial_gas_estimate_scaled_and_sent(

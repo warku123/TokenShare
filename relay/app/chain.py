@@ -159,16 +159,18 @@ def _encode_captured_of_calldata(payment_id: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Settle gas policy (fix-34): estimate-first, never a flat guess.
+# Settle gas policy (fix-34 → rev-6 L1): estimate-first, never a flat guess.
 #
 # Escrow v3 settle WITH the protocol fee measured 132,608 gas on-chain — the
 # old flat 120_000 out-of-gas-reverted the tx; settlePartial (104,042) was
 # borderline. Same philosophy as the e2e runner's gas_for: probe
 # eth_estimateGas, then ×1.3 + 20k headroom. The flat fallback below is used
-# ONLY when the estimate itself fails (RPC hiccup) — a genuine contract
-# revert at estimate time is indistinguishable from an RPC hiccup there, so
-# the fallback keeps ONE honest on-chain verdict via the receipt status check
-# in _sign_send_wait.
+# ONLY for network/timeout/RPC-hiccup class estimate failures. A genuine
+# contract revert at estimate time (web3 raises ContractLogicError — with
+# ContractCustomError/ContractPanicError as its subclasses) is NOT a hiccup:
+# the tx is guaranteed to fail on-chain, so it propagates and callers see
+# settle-failed WITHOUT a tx — rev-6 L1 (a 300k fallback used to send the
+# doomed tx anyway and burned the seller's gas per request).
 # ---------------------------------------------------------------------------
 _SETTLE_GAS_HEADROOM = 1.3
 _SETTLE_GAS_BUFFER = 20_000
@@ -322,15 +324,26 @@ class ChainClient:
 
     def _estimate_settle_gas(self, tx: dict[str, Any]) -> int:
         """Estimate-first gas (gas_for philosophy): probe the tx without its
-        'gas' field via eth_estimateGas, then ×1.3 + 20k headroom. On ANY
-        estimate failure fall back to _SETTLE_GAS_FALLBACK with a WARNING —
-        never a silent flat guess below the real cost (Escrow v3 settle with
-        the protocol fee needs 132,608 gas; the old flat 120_000
-        out-of-gas-reverted on-chain)."""
+        'gas' field via eth_estimateGas, then ×1.3 + 20k headroom.
+
+        rev-6 L1 except-chain split:
+          - ContractLogicError (incl. ContractCustomError/ContractPanicError
+            subclasses) → a REAL contract revert at estimate time
+            (OverMax/NotLocked/...): the tx can never succeed — propagate;
+            callers report settle-failed with NO tx sent (never burn the
+            seller's gas on a doomed tx).
+          - any other failure (network drop / timeout / generic RPC error)
+            → conservative _SETTLE_GAS_FALLBACK with a WARNING — never a
+            silent flat guess below the real cost (Escrow v3 settle with the
+            protocol fee needs 132,608 gas; the old flat 120_000
+            out-of-gas-reverted on-chain)."""
         probe = {key: value for key, value in tx.items() if key != "gas"}
         try:
             raw = int(self._w3.eth.estimate_gas(probe))
-        except Exception as exc:  # noqa: BLE001 — any RPC/estimate failure
+        except ContractLogicError:
+            # Not an RPC hiccup — the contract itself will revert this tx.
+            raise
+        except Exception as exc:  # noqa: BLE001 — network/timeout/RPC class
             _LOG.warning(
                 "settle gas estimate failed (%s); falling back to %s gas",
                 exc,

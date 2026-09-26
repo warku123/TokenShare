@@ -473,7 +473,11 @@ def test_restart_seeds_captured_from_chain(client: Any, fake_chain: Any) -> None
 
 def test_usage_endpoint_seeds_chain_captured(client: Any, fake_chain: Any) -> None:
     """Usage view of a payment this process never served: captured comes from
-    the chain (capturedOf), maxAmount falls back to getPayment."""
+    the chain (capturedOf), maxAmount falls back to getPayment. rev-6 L4:
+    the view is a pure READ — exactly ONE capturedOf call and NO ledger
+    entry created (unauthenticated GETs cannot mint durable state)."""
+    import relay.app.main as m
+
     fake_chain.chain_captured = 500
     v = client.get("/payment/42/usage")
     assert v.status_code == 200
@@ -484,19 +488,55 @@ def test_usage_endpoint_seeds_chain_captured(client: Any, fake_chain: Any) -> No
         "remaining": 999_500,
         "revoked": False,
     }
+    assert fake_chain.captured_of_reads == 1  # single read, no amplification
+    assert not m.state.ledger.has_entry(42)  # nothing written
 
 
-def test_captured_of_failure_falls_back_to_zero(
+def test_seed_failure_no_entry_then_retry(
+    client: Any, fake_chain: Any, mock_openai: Any
+) -> None:
+    """rev-6 L2: a FAILED capturedOf seed must NOT fabricate a 0 entry — a 0
+    seed under-counts captured forever, the budget gate over-admits and the
+    flush then reverts OverMax until TTL. Instead: bearer call → 503 BEFORE
+    forwarding, zero ledger state; the next request retries the seeding and
+    proceeds against the REAL chain total."""
+    import relay.app.main as m
+
+    fake_chain.chain_captured = 500
+    fake_chain.captured_of_fails = True
+    r = _post_bearer(client, chat_body(), mint_api_key())
+    assert r.status_code == 503
+    assert mock_openai.received == []  # short-circuited, never forwarded
+    assert fake_chain.settle_partial_calls == []  # no doomed flush either
+    assert not m.state.ledger.has_entry(42)  # no fabricated entry
+
+    # RPC recovers → the very next request re-seeds from the chain (500),
+    # not from a stale 0 entry.
+    fake_chain.captured_of_fails = False
+    r2 = _post_bearer(client, chat_body(), mint_api_key())
+    assert r2.status_code == 200
+    assert wait_until(lambda: fake_chain.settle_partial_calls == [(42, ACTUAL)])
+    view = client.get("/payment/42/usage").json()
+    assert view["captured"] == 500 + ACTUAL  # chain-seeded total, not 0
+    assert view["remaining"] == fake_chain.max_amount - (500 + ACTUAL)
+
+
+def test_legacy_settle_seed_failure_no_entry_proceeds(
     client: Any, fake_chain: Any
 ) -> None:
-    """Getter revert / RPC failure → conservative 0 seed (logged), service
-    unimpaired — seeding is hardening, never a hard dependency."""
+    """rev-6 L2 (legacy fold in _try_settle): the response is already served,
+    so no short-circuit is possible — a failed seed proceeds WITHOUT the fold
+    (no 0-entry fabricated) and the settle still goes out. If the chain had
+    captured > 0, that settle would revert BelowCaptured — which since
+    rev-6 L1 dies at estimate time, gas-free."""
+    import relay.app.main as m
+
     fake_chain.captured_of_fails = True
-    v = client.get("/payment/42/usage")
-    assert v.json()["captured"] == 0
-    r = _post_bearer(client, chat_body(), mint_api_key())
+    r = post_chat(client, chat_body())
     assert r.status_code == 200
-    assert wait_until(lambda: fake_chain.settle_partial_calls == [(42, ACTUAL)])
+    assert r.headers["X-Settle-Status"] == "settled"  # FakeChain accepts clamp
+    assert fake_chain.settle_calls == [(42, ACTUAL)]  # plain clamp, no fold
+    assert not m.state.ledger.has_entry(42)  # next request re-seeds
 
 
 def test_captured_of_calldata_shape() -> None:
@@ -512,8 +552,11 @@ def test_captured_of_calldata_shape() -> None:
 
 
 def test_usage_endpoint_views(client_small_caps: Any, fake_chain: Any) -> None:
-    """Fresh payment: chain fallback for maxAmount, captured from capturedOf
-    seed. After calls: ledger values with remaining floored at 0."""
+    """Fresh payment: chain fallback for maxAmount, captured read from
+    capturedOf (no entry). After calls: ledger values with remaining floored
+    at 0 — and NO additional chain read once the entry exists."""
+    import relay.app.main as m
+
     fresh = client_small_caps.get("/payment/42/usage")
     assert fresh.status_code == 200
     assert fresh.json() == {
@@ -526,9 +569,11 @@ def test_usage_endpoint_views(client_small_caps: Any, fake_chain: Any) -> None:
     unknown = client_small_caps.get("/payment/7/usage")  # never served
     assert unknown.status_code == 200
     assert unknown.json()["paymentId"] == 7
+    assert not m.state.ledger.has_entry(42) and not m.state.ledger.has_entry(7)
 
     fake_chain.max_amount = 350
     _post_bearer(client_small_caps, chat_body(), mint_api_key(max_amount=350))
+    reads_after_serve = fake_chain.captured_of_reads  # the bearer seed read
     after = client_small_caps.get("/payment/42/usage")
     assert after.json() == {
         "paymentId": 42,
@@ -537,6 +582,57 @@ def test_usage_endpoint_views(client_small_caps: Any, fake_chain: Any) -> None:
         "remaining": 35,
         "revoked": False,
     }
+    # rev-6 L4: with an entry present the view reports the LEDGER value and
+    # performs no further chain reads (read/write separation).
+    assert fake_chain.captured_of_reads == reads_after_serve
+
+
+# --------------------------------------------- rev-6 L4 usage read-only (7)
+
+
+def test_usage_never_creates_entries_or_amplifies_reads(
+    client: Any, fake_chain: Any
+) -> None:
+    """rev-6 L4: repeated unauthenticated GETs against an arbitrary
+    paymentId must never mint ledger entries and cost exactly ONE
+    capturedOf read per request (the old seed_and_get created a durable
+    entry + RPC read per fresh id — unbounded attacker-controlled state)."""
+    import relay.app.main as m
+
+    for pid in (7, 999, 12345):
+        for _ in range(3):
+            v = client.get(f"/payment/{pid}/usage")
+            assert v.status_code == 200
+            assert v.json()["captured"] == fake_chain.chain_captured
+    assert fake_chain.captured_of_reads == 9  # one read per GET, no more
+    assert not any(
+        m.state.ledger.has_entry(pid) for pid in (7, 999, 12345)
+    )
+
+
+def test_usage_read_failure_degrades_unavailable(
+    client: Any, fake_chain: Any
+) -> None:
+    """rev-6 L4: a failed capturedOf read on the usage path degrades
+    captured/remaining to null + capturedUnavailable (a fake 0 would
+    under-report spend); maxAmount still falls back to getPayment and
+    revoked still reports the in-memory set. Still no entry, and the next
+    request re-seeds normally."""
+    import relay.app.main as m
+
+    fake_chain.captured_of_fails = True
+    m.state.revoked_api_keys.add(42)  # in-memory face must survive degradation
+    v = client.get("/payment/42/usage")
+    assert v.status_code == 200
+    assert v.json() == {
+        "paymentId": 42,
+        "captured": None,
+        "maxAmount": fake_chain.max_amount,
+        "remaining": None,
+        "capturedUnavailable": True,
+        "revoked": True,
+    }
+    assert not m.state.ledger.has_entry(42)
 
 
 # ------------------------------------------------------- stream partial (5)

@@ -606,10 +606,14 @@ class PartialSettleLedger:
     """In-memory capture ledger {paymentId: entry} for the bearer partial
     path (M13-B/D, SEC1 revisions).
 
-    RESTART SEMANTICS (SEC1-3): the ledger is memory-only, but the first
-    request that touches a paymentId after a restart seeds `captured` from
-    the chain via Escrow v2 capturedOf (seed_and_get; conservative 0 when the
-    read fails — logged). Gates and the usage view therefore work against the
+    RESTART SEMANTICS (SEC1-3, rev-6 L2): the ledger is memory-only, and the
+    first request that touches a paymentId after a restart seeds `captured`
+    from the chain via Escrow v2 capturedOf (seed_and_get). A FAILED chain
+    read creates NO entry and returns None — fabricating a 0 entry would
+    under-count captured forever, over-admit through the budget gate and
+    send doomed flush txs (OverMax reverts) until TTL; instead the request
+    takes the no-accumulator / short-circuit path and the NEXT request
+    retries the seeding. Gates and the usage view therefore work against the
     REAL accrued total, and a legacy fold-settle can never under-shoot the
     on-chain captured floor.
 
@@ -621,16 +625,33 @@ class PartialSettleLedger:
         self._lock = threading.Lock()
         self._entries: dict[int, _LedgerEntry] = {}
 
-    def seed_and_get(self, payment_id: int, read_captured: Any) -> int:
+    def seed_and_get(self, payment_id: int, read_captured: Any) -> int | None:
         """Return the current captured total, creating the entry seeded from
         the chain (read_captured() → Escrow v2 capturedOf) on first sight.
         The chain read happens OUTSIDE the lock; a concurrent creator wins
-        and its seeding is kept. Sync — run via asyncio.to_thread."""
+        and its seeding is kept.
+
+        rev-6 L2: a FAILED read_captured() returns None and leaves NO entry
+        (the caller either short-circuits or takes the no-accumulator path);
+        the next request retries the seeding. Sync — run via
+        asyncio.to_thread."""
         with self._lock:
             entry = self._entries.get(payment_id)
             if entry is not None:
                 return entry.captured
-        seeded = int(read_captured())
+        try:
+            seeded = int(read_captured())
+        except Exception as exc:
+            # rev-6 L2: never fabricate a 0 entry — it would permanently
+            # under-count captured (budget gate over-admits, flushes revert
+            # OverMax until TTL). No entry; next request re-seeds.
+            logger.warning(
+                "capturedOf seed failed paymentId=%s — no ledger entry "
+                "created (%s); next request retries the seeding",
+                payment_id,
+                exc,
+            )
+            return None
         with self._lock:
             entry = self._entries.get(payment_id)
             if entry is None:
@@ -638,6 +659,13 @@ class PartialSettleLedger:
                 entry.captured = seeded
                 self._entries[payment_id] = entry
             return entry.captured
+
+    def has_entry(self, payment_id: int) -> bool:
+        """True when a ledger entry exists for the paymentId (observability /
+        tests: rev-6 L2/L4 pin that failed seeds and usage reads never
+        create one)."""
+        with self._lock:
+            return payment_id in self._entries
 
     def plan_capture(self, payment_id: int, actual: int, max_amount: int) -> int:
         """PIN clamp: capture = min(actual, maxAmount - captured); below 1
@@ -805,19 +833,9 @@ def _verify_bearer_grant(grant: BearerGrant, payment: dict[str, Any]) -> None:
         raise HTTPException(status_code=401, detail="api key buyer does not match payment buyer")
 
 
-def _read_chain_captured(st: RelayState, payment_id: int) -> int:
-    """Escrow v2 capturedOf(paymentId) with a conservative 0 fallback (SEC1-3):
-    a getter revert (legacy v1 escrow / unknown payment) or a transient RPC
-    failure degrades to the original restart posture (seed 0) instead of
-    failing requests — seeding is hardening, never a hard dependency."""
-    try:
-        return int(st.chain.captured_of(payment_id))
-    except Exception:
-        logger.warning(
-            "capturedOf read failed paymentId=%s — seeding ledger captured with 0",
-            payment_id,
-        )
-        return 0
+# rev-6 L2: the former _read_chain_captured (capturedOf with a conservative
+# 0 fallback) is GONE — callers now pass `st.chain.captured_of` straight into
+# seed_and_get, which leaves no entry on failure (see PartialSettleLedger).
 
 
 async def _flush_pending_sync(st: RelayState, payment_id: int) -> bool:
@@ -903,26 +921,50 @@ async def payment_usage(payment_id: int) -> dict[str, Any]:
     """Accrued-usage view (M13): {paymentId, captured, maxAmount, remaining,
     revoked}.
 
-    `captured` is chain-SEEDED via capturedOf when this process has no entry
-    (SEC1-3) — a restarted relay reports the real accrued total instead of
-    resetting to 0; it may still lead the on-chain counter while a background
-    flush is in flight. `maxAmount` comes from the ledger's effective budget
-    when present, otherwise from Escrow.getPayment. `revoked` (M13-R) reports
-    whether this process has the payment's bearer key in its in-memory
-    revocation set (false after a restart even for a revoked key — see
-    RelayState). Unauthenticated by design (same posture as GET
-    /receipt/{id})."""
+    rev-6 L4 — READ/WRITE SEPARATION: this endpoint NEVER creates a ledger
+    entry (the previous seed_and_get let an unauthenticated GET mint durable
+    entries, one RPC read each, for arbitrary paymentIds). Instead:
+      - entry exists (this process served the payment): report the ledger's
+        captured with NO chain read (it may lead the on-chain counter while
+        a background flush is in flight);
+      - no entry: ONE capturedOf read, nothing written;
+      - that read fails: `captured`/`remaining` degrade to null plus
+        `capturedUnavailable: true` (a fake 0 would under-report spend);
+        `maxAmount` still falls back to Escrow.getPayment, `revoked` still
+        reports the in-memory revocation set (false after a restart even
+        for a revoked key — see RelayState).
+    Unauthenticated by design (same posture as GET /receipt/{id})."""
     st = _get_state()
-    captured = await asyncio.to_thread(
-        st.ledger.seed_and_get,
-        payment_id,
-        lambda: _read_chain_captured(st, payment_id),
-    )
-    _, entry_max = st.ledger.snapshot(payment_id)
+    captured: int | None
+    entry_max: int | None
+    if st.ledger.has_entry(payment_id):
+        captured = st.ledger.captured(payment_id)
+        _, entry_max = st.ledger.snapshot(payment_id)
+    else:
+        entry_max = None
+        try:
+            captured = await asyncio.to_thread(st.chain.captured_of, payment_id)
+        except Exception as exc:
+            logger.warning(
+                "capturedOf read failed paymentId=%s — usage view degrades "
+                "captured to unavailable (%s)",
+                payment_id,
+                exc,
+            )
+            captured = None
     max_amount = entry_max
     if max_amount is None:
         payment = await asyncio.to_thread(st.chain.get_payment, payment_id)
         max_amount = int(payment["maxAmount"])
+    if captured is None:
+        return {
+            "paymentId": payment_id,
+            "captured": None,
+            "maxAmount": max_amount,
+            "remaining": None,
+            "capturedUnavailable": True,
+            "revoked": payment_id in st.revoked_api_keys,
+        }
     return {
         "paymentId": payment_id,
         "captured": captured,
@@ -1212,11 +1254,23 @@ async def _try_settle(
     settle_amount = clamp_settle_amount(actual, max_amount)
     # Seed captured from the chain when this process has no entry (SEC1-3:
     # e.g. restart after bearer captures) — no-op once the entry exists.
-    await asyncio.to_thread(
+    # rev-6 L2: on a FAILED seed there is NO entry and the fold proceeds
+    # without it (response already served — short-circuiting here would
+    # swallow the LLM response, which PIN forbids). With no entry,
+    # ledger.captured() reads 0 → total is the plain clamp; if the chain
+    # really has captured > 0 the settle reverts BelowCaptured, which since
+    # rev-6 L1 dies at estimate time (ContractLogicError) — gas-free.
+    seeded = await asyncio.to_thread(
         st.ledger.seed_and_get,
         payment_id,
-        lambda: _read_chain_captured(st, payment_id),
+        lambda: st.chain.captured_of(payment_id),
     )
+    if seeded is None:
+        logger.info(
+            "paymentId=%s settling without the ledger fold (capturedOf seed "
+            "failed; no entry created — next request re-seeds)",
+            payment_id,
+        )
     st.ledger.take_pending(payment_id)  # claim un-flushed: bg flush no-ops
     total = min(st.ledger.captured(payment_id) + settle_amount, max_amount)
     try:
@@ -1540,11 +1594,24 @@ async def _chat_completions_bearer(st: RelayState, request: Request, raw_body: b
     # SEC1-3: seed the ledger from the chain's capturedOf (no-op once the
     # entry exists) so the budget gate works against the REAL accrued total
     # after a relay restart, not a reset-to-0 guess.
+    # rev-6 L2 decision — 503 SHORT-CIRCUIT: this path sits BEFORE forwarding
+    # and its only purpose is an accurate `captured` for the admission gates
+    # below; a failed seed would otherwise over-admit (fake 0) into doomed
+    # OverMax flushes. 402 would lie ("payment problem") about what is a
+    # transient relay-side condition — same class as the existing 503
+    # "relay not initialized". No entry; the next request retries seeding.
     captured = await asyncio.to_thread(
         st.ledger.seed_and_get,
         grant.payment_id,
-        lambda: _read_chain_captured(st, grant.payment_id),
+        lambda: st.chain.captured_of(grant.payment_id),
     )
+    if captured is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "capturedOf read failed — ledger not seeded, retry shortly"
+            ),
+        )
 
     # SEC1-1 budget admission gate — BEFORE forwarding. ① The CHAIN budget is
     # authoritative: a self-minted grant.m can never extend it, and once the
