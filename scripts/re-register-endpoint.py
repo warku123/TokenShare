@@ -111,6 +111,7 @@ def main() -> None:
         sys.exit(f"model names contain ':' (breaks the price-spec format): {bad}")
 
     # ---- deactivate (v2 AlreadyRegistered guard) when active ----------------
+    deactivated = False
     if active:
         print("listing ACTIVE — deactivating first (v2 AlreadyRegistered guard)")
         tx = registry.functions.deactivate()
@@ -120,27 +121,66 @@ def main() -> None:
              "gas": gas_for(w3, seller.address, tx),
              "chainId": cfg["chain_id"]}
         ))
+        deactivated = True
         print("deactivated")
     else:
         print("listing inactive — register straight away")
 
     # ---- re-register via the e2e suite (price book + gas_for + verify) ------
-    cmd = [
-        sys.executable, str(REPO / "e2e" / "register_listing.py"),
-        "--network", args.network,
-        "--endpoint", args.endpoint,
-        "--relay", args.relay,
-    ]
-    for model, price in zip(models, prices):
-        cmd.append(f"--model-price={model}:{price['cached']}:{price['input']}:{price['output']}")
-    if args.skip_verify:
-        cmd.append("--skip-verify")
+    def register_cmd(endpoint: str) -> list[str]:
+        cmd = [
+            sys.executable, str(REPO / "e2e" / "register_listing.py"),
+            "--network", args.network,
+            "--endpoint", endpoint,
+            "--relay", args.relay,
+        ]
+        for model, price in zip(models, prices):
+            cmd.append(
+                f"--model-price={model}:{price['cached']}:{price['input']}:{price['output']}"
+            )
+        if args.skip_verify:
+            cmd.append("--skip-verify")
+        return cmd
 
     env = dict(os.environ)
     env["REGISTRY_ADDR"] = registry.address  # authoritative for the child too
-    print("register:", " ".join(cmd[:6]), f"... ({len(models)} --model-price flags)")
-    result = subprocess.run(cmd, cwd=str(REPO), env=env)
-    sys.exit(result.returncode)
+    print("register:", " ".join(register_cmd(args.endpoint)[:6]),
+          f"... ({len(models)} --model-price flags)")
+    result = subprocess.run(register_cmd(args.endpoint), cwd=str(REPO), env=env)
+    if result.returncode == 0:
+        sys.exit(0)
+
+    # rev-7 L4: we deactivated the ONLY listing copy — if the new register
+    # fails, the listing stays INACTIVE forever (buyers resolve no endpoint).
+    # Roll back: re-register the OLD endpoint with the OLD prices.
+    if not deactivated:
+        sys.exit(result.returncode)  # nothing deactivated by us — state unchanged
+
+    print(
+        "\nERROR: re-register FAILED — the listing was deactivated and the new "
+        f"endpoint never landed (child exit {result.returncode}).\n"
+        f"ROLLING BACK to the OLD endpoint {old_endpoint} ..."
+    )
+    rollback = subprocess.run(register_cmd(str(old_endpoint)), cwd=str(REPO), env=env)
+    if rollback.returncode == 0:
+        print(
+            f"ROLLBACK OK: listing restored with the OLD endpoint {old_endpoint} "
+            "(models + prices preserved). The NEW endpoint did NOT take effect — "
+            "fix it and re-run this script."
+        )
+        sys.exit(result.returncode)  # original failure, not the rollback's
+    sys.exit(
+        f"\n!!!! ROLLBACK FAILED — listing for {operator} is INACTIVE on-chain !!!!\n"
+        "Buyers resolve NO endpoint until you re-register manually:\n\n"
+        f"  python3 {REPO}/e2e/register_listing.py --network {args.network} "
+        f"--endpoint {old_endpoint} --relay {args.relay} \\\n"
+        "    " + " \\\n    ".join(
+            f"--model-price={m}:{p['cached']}:{p['input']}:{p['output']}"
+            for m, p in zip(models, prices)
+        ) + "\n\n"
+        f"(original register exit {result.returncode}, rollback exit "
+        f"{rollback.returncode})"
+    )
 
 
 if __name__ == "__main__":

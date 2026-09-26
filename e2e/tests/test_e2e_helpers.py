@@ -423,3 +423,56 @@ def test_unset_env_pin_defers_to_artifact() -> None:
         {"escrow": "0xaaa", "registry": "0xDDD", "usdc": "0xCCC"},
         "monad_testnet",
     )
+
+
+# --------------------- env pins vs fresh deploy (rev-7 C1)
+
+def test_env_pins_refuse_fresh_deploy_on_cross_network_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """rev-7 C1: env pins + contracts/deployed.json for ANOTHER network (the
+    base fork artifact) must fail_all with a clear diagnosis BEFORE any deploy
+    — the old fallback silently deployed fresh on the real chain, superseded
+    the pins, burned gas and printed a fake E2E PASSED."""
+    import run as run_mod
+
+    # anvil index-0 well-known key (public, valueless — see run.py header):
+    # only needs to DERIVE an address, no chain is ever contacted here.
+    monkeypatch.setenv(
+        "SELLER_PRIVATE_KEY",
+        "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+    )
+    monkeypatch.setenv(
+        "BUYER_PRIVATE_KEY",
+        "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+    )
+    monkeypatch.setenv("ESCROW_ADDR", "0x" + "11" * 20)
+    monkeypatch.setenv("REGISTRY_ADDR", "0x" + "22" * 20)
+
+    contracts_dir = tmp_path / "contracts"
+    contracts_dir.mkdir()
+    (contracts_dir / "deployed.json").write_text(json.dumps({
+        "network": "base_sepolia",  # ≠ monad_testnet → the old code redeployed
+        "escrow": "0x" + "aa" * 20,
+        "registry": "0x" + "bb" * 20,
+    }))
+    monkeypatch.setattr(run_mod, "CONTRACTS_DIR", contracts_dir)
+
+    deploy_calls: list[tuple] = []
+
+    def _no_deploy(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        deploy_calls.append(args)
+        raise AssertionError("deploy_contracts must never run with pins set")
+
+    monkeypatch.setattr(run_mod, "deploy_contracts", _no_deploy)
+
+    with pytest.raises(SystemExit) as ei:
+        run_mod.run("monad_testnet")
+    assert ei.value.code == 1  # fail_all: printed + exited BEFORE any deploy
+    assert deploy_calls == []  # zero deployment calls — pins never superseded
+    msg = capsys.readouterr().out
+    assert "E2E FAILED" in msg
+    assert "pins" in msg
+    assert "base_sepolia" in msg  # diagnosis names the artifact's network

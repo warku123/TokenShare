@@ -678,6 +678,53 @@ def test_remove_model_last_model_hint(monkeypatch):
     assert "RemoveLastModel" in out
 
 
+def test_remove_model_revert_selector_hex_hint(monkeypatch):
+    """rev-7 L1: the guard errors are NOT in the CLI ABI, so on a REAL chain
+    web3 surfaces the revert as the raw custom-error selector hex — the CLI
+    must still decode it to the friendly RemoveLastModel hint (and name the
+    matched guard) instead of dying with the hex blob."""
+    from web3 import Web3
+
+    selector = Web3.keccak(text="RemoveLastModel()")[:4].hex()
+    assert len(selector) == 8  # 4-byte selector, no 0x prefix
+    _set_full_env(monkeypatch)
+    FakeChain(
+        monkeypatch,
+        remove_model_error=(
+            "transaction failed: execution reverted: "
+            f"custom error 0x{selector}"
+        ),
+    )
+    result = runner.invoke(app, ["remove-model", "gpt-4o-mini"])
+    assert result.exit_code == 2
+    out = all_output(result)
+    assert "LAST model" in out
+    assert "deactivate()" in out
+    assert "RemoveLastModel" in out  # matched guard named despite hex-only revert
+    assert selector in out  # raw chain text kept for the record
+
+
+def test_remove_model_model_not_found_selector_hex_hint(monkeypatch):
+    """Same selector path for ModelNotFound (web3 has no ABI name to show)."""
+    from web3 import Web3
+
+    selector = Web3.keccak(text="ModelNotFound()")[:4].hex()
+    _set_full_env(monkeypatch)
+    FakeChain(
+        monkeypatch,
+        remove_model_error=(
+            "transaction failed: execution reverted: "
+            f"custom error 0x{selector}"
+        ),
+    )
+    result = runner.invoke(app, ["remove-model", "ghost-model"])
+    assert result.exit_code == 2
+    out = all_output(result)
+    assert "not in your listing" in out
+    assert "ModelNotFound" in out
+    assert "ghost-model" in out
+
+
 def test_remove_model_generic_tx_failure_passes_through(monkeypatch):
     _set_full_env(monkeypatch)
     FakeChain(monkeypatch, remove_model_error="transaction failed: node unreachable")

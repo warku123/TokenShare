@@ -779,21 +779,49 @@ def remove_model_cmd(
     _run(body)
 
 
+# Registry guard errors are deliberately NOT in the CLI ABI fragment, so web3
+# surfaces their reverts as the raw 4-byte custom-error SELECTOR hex (e.g.
+# "custom error 0x2e1a7d4d") instead of a name — the friendly hints must match
+# the selector too (same precedent as the e2e probes in e2e/run.py:928-970).
+# (name, canonical sighash, hint text).
+_EXPLAIN_REMOVE_MODEL_ERRORS: tuple[tuple[str, str, str], ...] = (
+    (
+        "RemoveLastModel",
+        "RemoveLastModel()",
+        "is the LAST model of the listing — removeModel refuses "
+        "to empty it; deactivate() the whole listing instead",
+    ),
+    (
+        "ModelNotFound",
+        "ModelNotFound()",
+        "is not in your listing — nothing to remove",
+    ),
+    (
+        "NotActive",
+        "NotActive()",
+        "cannot be operated on: the Registry reports this "
+        "listing as INACTIVE — register()/reactivate it first",
+    ),
+)
+
+
 def _explain_remove_model_revert(model: str, exc: TokenshareError) -> None:
-    """Translate the two on-chain removeModel guards into actionable hints;
-    any other transaction failure is re-raised for the generic path."""
-    text = str(exc)
-    if "RemoveLastModel" in text:
-        _fail(
-            f"{model!r} is the LAST model of the listing — removeModel refuses "
-            "to empty it; deactivate() the whole listing instead "
-            f"(chain said: {text})"
-        )
-    if "ModelNotFound" in text:
-        _fail(
-            f"model {model!r} is not in your listing — nothing to remove "
-            f"(chain said: {text})"
-        )
+    """Translate the on-chain removeModel guards into actionable hints;
+    any other transaction failure is re-raised for the generic path.
+
+    rev-7 L1: with the guard error absent from the ABI, web3's revert message
+    carries only the selector hex — decode it against the known-error table
+    above and name the matched guard even when the chain sent just the hex."""
+    text = f"{type(exc).__name__} {exc} {getattr(exc, 'data', '')}"
+    bare = text.replace("0x", "")
+    from web3 import Web3
+
+    for name, sighash, hint in _EXPLAIN_REMOVE_MODEL_ERRORS:
+        selector = Web3.keccak(text=sighash)[:4].hex()
+        if name in text or selector in bare:
+            _fail(
+                f"{model!r} {hint} [{name}; chain said: {text}]"
+            )
     raise exc
 
 
