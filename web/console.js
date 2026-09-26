@@ -1538,10 +1538,15 @@
       return;
     }
     /* native 6dp ints; relay accrued total may lead the on-chain counter
-       while a background settlePartial flush is in flight */
-    const cap = BigInt(Math.trunc(Number(r.body.captured)));
-    const max = BigInt(Math.trunc(Number(r.body.maxAmount)));
-    const rem = BigInt(Math.trunc(Number(r.body.remaining)));
+       while a background settlePartial flush is in flight.
+       L2 guard: hostile/malformed relay values (non-numeric, Infinity) must
+       degrade to an unavailable row, never throw and wedge the panel. */
+    const num = (v) => { const n = Number(v); return Number.isFinite(n) ? BigInt(Math.trunc(n)) : null; };
+    const cap = num(r.body.captured), max = num(r.body.maxAmount), rem = num(r.body.remaining);
+    if (cap === null || max === null || rem === null) {
+      panel.innerHTML = warn + `<span class="bad mono">usage data malformed — unavailable</span> ` + refreshBtn;
+      return;
+    }
     const pct = max > 0n ? Number((cap * 10000n) / max) / 100 : 0;
     panel.innerHTML = warn +
       `<div class="usage-line mono">captured <b>$${T.fmtUsdc(cap)}</b> · remaining <b>$${T.fmtUsdc(rem)}</b> · max <b>$${T.fmtUsdc(max)}</b></div>` +
