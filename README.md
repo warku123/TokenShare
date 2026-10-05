@@ -313,7 +313,27 @@ tokenshare/
 └── TokenShare-BUILD_SPEC.md # build spec
 ```
 
+## License & Attribution
+
+This project is open source under the **MIT License** (see [LICENSE](./LICENSE)).
+
+**AI coding tools disclosure** (per hackathon rules §4.1): portions of this codebase were written with the assistance of AI coding tools (OpenCode + LLM agents); all AI-assisted code was reviewed, tested, and is disclosed here as required.
+
+**External libraries & attribution:**
+- [ethers.js v6.13.5](https://github.com/ethers-io/ethers.js) — vendored at `web/vendor/` (MIT), used as-is for browser RPC/signing
+- [Foundry](https://github.com/foundry-rs/foundry) + [forge-std](https://github.com/foundry-rs/forge-std) (MIT/Apache-2.0) — contract development & tests
+- [OpenZeppelin Contracts](https://github.com/OpenZeppelin/openzeppelin-contracts) (MIT) — ERC20 interface imports
+- [web3.py](https://github.com/ethereum/web3.py) + [eth-account](https://github.com/ethereum/eth-account) (MIT) — relay/CLI chain access & signing
+- [FastAPI](https://github.com/fastapi/fastapi) / [uvicorn](https://github.com/encode/uvicorn) (MIT/BSD) — relay server
+- [Typer](https://github.com/fastapi/typer) (MIT) — CLI framework
+- [dstack-sdk](https://github.com/phala-dstack/dstack) (MIT, optional) — Phala TEE attestation integration
+- Chainlink CRE workflow toolchain — `cre/` settlement-audit example (per Chainlink docs)
+
 ## Demo
+
+One-click local demo: `scripts/demo.sh` (starts relay + static web server, prints URLs).
+Public deployment: point Vercel at the `web/` directory — no build step, zero runtime external references (ethers is vendored).
+
 
 - **One-command bring-up (infra lane):** `scripts/demo.sh` — starts the full local stack (fork + deploy + relay + web) end to end. The script is landing shortly (infra lane in progress); until then use the manual quick path below.
 - **Local quick path:** `python3 -m http.server 8080 -d web` → open http://localhost:8080 — the market page reads live Registry listings via `web/config.js`; the console lives at `/console.html`.
