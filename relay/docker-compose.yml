@@ -40,3 +40,42 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # One-shot Registry registrar (M7-B). Runs in the SAME CVM as the relay and
+  # mounts the SAME dstack socket: it derives the SAME TEE seller key the
+  # relay uses and signs Registry.register/deactivate from inside the enclave
+  # (the private key never leaves it). Required because the relay's key can
+  # never be exported, yet the listing operator MUST equal the relay's
+  # signing address or buyer signature checks fail.
+  #
+  # Env: REGISTRAR_* vars (endpoint/models/prices) + RPC_URL/CHAIN_ID/
+  # REGISTRY_ADDR — injected via env_file/.env or `phala deploy -e .env`
+  # (see relay/README-docker.md section "TEE on-chain registration").
+  #
+  # Runs once and exits (idempotent: an already-matching listing exits 0
+  # immediately, so CVM restarts have no side effects). Local single run —
+  # DEBUG ONLY (a laptop has no real dstack socket, the run fails fast):
+  #   docker compose --profile register run --rm registrar
+  # ---------------------------------------------------------------------------
+  registrar:
+    build:
+      # Same image as the relay (repo-root context, relay/Dockerfile —
+      # registrar.py is COPYed in and web3/dstack-sdk already installed).
+      context: ..
+      dockerfile: relay/Dockerfile
+    platform: linux/amd64
+    profiles:
+      - register
+    # One-shot: never auto-restart. On Phala Cloud the container runs once at
+    # CVM boot; the idempotent already-OK fast exit keeps restarts harmless.
+    restart: "no"
+    command: ["python", "registrar.py"]
+    env_file:
+      # Same env source as the relay (extra REGISTRAR_* vars live here too).
+      - path: .env
+        required: false
+    volumes:
+      # Same TEE key source as the relay — derivation path
+      # 'wallet/ethereum/tokenshare' is shared with relay/app/config.py.
+      - /var/run/dstack.sock:/var/run/dstack.sock

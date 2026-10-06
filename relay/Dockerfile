@@ -28,6 +28,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY relay/app/ ./app/
 
+# One-shot Registry registrar (M7-B sidecar — docker-compose service
+# `registrar`): SAME image, different command (python registrar.py). It is
+# the only component that signs Registry/Register txs from INSIDE the CVM
+# (the TEE-derived key never leaves the enclave). Public code, no secrets.
+COPY relay/registrar.py ./registrar.py
+
 # Foundry artifact ABIs: chain.py resolves them at
 #   Path(__file__).resolve().parents[2] / "contracts" / "out" / ...
 # and /app/app/chain.py → parents[2] == "/", so the artifacts belong at
