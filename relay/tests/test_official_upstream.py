@@ -36,12 +36,19 @@ from .conftest import ACTUAL, CHAIN_ID, SELLER, chat_body, post_chat, setup_rela
 
 def test_official_allowlist_shape() -> None:
     assert OFFICIAL_UPSTREAM_HOSTS == frozenset(
-        {"api.openai.com", "api.moonshot.cn", "api.moonshot.ai", "api.kimi.com"}
+        {
+            "api.openai.com",
+            "api.moonshot.cn",
+            "api.moonshot.ai",
+            "api.kimi.com",
+            "opencode.ai",
+        }
     )
     assert OFFICIAL_HOST_PROVIDER["api.openai.com"] == "openai"
     assert OFFICIAL_HOST_PROVIDER["api.moonshot.cn"] == "moonshot"
     assert OFFICIAL_HOST_PROVIDER["api.moonshot.ai"] == "moonshot"
     assert OFFICIAL_HOST_PROVIDER["api.kimi.com"] == "moonshot"
+    assert OFFICIAL_HOST_PROVIDER["opencode.ai"] == "zen"
 
 
 def test_provider_for_model_prefixes() -> None:
@@ -57,6 +64,8 @@ def test_provider_for_model_prefixes() -> None:
         "k3-256k",
     ):
         assert provider_for_model(name) == "moonshot", name
+    for name in ("deepseek-v4.1-flash", "deepseek-chat", "glm-5.3-flash"):
+        assert provider_for_model(name) == "zen", name
     # Unknown / non-official prefixes must NOT be guessed.
     assert provider_for_model("claude-3-sonnet") is None
     assert provider_for_model("my-fake-model") is None
@@ -75,6 +84,11 @@ def test_host_provider_mapping() -> None:
     assert host_provider("https://api.kimi.com") == "moonshot"
     assert host_provider("https://api.kimi.com/coding") == "moonshot"
     assert host_provider("https://api.kimi.com/coding/") == "moonshot"
+    # OpenCode Zen: the /zen path is irrelevant to the host gate;
+    # host_provider parses the NORMALIZED (trailing /v1 stripped) URL.
+    assert host_provider("https://opencode.ai") == "zen"
+    assert host_provider("https://opencode.ai/zen") == "zen"
+    assert host_provider("https://opencode.ai/zen/") == "zen"
     # Scheme-relative case-insensitivity of hosts.
     assert host_provider("https://API.OPENAI.COM") == "openai"
     assert host_provider("http://127.0.0.1:9") is None
@@ -123,6 +137,18 @@ def test_startup_accepts_kimi_coding_plan_base(
     allowlist: normalization strips the trailing /v1 and host_provider must
     resolve the RESULTING URL's host (api.kimi.com) as official."""
     setup_relay_env(monkeypatch, "https://api.kimi.com/coding/v1")
+    monkeypatch.delenv(cfg.ENV_ALLOW_CUSTOM_UPSTREAM, raising=False)
+    with TestClient(m.app) as client:
+        assert client.get("/health").status_code == 200
+
+
+def test_startup_accepts_zen_base(
+    monkeypatch: pytest.MonkeyPatch, fake_chain: Any
+) -> None:
+    """OpenCode Zen base (SDK-style /zen/v1) passes the startup allowlist:
+    normalization strips the trailing /v1 and host_provider must resolve the
+    RESULTING URL's host (opencode.ai) as official."""
+    setup_relay_env(monkeypatch, "https://opencode.ai/zen/v1")
     monkeypatch.delenv(cfg.ENV_ALLOW_CUSTOM_UPSTREAM, raising=False)
     with TestClient(m.app) as client:
         assert client.get("/health").status_code == 200
@@ -215,6 +241,32 @@ def test_kimi_coding_plan_models_pass_gate(monkeypatch: pytest.MonkeyPatch) -> N
     )  # no raise
 
 
+def test_zen_models_pass_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OpenCode Zen model face through the opencode.ai upstream."""
+    _state_with_base_url(monkeypatch, "https://opencode.ai/zen/v1")
+    m._check_model_provider_consistency({"model": "deepseek-v4.1-flash"})  # no raise
+    m._check_model_provider_consistency({"model": "glm-5.3-flash"})  # no raise
+
+
+def test_zen_host_rejects_foreign_provider_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A moonshot model name aimed at opencode.ai → 400 (kimi- prefix does
+    not belong to the zen provider)."""
+    _state_with_base_url(monkeypatch, "https://opencode.ai/zen/v1")
+    with pytest.raises(HTTPException) as exc:
+        m._check_model_provider_consistency({"model": "kimi-for-coding"})
+    assert exc.value.status_code == 400
+    assert "does not match" in exc.value.detail
+
+
+def test_kimi_host_rejects_zen_model_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A zen model name aimed at api.kimi.com → 400 (provider mismatch)."""
+    _state_with_base_url(monkeypatch, "https://api.kimi.com/coding/v1")
+    with pytest.raises(HTTPException) as exc:
+        m._check_model_provider_consistency({"model": "deepseek-v4.1-flash"})
+    assert exc.value.status_code == 400
+    assert "does not match" in exc.value.detail
+
+
 def test_k3_on_openai_host_rejected_400(monkeypatch: pytest.MonkeyPatch) -> None:
     """Provider mismatch still bites: a k3 model aimed at api.openai.com → 400."""
     _state_with_base_url(monkeypatch, "https://api.openai.com")
@@ -231,6 +283,10 @@ def test_gate_on_custom_upstream_enforces_catalog_only(
     applies (a mock has no provider identity to compare against)."""
     _state_with_base_url(monkeypatch, "http://127.0.0.1:9")
     m._check_model_provider_consistency({"model": "kimi-k2.6"})  # no raise
+    # zen prefixes are part of the official catalog now; on a custom upstream
+    # the catalog half alone still applies (escape-hatch behavior unchanged).
+    m._check_model_provider_consistency({"model": "deepseek-v4.1-flash"})  # no raise
+    m._check_model_provider_consistency({"model": "glm-5.3-flash"})  # no raise
     with pytest.raises(HTTPException) as exc:
         m._check_model_provider_consistency({"model": "not-a-real-model"})
     assert exc.value.status_code == 400

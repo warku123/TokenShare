@@ -84,6 +84,30 @@ def test_normalize_variants() -> None:
     assert _normalize_openai_base_url(
         "https://api.kimi.com/coding/v1"
     ) == "https://api.kimi.com/coding"
+    # OpenCode Zen: /zen/v1 -> /zen (host gate then sees opencode.ai).
+    assert _normalize_openai_base_url(
+        "https://opencode.ai/zen/v1"
+    ) == "https://opencode.ai/zen"
+
+
+def test_zen_base_composes_official_forward_url() -> None:
+    """OpenCode Zen (opencode.ai) normalization + composition pin, following
+    the Kimi /coding precedent: the SDK-style base https://opencode.ai/zen/v1
+    strips to https://opencode.ai/zen, and forwarding with the absolute path
+    /v1/chat/completions composes exactly https://opencode.ai/zen/v1/chat/
+    completions (no /zen/v1/v1 doubling)."""
+    from relay.app.main import CHAT_COMPLETIONS_PATH
+
+    normalized = _normalize_openai_base_url("https://opencode.ai/zen/v1")
+    assert normalized == "https://opencode.ai/zen"
+    assert (
+        normalized + CHAT_COMPLETIONS_PATH
+        == "https://opencode.ai/zen/v1/chat/completions"
+    )
+    # Same composition for the models path (startup / verify-upstream probe).
+    assert (
+        normalized + "/v1/models" == "https://opencode.ai/zen/v1/models"
+    )
 
 
 def test_forward_no_double_v1_env_unset(

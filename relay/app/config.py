@@ -66,6 +66,9 @@ OFFICIAL_UPSTREAM_HOSTS: Final[frozenset[str]] = frozenset(
         "api.kimi.com",  # Kimi Coding plan (subscription coding quota; base
         #                   https://api.kimi.com/coding/v1 — SDK-style value,
         #                   the relay strips the trailing /v1 before gating).
+        "opencode.ai",  # OpenCode Zen platform (OpenAI-compatible; base
+        #                 https://opencode.ai/zen/v1 — SDK-style value, the
+        #                 relay strips the trailing /v1 before gating).
     }
 )
 
@@ -93,6 +96,7 @@ OFFICIAL_HOST_PROVIDER: Final[dict[str, str]] = {
     "api.moonshot.cn": "moonshot",
     "api.moonshot.ai": "moonshot",
     "api.kimi.com": "moonshot",
+    "opencode.ai": "zen",  # OpenCode Zen platform
 }
 
 # Official catalog model prefixes per provider. UNKNOWN prefixes => the model
@@ -103,6 +107,8 @@ OFFICIAL_HOST_PROVIDER: Final[dict[str, str]] = {
 MODEL_PROVIDER_PREFIXES: Final[dict[str, tuple[str, ...]]] = {
     "openai": ("gpt-", "o1", "o3", "o4", "chatgpt-"),
     "moonshot": ("kimi-", "moonshot-", "k3"),
+    # OpenCode Zen platform (opencode.ai): minimal official-plan model face.
+    "zen": ("deepseek-", "glm-"),
 }
 
 
