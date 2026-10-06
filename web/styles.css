@@ -1093,3 +1093,37 @@ a.flow-step:hover b { color: var(--green); }
   .wsel, .wsel-overlay { animation: none; }
   .card, .btn, .sm-node, .edge, .wsel-item, .wsel-cancel { transition: none; }
 }
+
+/* ═══ POLICY PAGE (policy.html) + quiet nav-policy link ═══ */
+/* ⚠ POLICY nav link — deliberately quiet: faint, a notch smaller, amber on hover */
+.topnav a.nav-policy { color: var(--faint); font-size: 10px; }
+.topnav a.nav-policy:hover { color: var(--amber); border-bottom-color: var(--amber); }
+
+.policy-page main { padding-bottom: 72px; }
+.pol-list { display: flex; flex-direction: column; gap: 18px; }
+.pol { padding: 24px; display: flex; gap: 20px; align-items: flex-start; }
+.pol-num {
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; color: var(--green);
+  border: 1px solid var(--green-dim); width: 30px; height: 30px; flex: none;
+  display: inline-flex; align-items: center; justify-content: center; margin-top: 1px;
+}
+.pol-body { min-width: 0; }
+.pol h2 {
+  font-family: var(--mono); font-size: 13.5px; font-weight: 700; letter-spacing: 0.18em;
+  color: var(--text); display: flex; align-items: baseline; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap; margin-bottom: 10px;
+}
+.pol p { font-size: 14px; color: var(--dim); line-height: 1.7; max-width: 80ch; }
+.pol p b { color: var(--text); font-weight: 700; }
+.pol-chip { flex: none; }
+
+/* risk-bearing sections (02 testnet / 03 upstream ToS / 06 no warranty) — amber accent */
+.pol-risk .pol-num { color: var(--amber); border-color: rgba(232,180,74,0.4); }
+.pol-risk h2 { color: var(--amber); }
+.pol-risk:hover { box-shadow: 0 0 24px rgba(232,180,74,0.06); }
+.pol-risk:hover::before, .pol-risk:hover::after { border-color: var(--amber); }
+
+.pol-back { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 30px; }
+@media (max-width: 700px) {
+  .pol-back .btn { width: 100%; text-align: center; }
+}

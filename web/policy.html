@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="TokenShare platform policy and risk notice — Monad testnet only, no real funds, upstream ToS risk for sellers, no key custody, EIP-712 receipts, no warranty.">
+<title>TokenShare — Platform Policy &amp; Risk Notice</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body class="policy-page">
+
+<header class="topbar">
+  <div class="wrap topbar-in">
+    <a class="brand" href="index.html">TOKENSHARE<span class="brand-dim"> / policy</span></a>
+    <button class="nav-toggle" aria-expanded="false" aria-controls="topnav" aria-label="Toggle navigation">[ MENU ]</button>
+    <nav class="topnav" id="topnav" aria-label="Sections">
+      <a href="index.html">OVERVIEW</a>
+      <a href="market.html">MARKET</a>
+      <a href="console.html">CONSOLE</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <!-- ══ PAGE HEAD ══ -->
+  <section class="con-head mkt-head">
+    <div>
+      <h1 class="con-title">POLICY<span class="cursor" aria-hidden="true"></span></h1>
+      <p class="con-sub">Platform Policy &amp; Risk Notice. Six short sections — what this is,
+        what can go wrong, and exactly where the responsibility sits. Read it before you sell or buy.</p>
+    </div>
+    <span class="chip chip-monad pol-chip">MONAD TESTNET · 10143</span>
+  </section>
+
+  <!-- ══ SECTIONS ══ -->
+  <div class="pol-list">
+
+    <article class="card pol">
+      <span class="pol-num">01</span>
+      <div class="pol-body">
+        <h2>WHAT THIS IS<span class="card-tag">the prototype, in one paragraph</span></h2>
+        <p>TokenShare is a decentralized marketplace prototype that lets sellers rent out unused
+          LLM API quota per request. Buyers lock USDC in an on-chain escrow contract (Monad testnet);
+          sellers are paid by cryptographically verified usage; unused funds are refundable on-chain
+          after the lock TTL.</p>
+      </div>
+    </article>
+
+    <article class="card pol pol-risk">
+      <span class="pol-num">02</span>
+      <div class="pol-body">
+        <h2>TESTNET ONLY — NO REAL FUNDS<span class="card-tag">chain ID 10143</span></h2>
+        <p>This deployment runs entirely on Monad testnet (chain ID 10143) with test USDC.
+          Tokens here have no real-world value. <b>Never send mainnet funds to any contract or
+          address shown in this app.</b></p>
+      </div>
+    </article>
+
+    <article class="card pol pol-risk">
+      <span class="pol-num">03</span>
+      <div class="pol-body">
+        <h2>UPSTREAM PROVIDER TERMS — SELLER RISK<span class="card-tag">sellers: read twice</span></h2>
+        <p>Sellers share access to their own LLM provider subscriptions (e.g. Kimi, OpenCode Zen).
+          Many providers' Terms of Service prohibit reselling, sharing, or redistributing account
+          access. Selling quota through TokenShare may result in suspension or termination of the
+          seller's upstream account. <b>Sellers act at their own risk.</b> TokenShare does not
+          mediate, endorse, or take responsibility for any upstream ToS violation.</p>
+      </div>
+    </article>
+
+    <article class="card pol">
+      <span class="pol-num">04</span>
+      <div class="pol-body">
+        <h2>NO CUSTODY OF KEYS<span class="card-tag">keys never leave the seller's relay</span></h2>
+        <p>TokenShare never holds, stores, or transmits seller API keys. Keys live only inside the
+          seller's own relay — optionally inside a Trusted Execution Environment (TEE), where they
+          are hardware-sealed.</p>
+      </div>
+    </article>
+
+    <article class="card pol">
+      <span class="pol-num">05</span>
+      <div class="pol-body">
+        <h2>TRUST MODEL<span class="card-tag">verify, don't trust</span></h2>
+        <p>Usage is reported by the seller's relay and billed per token. Every charge is backed by an
+          EIP-712 signed receipt verifiable by anyone. Buyer funds are protected by the escrow
+          contract: disputed or undelivered usage stays locked and becomes refundable after expiry.</p>
+      </div>
+    </article>
+
+    <article class="card pol pol-risk">
+      <span class="pol-num">06</span>
+      <div class="pol-body">
+        <h2>NO WARRANTY<span class="card-tag">as-is, hackathon build</span></h2>
+        <p>This is a hackathon prototype provided strictly as-is, with no warranty of any kind.
+          No SLA, no uptime guarantee, no liability for loss of funds, accounts, or data.
+          <b>Use at your own risk.</b></p>
+      </div>
+    </article>
+
+  </div>
+
+  <!-- ══ BACK NAV ══ -->
+  <nav class="pol-back" aria-label="Back">
+    <a class="btn btn-ghost" href="index.html">[ &larr; MARKET ]</a>
+    <a class="btn" href="console.html">[ CONSOLE ]</a>
+  </nav>
+
+</main>
+
+<footer class="footer">
+  <div class="wrap">
+    <p class="foot-fine">Prototype on testnet; handles no real funds. · No custody. No upgrade keys. No trusted third party.</p>
+  </div>
+</footer>
+
+<script>
+/* nav toggle only — no wallet, no chain reads on this page */
+(() => {
+  const t = document.querySelector(".nav-toggle");
+  const n = document.getElementById("topnav");
+  if (!t || !n) return;
+  const set = (open) => {
+    n.classList.toggle("open", open);
+    t.setAttribute("aria-expanded", String(open));
+  };
+  t.addEventListener("click", () => set(!n.classList.contains("open")));
+  n.addEventListener("click", (e) => { if (e.target.closest("a")) set(false); });
+})();
+</script>
+</body>
+</html>
