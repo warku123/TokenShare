@@ -5,7 +5,28 @@
 !relay/app/
 !relay/requirements.txt
 !relay/Dockerfile
+!relay/registrar.py
 !contracts/out/Escrow.sol/Escrow.json
 !contracts/out/Registry.sol/Registry.json
 # re-excluded after the directory re-include (order matters in dockerignore)
 relay/app/**/__pycache__/
+
+# --- Defense in depth (the `*` whitelist above already excludes everything
+# else; these explicit re-exclusions are belt-and-braces so a later accidental
+# `!` re-include can never leak runtime/secret material, including nested
+# copies of app-data dirs) ---
+# env files at ANY depth (`.env.example` is not in the allowlist either).
+.env
+.env.*
+**/.env
+**/.env.*
+# keystore material and its atomic-write temp copies (app/keystore.py writes
+# .keystore-*.tmp next to the target before os.replace) — even inside the
+# allowed app/ tree.
+**/keystore.json
+**/keystore.json.*
+**/.keystore-*
+**/appdata/
+**/tmp/
+**/secrets/
+relay/data/

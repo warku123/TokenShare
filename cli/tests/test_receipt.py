@@ -21,6 +21,7 @@ from tests.conftest import (
     BUYER_KEY,
     OTHER_KEY,
     SELLER_KEY,
+    TEE_KEY,
     CHAIN_ID,
     addr_of,
     make_receipt,
@@ -29,6 +30,7 @@ from tests.conftest import (
 
 SELLER = addr_of(SELLER_KEY)
 OTHER = addr_of(OTHER_KEY)
+TEE = addr_of(TEE_KEY)
 
 
 def test_verify_ok_returns_recovered_seller():
@@ -237,3 +239,97 @@ def test_decode_errors():
     bad_json = receipt_header({"domain": {}, "message": {}})  # missing signature
     with pytest.raises(ReceiptDecodeError):
         decode_receipt(bad_json)
+
+
+# ---------------------------------------------------------------------------
+# M15 shared mode: independent TEE signer pin (expected_signer)
+# ---------------------------------------------------------------------------
+
+
+def test_expected_signer_tee_signs_with_real_seller_ok():
+    """Shared mode: the receipt is signed by the pinned independent TEE
+    address while message.seller stays the real on-chain listing operator."""
+    payload = make_receipt(TEE_KEY, 42, seller_addr=SELLER)
+    receipt = decode_receipt(receipt_header(payload))
+    check = verify_receipt(
+        receipt,
+        expected_seller=SELLER,
+        expected_payment_id=42,
+        expected_chain_id=CHAIN_ID,
+        expected_signer=TEE,
+    )
+    assert check.ok is True
+    assert check.reason is None
+    assert check.recovered == TEE
+
+
+def test_expected_signer_wrong_signer_fails():
+    """Receipt signed by neither the pinned TEE address nor the seller."""
+    payload = make_receipt(OTHER_KEY, 42, seller_addr=SELLER)
+    receipt = decode_receipt(receipt_header(payload))
+    check = verify_receipt(
+        receipt, expected_seller=SELLER, expected_payment_id=42, expected_signer=TEE
+    )
+    assert check.ok is False
+    assert check.reason == "recover-mismatch"
+    assert check.recovered == OTHER
+
+
+def test_expected_signer_economic_seller_mismatch_fails():
+    """TEE signature matches the pin, but message.seller is NOT the on-chain
+    listing operator -> seller-mismatch (the two checks are independent)."""
+    payload = make_receipt(TEE_KEY, 42, seller_addr=OTHER)
+    receipt = decode_receipt(receipt_header(payload))
+    check = verify_receipt(
+        receipt, expected_seller=SELLER, expected_payment_id=42, expected_signer=TEE
+    )
+    assert check.ok is False
+    assert check.reason == "seller-mismatch"
+    assert check.recovered == TEE  # signer pin passed; economic seller failed
+
+
+def test_without_pin_tee_signed_receipt_rejected():
+    """No pin -> old single-tenant behavior: recover must equal the seller
+    operator; a TEE-signed receipt is never auto-accepted (no TOFU)."""
+    payload = make_receipt(TEE_KEY, 42, seller_addr=SELLER)
+    receipt = decode_receipt(receipt_header(payload))
+    check = verify_receipt(receipt, expected_seller=SELLER, expected_payment_id=42)
+    assert check.ok is False
+    assert check.reason == "recover-mismatch"
+    assert check.recovered == TEE
+
+
+def test_expected_signer_domain_still_checked():
+    """Pinning a signer does NOT relax the domain assertion (m1)."""
+    payload = make_receipt(TEE_KEY, 42, seller_addr=SELLER, chain_id=999)
+    receipt = decode_receipt(receipt_header(payload))
+    check = verify_receipt(
+        receipt,
+        expected_seller=SELLER,
+        expected_payment_id=42,
+        expected_chain_id=CHAIN_ID,
+        expected_signer=TEE,
+    )
+    assert check.ok is False
+    assert check.reason == "domain-mismatch"
+    assert check.recovered is None
+
+
+def test_expected_signer_paymentid_still_checked():
+    payload = make_receipt(TEE_KEY, 42, seller_addr=SELLER)
+    receipt = decode_receipt(receipt_header(payload))
+    check = verify_receipt(
+        receipt, expected_seller=SELLER, expected_payment_id=43, expected_signer=TEE
+    )
+    assert check.ok is False
+    assert check.reason == "paymentid-mismatch"
+
+
+def test_expected_signer_flag_like_positional_call_compat():
+    """Old 4-positional-arg calls stay fully compatible (signer pin is the
+    5th, optional)."""
+    payload = make_receipt(SELLER_KEY, 42, seller_addr=SELLER)
+    receipt = decode_receipt(receipt_header(payload))
+    check = verify_receipt(receipt, SELLER, 42, CHAIN_ID)
+    assert check.ok is True
+    assert check.recovered == SELLER

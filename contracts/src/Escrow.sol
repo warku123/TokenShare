@@ -54,9 +54,27 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  * hardcoded anywhere in this file. The same bytecode is deployed unchanged on
  * Base Sepolia and Monad testnet.
  *
+ * SETTLE DELEGATION (M15): a seller may approve ONE settle delegate via
+ *   `approveSettleDelegate`. The delegate inherits the seller's FULL
+ *   settlement authority — it can call `settle`/`settlePartial` on ANY payment
+ *   designated to that seller (including locks created BEFORE the grant) and
+ *   can consume the payment's `maxAmount` WITHOUT any proof of service, even
+ *   after the TTL elapsed, as long as the payment is still `Locked`. Delegation
+ *   is execution-time state: a grant covers all in-flight locks of the seller;
+ *   a revoke (approve the zero address) or a replacement (approve someone
+ *   else) blocks the previous delegate immediately on ALL Locked payments —
+ *   no per-payment snapshot. The delegate credits are ALWAYS the seller's
+ *   (fees deducted as usual); the delegate can never redirect or withdraw
+ *   seller funds. TRUST BOUNDARY: the buyer's maximum exposure is the
+ *   payment's `maxAmount`; `refund` after TTL protects only the UNCONSUMED
+ *   remainder (`maxAmount - captured`). Seller-side mitigations (TEE attestation
+ *   on the relay, prompt revocation, careful delegate choice) reduce risk but
+ *   are NOT cryptographic proof of service usage.
+ *
  * NON-UPGRADEABLE: plain constructor deployment, no proxy. Every mutating
  * function is permissionless except `settle`/`settlePartial` (restricted to
- * the seller designated at lock time) and the two fee-config setters
+ * the seller designated at lock time, or the settle delegate the seller
+ * currently approved via `settleDelegateOf`) and the two fee-config setters
  * (`setFee`/`setFeeRecipient`, restricted to `owner`).
  */
 contract Escrow is ReentrancyGuard {
@@ -145,6 +163,17 @@ contract Escrow is ReentrancyGuard {
 
     /// @notice Counter for paymentId generation; starts at 1 so that id 0 stays invalid.
     uint256 private _nextPaymentId = 1;
+
+    /// @notice seller => currently approved settle delegate (M15). The zero
+    ///         address means "no delegate": `msg.sender` can never be zero, so
+    ///         a zero entry can never accidentally authorize anyone. Read at
+    ///         EXECUTION TIME by `settle`/`settlePartial` — a grant applies to
+    ///         ALL of the seller's `Locked` payments (including pre-grant
+    ///         locks); a revoke/replacement blocks the old delegate instantly
+    ///         on every in-flight payment. No per-payment lock snapshot.
+    ///         Self-managed by each seller (`approveSettleDelegate`): no admin
+    ///         path, no caps, no timelock, no new payment layout.
+    mapping(address => address) public settleDelegateOf;
 
     /*//////////////////////////////////////////////////////////////////////////
                                      ERRORS
@@ -249,6 +278,13 @@ contract Escrow is ReentrancyGuard {
     /// @notice A user withdrew USDC out of the escrow.
     event Withdrawn(address indexed account, uint256 amount);
 
+    /// @notice A seller set its settle delegate (M15). Emitted on EVERY
+    ///         `approveSettleDelegate` call, including a revoke (delegate ==
+    ///         zero address) and a replacement. The approved delegate inherits
+    ///         the seller's FULL settlement authority on all of the seller's
+    ///         `Locked` payments from that point on (execution-time semantics).
+    event SettleDelegateApproved(address indexed seller, address indexed delegate);
+
     /*//////////////////////////////////////////////////////////////////////////
                                    MODIFIERS
     //////////////////////////////////////////////////////////////////////////*/
@@ -323,6 +359,40 @@ contract Escrow is ReentrancyGuard {
     }
 
     /*//////////////////////////////////////////////////////////////////////////
+                              SETTLE DELEGATION (M15)
+    //////////////////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice Seller sets (or replaces, or revokes) its settle delegate. The
+     *         delegate inherits the seller's FULL settlement authority: it may
+     *         call `settle`/`settlePartial` on ANY payment designated to
+     *         `msg.sender`, INCLUDING payments locked BEFORE this grant, and
+     *         it can consume each payment's `maxAmount` WITHOUT any proof of
+     *         service — even after the payment's TTL elapsed, while the
+     *         payment is still `Locked`.
+     * @dev Permissionless and self-managed: ONLY `msg.sender`'s own mapping
+     *      slot is written — there is no admin path, no cap and no timelock.
+     *      `delegate == address(0)` REVOKES the current delegate (zero is
+     *      never an operative authority because `msg.sender` can never be
+     *      zero). Passing a different address REPLACES the previous delegate,
+     *      which loses its authority immediately. The event is emitted on
+     *      every call, grant and revoke alike. Execution-time semantics: the
+     *      mapping is read fresh by every settle/settlePartial — no per-lock
+     *      snapshot. Delegated credits ALWAYS land on the seller's balance
+     *      (minus the usual fee); the delegate can neither redirect nor
+     *      withdraw seller funds. TRUST WARNING: the buyer's maximum exposure
+     *      is `maxAmount` per payment and `refund` only protects unconsumed
+     *      amounts; TEE attestation and prompt revocation are operational
+     *      mitigations, NOT cryptographic proof of service usage.
+     * @param delegate Address allowed to settle on `msg.sender`'s behalf, or
+     *                 the zero address to revoke.
+     */
+    function approveSettleDelegate(address delegate) external {
+        settleDelegateOf[msg.sender] = delegate;
+        emit SettleDelegateApproved(msg.sender, delegate);
+    }
+
+    /*//////////////////////////////////////////////////////////////////////////
                               STATE-MACHINE ACTIONS
     //////////////////////////////////////////////////////////////////////////*/
 
@@ -380,8 +450,13 @@ contract Escrow is ReentrancyGuard {
     }
 
     /**
-     * @notice Settle a locked payment. Only the seller designated at lock time
-     *         may call. `actual` is the CUMULATIVE total owed to the seller for
+     * @notice Settle a locked payment. The seller designated at lock time may
+     *         call, and so may the settle delegate the seller currently
+     *         approved via `settleDelegateOf` (M15) — the delegate inherits
+     *         this function's FULL authority, including settling the payment's
+     *         `maxAmount` without proof of service even after `expiresAt`
+     *         while the payment is `Locked`. `actual` is the CUMULATIVE total
+     *         owed to the seller for
      *         this payment: any amount already paid via `settlePartial` counts
      *         toward it, so only the un-advanced remainder (`actual - captured`)
      *         is credited here, and the buyer receives `maxAmount - actual`.
@@ -410,7 +485,7 @@ contract Escrow is ReentrancyGuard {
         onlyLocked(paymentId)
     {
         Payment storage payment = _payments[paymentId];
-        if (msg.sender != payment.seller) revert NotSeller(msg.sender, payment.seller);
+        if (!_maySettle(msg.sender, payment.seller)) revert NotSeller(msg.sender, payment.seller);
         if (actual > payment.maxAmount) revert ExceedsMaxAmount(actual, payment.maxAmount);
         if (actual < payment.captured) revert BelowCaptured(paymentId, actual, payment.captured);
 
@@ -441,8 +516,11 @@ contract Escrow is ReentrancyGuard {
 
     /**
      * @notice Capture part of a locked payment (Escrow v2 per-key metering).
-     *         Only the seller designated at lock time may call. `amount` is
-     *         credited to the seller's withdrawable balance immediately and
+     *         The seller designated at lock time may call, and so may the
+     *         settle delegate the seller currently approved via
+     *         `settleDelegateOf` (M15) with identical authority; as with
+     *         `settle`, credits ALWAYS land on the seller's balance. `amount`
+     *         is credited to the seller's withdrawable balance immediately and
      *         accumulated in `captured`; the payment STAYS `Locked` so further
      *         captures — as well as the one-shot `settle` and the `refund` —
      *         remain available.
@@ -468,7 +546,7 @@ contract Escrow is ReentrancyGuard {
         onlyLocked(paymentId)
     {
         Payment storage payment = _payments[paymentId];
-        if (msg.sender != payment.seller) revert NotSeller(msg.sender, payment.seller);
+        if (!_maySettle(msg.sender, payment.seller)) revert NotSeller(msg.sender, payment.seller);
         _requireNonZero(amount);
         if (payment.captured + amount > payment.maxAmount) {
             revert ExceedsMaxAmount(payment.captured + amount, payment.maxAmount);
@@ -586,6 +664,17 @@ contract Escrow is ReentrancyGuard {
     /*//////////////////////////////////////////////////////////////////////////
                                    INTERNAL
     //////////////////////////////////////////////////////////////////////////*/
+
+    /// @dev Settlement authority check (M15): `caller` may settle on a payment
+    ///      designated to `seller` iff it IS the seller, or it is the delegate
+    ///      the seller CURRENTLY approved in `settleDelegateOf`. Read at
+    ///      execution time: a grant covers ALL of the seller's `Locked`
+    ///      payments (including pre-grant locks); a revoke (zero) or a
+    ///      replacement blocks the previous delegate instantly on every
+    ///      in-flight payment. No per-payment lock snapshot is kept.
+    function _maySettle(address caller, address seller) internal view returns (bool) {
+        return caller == seller || caller == settleDelegateOf[seller];
+    }
 
     function _requireNonZero(uint256 amount) private pure {
         if (amount == 0) revert ZeroAmount();

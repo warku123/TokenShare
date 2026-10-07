@@ -40,6 +40,11 @@ chainId -> read getListing(derived address):
   * inactive (or never registered)              -> register directly
 Finally echo the terminal getListing.
 
+MODE GUARD: this script is SINGLE-MODE ONLY. When RELAY_MODE=shared (M15
+R1 shared custody) it fails fast BEFORE any key derivation, network access
+or registration — the shared signer is not a seller EOA and must never be
+registered (see guard_refuse_shared + tests/test_registrar_shared_guard.py).
+
 All amounts are integers end to end — USDC native units, no floats.
 """
 
@@ -49,6 +54,37 @@ import os
 import sys
 
 # ---------------------------------------------------------------------------
+# Mode guard (M15 R1): the registrar is SINGLE-MODE ONLY.
+# ---------------------------------------------------------------------------
+
+
+def guard_refuse_shared() -> None:
+    """Fail-fast when RELAY_MODE=shared — BEFORE any key derivation, network
+    access or registration. In shared custody (M15 R1) the Registry listing
+    operator is each seller's OWN external EOA: the seller registers its
+    listing and signs Escrow approveSettleDelegate itself via explicit
+    web-frontend transactions. The TEE-derived shared signer is NOT a seller
+    EOA and must never be registered as an operator — running this registrar
+    in a shared CVM would register the shared signer's address and break
+    buyer verification. The check reads ONLY the mode env var (no socket, no
+    RPC, no key material) and the error carries no secrets."""
+    mode = (
+        os.environ.get(ENV_RELAY_MODE, "") or MODE_SINGLE
+    ).strip().lower() or MODE_SINGLE
+    if mode == MODE_SHARED:
+        raise RegistrarError(
+            "RELAY_MODE=shared: this registrar is single-mode ONLY and must "
+            "NOT run in a shared-custody deployment. In shared mode the "
+            "listing operator is each seller's own external EOA — the seller "
+            "registers its listing and calls Escrow approveSettleDelegate "
+            "itself via explicit web-frontend transactions; the TEE-derived "
+            "shared signer is not a seller EOA and must never be registered. "
+            "Refusing before any key derivation, network access or "
+            "registration (no degraded mode)."
+        )
+
+
+# ---------------------------------------------------------------------------
 # Config (env-driven, fail-fast)
 # ---------------------------------------------------------------------------
 
@@ -56,6 +92,13 @@ import sys
 # SAME seller key the relay serves with, otherwise the registered operator
 # differs from the relay's signing address and buyer signature checks break.
 TEE_KEY_PATH = "wallet/ethereum/tokenshare"
+
+# RELAY_MODE value that marks the M15 R1 shared-custody deployment (same
+# parsing semantics as relay/app/config.py: strip + lowercase). The registrar
+# is SINGLE-MODE ONLY (see guard_refuse_shared below).
+MODE_SINGLE = "single"
+MODE_SHARED = "shared"
+ENV_RELAY_MODE = "RELAY_MODE"
 
 DEFAULT_DSTACK_SOCKET = "/var/run/dstack.sock"
 
@@ -364,6 +407,10 @@ def listing_matches(listing: tuple, endpoint: str, models: list[str], prices: li
 
 
 def main() -> int:
+    # Fail-fast BEFORE anything else (config parsing, key derivation, RPC):
+    # the registrar must never run in a shared-custody CVM (M15 R1 guard).
+    guard_refuse_shared()
+
     cfg = load_env()
 
     key = derive_seller_key(cfg["socket_path"])  # never printed below

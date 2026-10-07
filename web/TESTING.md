@@ -1,6 +1,7 @@
 # TokenShare Web — 完整功能测试清单
 
-Monad testnet (chainId 10143) · Escrow/Registry/USDC 已部署（见 `web/config.js`)。
+Monad testnet (chainId 10143) · Escrow/Registry/USDC 已部署（见 `web/config.js`）。
+> **2026-10-07：Escrow v3.2 重部署**（`0xe4D5Eb0dBDB6DB8063C07ECF7EDFcCdDB9Ad514c`），`config.js` 的 `escrowAddr` 已同步刷新。此后若再重部署：**先改 `config.js` 再跑本清单**；本地 demo relay 进程（PID 44254/8787）地址为启动时注入，未按 `make stop && make demo` 重启前仍指向旧 v3.1。
 纯静态页：本地 `python3 -m http.server 8080 -d web` → http://localhost:8080（控制台 `/console.html`）。若 8080 被占换任意空闲端口。
 
 ## 前置条件
@@ -65,6 +66,8 @@ Monad testnet (chainId 10143) · Escrow/Registry/USDC 已部署（见 `web/confi
 
 ## Seller tab
 
+> **M15 共享 relay 托管模式**：`web/config.js` 现默认携带 **ACTIVE** `m15` 块（2026-10-08 激活，六项身份 pin 全值，B9 检查守护）→ SELLER 页顶部出现 KEY CUSTODY 卡并接管表单（详见下节「M15 共享托管」）；移除该块即回退单卖方经典表单（手填 RELAY ENDPOINT + `[ ↺ LOAD FROM RELAY ]`）。
+
 - [ ] 连接卖家钱包 → MY LISTING 显示链上 listing（未登记→空态引导）；PRICES /1M 按模型分组逐行（model + cached/in/out）；已登记且 relay 在线时追加 TEE/UPSTREAM 两行
 - [ ] MODELS 硬化：无自由文本输入；`[ LOAD FROM RELAY ]` 预检 `verify-upstream` → `accessible_models` 渲染为可勾选 chips（默认全选，已有 listing 时预勾 listed∩accessible）；只能勾选 relay 实测模型
   - 设计决定（Gate J M1，用户已认可）：模型探测用 `GET /verify-upstream`（key 留在 relay、不过浏览器）而非 `POST /preview-models`（key 浏览器输入流）。核心约束「模型仅从 relay 实测面勾选」两种流都满足；现流更安全。`/preview-models` 保留为独立端点（PIN 已达标），生产可另作无 relay 配置场景的消费面。
@@ -118,6 +121,35 @@ Monad testnet (chainId 10143) · Escrow/Registry/USDC 已部署（见 `web/confi
   - 402 → 提示「maxAmount 低于卖家 minAmount 估计，调高金额」;401/409/400/502 各有对应文案；relay 不可达→CORS 提示
 - [ ] REFUND：输入 paymentId（datalist 含本会话锁单）→ 先 getPayment 显示 state/max/expires，非 Locked 拒绝；Locked 且过期→refund tx→余额刷新
 - [ ] DISPUTES：列表显示 paymentId/原因/时间；连接钱包后按当前地址过滤；`[ CLEAR ]` 清空
+
+## M15 共享托管（shared relay custody · 仅当 config.js 含完整 m15 块）
+
+> 协议冻结 v1-e1。托管面只在 `m15` 块**完整且合规**时出现；缺字段/畸形 → 红字 fail-closed（VERIFY 禁用），经典表单照旧。身份 pin 一律来自 config（部署记录+运营者离线验证），**绝不**用 relay 自报的 /info 反向 pin（no TOFU）。
+
+- [ ] **共享表单变换**：m15 生效后 RELAY ENDPOINT 输入框消失（托管卡顶部显固定 RELAY ORIGIN，不可手改）；REGISTER 卡 MODELS 区不再显示 `[ ↺ LOAD FROM RELAY ]`；唯一输入 = UPSTREAM BASE URL + UPSTREAM API KEY（password 遮罩）
+- [ ] **VERIFY 全流**：连接钱包即自动跑 live pin 检查（/info + /attestation ↔ config：origin / signer / upload key sha256 / appId / derivedAddress / reportData=signer‖zeros‖keccak(pub) 六项全绿行）；点 `[ VERIFY + SEAL KEY ]` → nonce（签发值逐项对照 config，篡改拒签）→ 浏览器内封套（ECDH P-256→HKDF-SHA256→AES-256-GCM）→ 钱包签 EIP-191 custody 消息 → POST /sellers/keys → catalog 渲染为 chips
+- [ ] **DEPLOYMENT MISMATCH**：任一 pin 不符 → 红字硬失败 + 托管禁用（VERIFY/PUBLISH 全锁）；quote 仅自报——卡内明示运营者验证器/日期/digest + 「本页只复查 live binding，不重跑 DCAP」的诚实信任边界
+- [ ] **catalog 语义**：servable=false 模型灰显虚线不可勾（title 带 relay 原因）；零可服务模型 → PUBLISH 禁用；编辑 URL 或 key → catalog 转 stale + PUBLISH 锁，须重新 VERIFY；VERIFY 成功后 key 输入框被程序化清空（不触发 stale；手动重输才 stale）；钱包切账户 → 全部托管态重置
+- [ ] **PUBLISH**：register endpoint 自动 = pinned relay origin（预览框可见，绝不是 upstream URL）；AlreadyRegistered → 沿用 deactivate→register 两步显式流，无隐藏交易
+- [ ] **AUTHORIZE（独立按钮）**：`[ AUTHORIZE DELEGATE ]` → 确认弹窗含完整风险文案（delegate 可对**任意** Locked payment 按全额 maxAmount settle、无需服务证明、含旧锁/过期锁；买家仅可退未消费部分；delegate 不能提现/转走余额）→ 一笔 `approveSettleDelegate(pinnedSigner)` 链上交易；DELEGATE 行显示链上真值（settleDelegateOf）；已授权给**非** pin 地址 → 红字警告 + 可 REVOKE
+- [ ] **REVOKE**：`[ REVOKE DELEGATE ]`（approve 零地址，独立显式交易）与 `[ REVOKE STORED KEY ]`（DELETE /sellers/keys，新 nonce + action=revoke 签名，无链上交易）分离；吊销 key 后 listing 仍在链上但 PUBLISH 锁回 VERIFY
+- [ ] **resume（C1 修复后语义）**：刷新/重连后 relay /status 有 key → catalog 可复用，但仅当**本连接 session 完全未被触碰**（无 anchor、URL/key 无编辑——gen 仍等于 `sessionStartGen` 基线、本 session 无失败 VERIFY）且 pins 当场重验过，且 /status 应答落在发起时的 generation+钱包上（gen 单调递增 ⇒ 旧账户/同地址断开重连的晚到应答**绝不**复活旧 catalog/pins/anchor）；资格判定 = `T.custody.canResumeCatalog` 谓词（M 段正/负矩阵驱动）——任何 URL/key 编辑或失败 VERIFY 立即使复用失效，status 只是展示面，不是身份权威
+- [ ] **买家侧**：listing endpoint 严格匹配 pinned relay origin（https·根路径·无 userinfo/query/fragment·有效端口一致）时，receipt 验签对象换成 pinned relay signer（message.seller 仍须=链上 listing operator）；其它 seller 一律沿用单卖方旧规则；不匹配即不施加共享 pin
+- [ ] **跨语言测试边界**：`scripts/check-custody-web.mjs`（node，零新依赖：vendor ethers + Node WebCrypto）覆盖 URL 归一化/m15 校验/冻结格式字节级断言/封套 roundtrip+篡改/pin 矩阵/nonce 矩阵/单+共享 receipt/delegate calldata/表单门控谓词/catalog 恢复资格谓词（M 段：首次连接/刷新/重连正向 + 编辑/VERIFY 失败/pins/在途竞态/旧账户晚返回/同地址断开重连晚返回负向 + console.js 静态接线证据）/custody 请求头纪律；**浏览器内不重验 DCAP quote**；Python relay ↔ 本页的字节级跨语言向量由 relay lane 的 `relay/tests/vectors/custody_vector.json` 持有 —— 本套件 L 段在该文件存在时**只读**复现它（AAD 逐字节、canonical body 对独立构造的字面量、本地自算 sha256、消息结构逐字节、固定 eph/iv 重加密 ct 逐字节、接收方解密回环）。**绝不**从 fixture 消息里抽取 body_sha256 回喂作输入（无循环自证）；fixture 未提供的字段（raw_body/body_sha256 真实哈希、synthetic EOA 签名/signer —— 待 relay fix46）报 **[PEND]** 并单列，计入摘要但**不计 PASS**，文件缺席则整段跳过不失败（自包含性保持）
+
+## Policy 阅读同意门禁（POLICY_VERSION 2026-10-08）
+
+> 存储绑定：`web/common.js` `T.policyConsent` —— sessionStorage 键 `tokenshare.policyConsent.v1`，值 `{"version":"2026-10-08","wallet":"0x…","ts":…}`；`isValid(version, wallet)` 双条件校验。consent 本身**不需要任何钱包签名**，纯 UX 门禁。console 顶部 consent 条 = 单一事实面（`#policy-consent` + `#policy-agree`）。
+
+- [ ] **条存在**：console 页顶部有一条「I have read and agree to the Platform Policy & Risk Notice」（链接 policy.html 新窗口；policy 页首 chip + 页脚均标注版本 2026-10-08）
+- [ ] **未勾选全禁**：`s-submit` / `s-verify-btn` / `sc-authorize` / `b-dep-btn` / `b-lock-btn` / `c-send` 均 disabled 且 hover title 说明；SESSION LOCKS 行内 `[ MINT API KEY ]` 同样禁用；未连接钱包时 checkbox 本身禁用
+- [ ] **勾选生效**：连接钱包后勾选 → 上述按钮全部启用；DevTools → sessionStorage 可见 `tokenshare.policyConsent.v1 = {"version":"2026-10-08","wallet":…,"ts":…}`
+- [ ] **handler guard（双层阻断第二层）**：DevTools 手动移除按钮 disabled 后点击付费动作 → 抛 `PolicyConsentRequired`（console 见 POLICY_CONSENT_REQUIRED），**无任何 tx / 签名弹窗**，consent 条闪烁定位
+- [ ] **切账户/断开失效**：勾选后 DISCONNECT（或钱包内切账户）→ 记录删除、checkbox 复位禁用、按钮回到禁用（重连后需重勾）；刷新页面 sessionStorage 存活 → 同钱包静默恢复勾选态
+- [ ] **匿名只读放行**：不连接钱包浏览 index / market / console 全部可见可用（市场卡、卖方表单预览、只读探测按钮），无 consent 拦截
+- [ ] **退出路径放行**：未勾选时 refund / withdraw / deactivate / removeModel（行级 `[ REMOVE ]`）/ 买家 key `[ REVOKE ]` / 卖家 `[ REVOKE DELEGATE ]` / `[ REVOKE STORED KEY ]` / DISCONNECT / SWITCH ACCOUNT 照常可点（这些按钮从不进 POLICY_GATED_BTNS）
+- [ ] **custody 流零破坏**：VERIFY / keys POST / pin 检查逻辑未改动（`scripts/check-custody-web.mjs` 全绿），gate 只加在 `s-verify-btn` / `sc-authorize` 动作入口
+- [ ] **静态接线**：`node scripts/smoke-web.mjs` 的 `consent *` 8 项全 PASS（bar id、POLICY_VERSION 与 policy.html 一致、guardPaid 六按钮、退出路径仍为普通 guard）
 
 ## 网络/断线走查
 

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="TokenShare platform policy and risk notice — Monad testnet only, no real funds, upstream ToS risk for sellers, no key custody, EIP-712 receipts, no warranty.">
+<meta name="description" content="TokenShare platform policy and risk notice — Monad testnet only, no real funds, upstream ToS risk for sellers, dual-mode key custody disclosed honestly (shared TEE mode live, attestation limits stated), EIP-712 receipts and their limits, no warranty.">
 <title>TokenShare — Platform Policy &amp; Risk Notice</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="styles.css">
@@ -28,10 +28,11 @@
   <section class="con-head mkt-head">
     <div>
       <h1 class="con-title">POLICY<span class="cursor" aria-hidden="true"></span></h1>
-      <p class="con-sub">Platform Policy &amp; Risk Notice. Six short sections — what this is,
+      <p class="con-sub">Platform Policy &amp; Risk Notice. Seven short sections — what this is,
         what can go wrong, and exactly where the responsibility sits. Read it before you sell or buy.</p>
     </div>
     <span class="chip chip-monad pol-chip">MONAD TESTNET · 10143</span>
+    <span class="chip pol-chip" title="consent on the console is bound to this policy version">POLICY VERSION · 2026-10-08</span>
   </section>
 
   <!-- ══ SECTIONS ══ -->
@@ -43,18 +44,22 @@
         <h2>WHAT THIS IS<span class="card-tag">the prototype, in one paragraph</span></h2>
         <p>TokenShare is a decentralized marketplace prototype that lets sellers rent out unused
           LLM API quota per request. Buyers lock USDC in an on-chain escrow contract (Monad testnet);
-          sellers are paid by cryptographically verified usage; unused funds are refundable on-chain
-          after the lock TTL.</p>
+          sellers are paid per relay-reported usage, backed by EIP-712 signed receipts; the
+          un-captured remainder is refundable on-chain under the escrow rules. Shared
+          mode is live on the platform TEE relay (single-relay mode remains available
+          for self-hosted sellers); section 04 states exactly who holds keys in each.</p>
       </div>
     </article>
 
     <article class="card pol pol-risk">
       <span class="pol-num">02</span>
       <div class="pol-body">
-        <h2>TESTNET ONLY — NO REAL FUNDS<span class="card-tag">chain ID 10143</span></h2>
-        <p>This deployment runs entirely on Monad testnet (chain ID 10143) with test USDC.
-          Tokens here have no real-world value. <b>Never send mainnet funds to any contract or
-          address shown in this app.</b></p>
+        <h2>TESTNET TOKENS ≠ FREE SERVICE<span class="card-tag">chain ID 10143 · real costs still exist</span></h2>
+        <p>This deployment runs entirely on Monad testnet (chain ID 10143) with test USDC and test
+          MON. These tokens have no real-world value. <b>Never send mainnet funds to any contract or
+          address shown in this app.</b> Test tokens do not make the underlying service free: upstream
+          LLM providers and cloud infrastructure bill real money for real usage. A seller's upstream
+          subscription, quota, and cloud spend are genuine costs with genuine consequences.</p>
       </div>
     </article>
 
@@ -62,41 +67,92 @@
       <span class="pol-num">03</span>
       <div class="pol-body">
         <h2>UPSTREAM PROVIDER TERMS — SELLER RISK<span class="card-tag">sellers: read twice</span></h2>
-        <p>Sellers share access to their own LLM provider subscriptions (e.g. Kimi, OpenCode Zen).
-          Many providers' Terms of Service prohibit reselling, sharing, or redistributing account
-          access. Selling quota through TokenShare may result in suspension or termination of the
-          seller's upstream account. <b>Sellers act at their own risk.</b> TokenShare does not
-          mediate, endorse, or take responsibility for any upstream ToS violation.</p>
+        <p>Sellers share access to LLM provider subscriptions (e.g. Kimi, OpenCode Zen) through an
+          upstream base URL and API key. <b>You must be authorized to use the upstream endpoint and
+          key you enroll, and you remain bound by your provider's Terms of Service.</b> Many providers
+          prohibit reselling, sharing, or redistributing account access. Selling quota through
+          TokenShare can trigger suspension or termination of your upstream account and the loss of
+          remaining quota or subscription value. TokenShare does not guarantee that reselling is
+          permitted, does not appeal or mediate provider decisions on your behalf, and does not
+          compensate you for any action a provider takes. <b>Sellers act at their own risk.</b></p>
       </div>
     </article>
 
     <article class="card pol">
       <span class="pol-num">04</span>
       <div class="pol-body">
-        <h2>NO CUSTODY OF KEYS<span class="card-tag">keys never leave the seller's relay</span></h2>
-        <p>TokenShare never holds, stores, or transmits seller API keys. Keys live only inside the
-          seller's own relay — optionally inside a Trusted Execution Environment (TEE), where they
-          are hardware-sealed.</p>
+        <h2>KEY CUSTODY — TWO MODES, STATED PLAINLY<span class="card-tag">not zero-custody, not trustless</span></h2>
+        <p><b>Single mode:</b> the seller operates their own relay; API keys stay inside
+          that relay and the platform never receives them.</p>
+        <p><b>Shared mode (live):</b> a platform-operated shared relay inside a Trusted
+          Execution Environment (TEE) — a Phala TDX CVM — receives seller API keys —
+          encrypted at the application layer before transmission — processes them inside
+          the enclave, and persists them encrypted at rest. The live keystore currently
+          holds two seller keys (Kimi and Qwen), and both active listings point their
+          endpoints at this TEE relay. This is <b>not</b> a zero-custody design and we
+          do not claim the platform or any provider is fully trustless: trust shifts
+          onto the TEE deployment, its operators, and its governance — the enclave
+          runs under Phala Cloud KMS.</p>
+        <p>Attestation, stated with its limits: the running instance's DCAP quote has
+          been verified locally with the open-source dcap-qvl verifier — its
+          reportData binds the quote to the deployed identity (the relay signer and
+          upload key) — and the app's attestEvidence record names the official Phala
+          cloud verifier as the reference verifier for this deployment. <b>The quote
+          has not been compared against Intel's root of trust or reference
+          measurement values</b>, and the TEE itself is governed by Phala Cloud KMS.
+          Treat attestation here as deployment-pinning evidence, not as a complete
+          hardware root-of-trust proof.</p>
       </div>
     </article>
 
     <article class="card pol">
       <span class="pol-num">05</span>
       <div class="pol-body">
-        <h2>TRUST MODEL<span class="card-tag">verify, don't trust</span></h2>
-        <p>Usage is reported by the seller's relay and billed per token. Every charge is backed by an
-          EIP-712 signed receipt verifiable by anyone. Buyer funds are protected by the escrow
-          contract: disputed or undelivered usage stays locked and becomes refundable after expiry.</p>
+        <h2>RECEIPTS, DELEGATES &amp; ESCROW LIMITS<span class="card-tag">what the cryptography does — and does not — prove</span></h2>
+        <p>Every charge carries an EIP-712 signed receipt that anyone can verify. A valid receipt
+          proves the signature and the integrity of its contents (usage, amount, payment id) —
+          <b>it does not prove that any LLM service was actually delivered</b>, or that the reported
+          tokens reflect a real completion.</p>
+        <p>In shared mode the seller explicitly authorizes an on-chain settle delegate. The
+          escrow version that adds this opt-in delegate function is deployed on Monad testnet
+          (chain ID 10143) at
+          <a href="https://testnet.monadvision.com/address/0xe4D5Eb0dBDB6DB8063C07ECF7EDFcCdDB9Ad514c" target="_blank" rel="noopener">0xe4D5…514c ↗</a>.
+          <b>Both sellers in the live shared deployment (Kimi and Qwen) have authorized the
+          settle delegate</b> — the TEE relay's signer 0x49CA…fb2D — and the flow is exercised
+          for real: verified buyer calls and delegate settlements are on-chain and
+          explorer-verifiable. Under this design the delegate could settle existing locks —
+          up to the full maxAmount, even after the lock TTL — though funds would always accrue
+          to the seller: the delegate could never redirect payouts or withdraw the seller's
+          balance. However, <b>a compromised delegate or TEE could settle a buyer's entire
+          locked budget while delivering zero service.</b> After any settle, only the
+          un-captured balance remains refundable; captured amounts cannot be recovered by
+          waiting out the TTL. Trusted deployment pins, independent hardware attestation,
+          and sound KMS governance are real trust requirements of this design — we state
+          them openly rather than hide them.</p>
       </div>
     </article>
 
     <article class="card pol pol-risk">
       <span class="pol-num">06</span>
       <div class="pol-body">
+        <h2>SERVICE INTERRUPTION — BUYER RISK<span class="card-tag">upstream is outside our control</span></h2>
+        <p>Service can degrade or stop without warning: an upstream provider may ban or rate-limit the
+          seller's account, exhaust its quota, or change its API; a seller may revoke their enrolled
+          key or deactivate their listing. When this happens mid-lock, the on-chain escrow refunds
+          only the un-captured remainder under the escrow contract's rules — nothing already captured
+          comes back, and no off-chain provider decision is reversible by this platform.</p>
+      </div>
+    </article>
+
+    <article class="card pol pol-risk">
+      <span class="pol-num">07</span>
+      <div class="pol-body">
         <h2>NO WARRANTY<span class="card-tag">as-is, hackathon build</span></h2>
-        <p>This is a hackathon prototype provided strictly as-is, with no warranty of any kind.
-          No SLA, no uptime guarantee, no liability for loss of funds, accounts, or data.
-          <b>Use at your own risk.</b></p>
+        <p>To the extent permitted by applicable law, this prototype is provided strictly as-is,
+          without warranty of any kind — no SLA, no uptime guarantee, and no liability for loss of
+          funds, accounts, quota, or data arising from its use. This notice is a plain-language risk
+          disclosure, not legal advice and not a lawyer-drafted agreement. <b>Use at your own
+          risk.</b></p>
       </div>
     </article>
 
@@ -112,7 +168,7 @@
 
 <footer class="footer">
   <div class="wrap">
-    <p class="foot-fine">Prototype on testnet; handles no real funds. · No custody. No upgrade keys. No trusted third party.</p>
+    <p class="foot-fine">Prototype on testnet; handles no real funds. · Single mode: keys stay in the seller's relay. Shared mode (live): a platform TEE relay holds sealed keys — custody and trust boundaries as documented above. · Policy version 2026-10-08.</p>
   </div>
 </footer>
 

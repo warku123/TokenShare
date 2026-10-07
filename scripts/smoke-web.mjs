@@ -7,12 +7,14 @@
      node scripts/smoke-web.mjs           # 或: node scripts/smoke-web.mjs http://other:port
 
    检查项:
-     1. 三页 fetch 200（/, /market.html, /console.html）
+     1. 四页 fetch 200（/, /market.html, /console.html, /policy.html）
      2. 每页关键 DOM id 存在（grep html 源码）
-     3. web/*.js 语法全过（node --check 子进程）
-     4. config.js 关键键非空（registryAddr / escrowAddr / chainId）
-     5. html 资源零外链（src=/href= 不含外部 http；出站 <a> 白名单豁免）
-     6. CJK 用户串扫描 → 告警（TESTING.md 除外；注释命中可接受，仅提示）
+     3. index/market/console 的 POLICY 导航 href="policy.html" 存在（includes 机制）
+     4. web/*.js 语法全过（node --check 子进程）
+     5. config.js 关键键非空（registryAddr / escrowAddr / chainId）
+     6. html 资源零外链（src=/href= 不含外部 http；出站 <a> 白名单豁免）
+     7. CJK 用户串扫描 → 告警（TESTING.md 除外；注释命中可接受，仅提示）
+   8. policy consent gate 静态接线（#policy-consent/#policy-agree · guardPaid 六付费按钮 · POLICY_VERSION 一致 · 退出路径不拦）
 
    Exit code 语义:
      0 = 全部检查 PASS（WARN 允许）
@@ -43,6 +45,11 @@ const REQUIRED_IDS = {
     "tab-seller", "tab-buyer", "panel-seller", "panel-buyer",
     "s-endpoint", "s-submit", "b-seller", "b-lock-bal", "b-max",
   ],
+  /* policy.html 为静态说明页（无交互 DOM）；REQUIRED_IDS 仅锚定共享导航。
+     注意勿把页面文案写进检查——结构 id 即可，文案改动不应导致冒烟误报。 */
+  "/policy.html": [
+    "topnav",
+  ],
 };
 const PAGES = Object.keys(REQUIRED_IDS);
 
@@ -56,7 +63,7 @@ const rec = (name, status, detail = "") => {
 
 console.log(`\n== TokenShare web smoke == base=${BASE}\n`);
 
-/* ── 1+2. 三页 fetch 200 + 关键 DOM id ── */
+/* ── 1+2+3. 四页 fetch 200 + 关键 DOM id + POLICY 导航 href ── */
 const pages = new Map(); // path -> html
 for (const path of PAGES) {
   let html = null;
@@ -75,6 +82,14 @@ for (const path of PAGES) {
     rec(`dom-ids ${path}`, missing.length ? "FAIL" : "PASS",
       missing.length ? `缺失: ${missing.join(", ")}` : `${REQUIRED_IDS[path].length} ids ok`);
   }
+}
+
+/* ── 3. 三个功能页的 POLICY 导航可达（复用 includes 机制，不查文案）── */
+for (const path of ["/index.html", "/market.html", "/console.html"]) {
+  const html = pages.get(path);
+  if (!html) continue; // fetch 已 FAIL，不重复报
+  rec(`policy-link ${path}`, html.includes('href="policy.html"') ? "PASS" : "FAIL",
+    'href="policy.html"');
 }
 if (pages.size === 0) {
   console.log(`\n8080 服务不可达（先跑: python3 -m http.server 8080 -d web）→ exit 2`);
@@ -117,7 +132,38 @@ try {
   rec("config.js 关键键", "FAIL", `读取失败: ${e.message}`);
 }
 
-/* ── 5. 零外链资源扫描（出站 <a> 白名单豁免）── */
+/* ── 5. policy consent gate 静态接线（checkbox id / guard 接线 / POLICY_VERSION 一致）── */
+try {
+  const commonJs = readFileSync(join(WEB, "common.js"), "utf8");
+  const consoleJs = readFileSync(join(WEB, "console.js"), "utf8");
+  const consoleHtml = pages.get("/console.html") || "";
+  const policyHtml = pages.get("/policy.html") || "";
+  const VER = "2026-10-08";
+  const c = (name, ok, detail = "") => rec(`consent ${name}`, ok ? "PASS" : "FAIL", detail);
+  c("consent-bar-id", consoleHtml.includes('id="policy-consent"') && consoleHtml.includes('id="policy-agree"'),
+    "console.html #policy-consent + #policy-agree");
+  c("consent-links-policy", consoleHtml.includes('href="policy.html" target="_blank"'),
+    "consent label → policy.html（新窗口）");
+  c("policy-version-pinned", commonJs.includes(`POLICY_VERSION = "${VER}"`), `web/common.js POLICY_VERSION = ${VER}`);
+  c("policy-page-version", policyHtml.includes(VER), `policy.html 页首/页脚标注 ${VER}`);
+  c("session-storage-record", commonJs.includes('"tokenshare.policyConsent.v1"'),
+    'sessionStorage 键 tokenshare.policyConsent.v1 → {"version","wallet","ts"}');
+  c("guard-throws", consoleJs.includes("class PolicyConsentRequired") && consoleJs.includes("requirePolicyConsent()"),
+    "paid handler 入口抛 PolicyConsentRequired");
+  const gated = ["s-submit", "s-verify-btn", "sc-authorize", "b-dep-btn", "b-lock-btn", "c-send"];
+  const missing = gated.filter((id) => !consoleJs.includes(`guardPaid($("${id}")`));
+  c("paid-guard-wiring", missing.length === 0,
+    missing.length ? `缺 guardPaid 接线: ${missing.join(", ")}` : gated.map((id) => `#${id}`).join(" "));
+  c("exit-paths-open",
+    consoleJs.includes(`guard($("r-btn")`) && consoleJs.includes(`guard($("b-withdraw-btn")`) &&
+    consoleJs.includes(`guard($("sc-revoke-delegate")`) && consoleJs.includes(`guard($("sc-revoke-key")`) &&
+    !/"sc-revoke-delegate", "sc-revoke-key"/.test(consoleJs),
+    "refund/withdraw/custody revokes 仍为普通 guard（退出路径不拦）");
+} catch (e) {
+  rec("consent static-wiring", "FAIL", `读取失败: ${e.message}`);
+}
+
+/* ── 6. 零外链资源扫描（出站 <a> 白名单豁免）── */
 const TAG_RE = /<([a-zA-Z][a-zA-Z0-9]*)((?:[^>"']|"[^"]*"|'[^']*')*)>/g;
 const ATTR_RE = /\b(src|href)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
 const isLocal = (u) =>

@@ -49,10 +49,11 @@ and makes the answer permanent and on-chain.
                      └──────────────────────────────────────────────────┘
 ```
 
-**Network facts (verified 2026-09-23):** Monad testnet chain id `10143`,
+**Network facts (verified 2026-10-07):** Monad testnet chain id `10143`,
 RPC `https://testnet-rpc.monad.xyz`; Escrow
-`0x157C551D145d3c4bBF8f3554c43Fb3C931D71aD5`; Registry
-`0xeD347cDc1761750E20C024459b38dedFb1462254` (Registry v2).
+`0xe4D5Eb0dBDB6DB8063C07ECF7EDFcCdDB9Ad514c` (v3.2, deployed 2026-10-07,
+tx `0xc7ca3ac798e16ace9f4554df51912aed235753f360d7f0a6417b7b0523afce4e`);
+Registry `0xeD347cDc1761750E20C024459b38dedFb1462254` (Registry v4).
 
 > **Registry address — authoritative source:** always take the Registry (and
 > Escrow) address from `contracts/deployed.monad.json` at the repo root; this
@@ -62,6 +63,15 @@ RPC `https://testnet-rpc.monad.xyz`; Escrow
 > the workflow's v2 5-component decode throw out-of-bounds. **After the M10 v3
 > deployment chain redeploys the Registry, refresh all four places** (snapshot
 > is authoritative; the orchestrator's deploy chain does this).
+
+> ⚠️ **Runtime warning (2026-10-07):** `config.staging.json` already pins
+> Escrow v3.2, but the demo relay at `127.0.0.1:8787` (PID 44254) still runs
+> against the old v3.1 injection, and the workflow is **NOT deployed**
+> (`anchorAddress` / `workflowOwner` are unfilled placeholders). The current
+> config is **NOT a runnable integration**. Before any future CRE execution:
+> configure and verify a relay serving the SAME v3.2 (a real TEE is still not
+> deployed) — and do NOT restart the demo or edit configs to bypass the
+> deployment gates now.
 
 Relay receipt endpoint:
 `GET /receipt/{paymentId}` (see `relay/app/receipt.py` — EIP-712

@@ -42,6 +42,7 @@ def test_official_allowlist_shape() -> None:
             "api.moonshot.ai",
             "api.kimi.com",
             "opencode.ai",
+            "token-plan.maas.qianwenaiapi.com",
         }
     )
     assert OFFICIAL_HOST_PROVIDER["api.openai.com"] == "openai"
@@ -49,6 +50,7 @@ def test_official_allowlist_shape() -> None:
     assert OFFICIAL_HOST_PROVIDER["api.moonshot.ai"] == "moonshot"
     assert OFFICIAL_HOST_PROVIDER["api.kimi.com"] == "moonshot"
     assert OFFICIAL_HOST_PROVIDER["opencode.ai"] == "zen"
+    assert OFFICIAL_HOST_PROVIDER["token-plan.maas.qianwenaiapi.com"] == "qwen"
 
 
 def test_provider_for_model_prefixes() -> None:
@@ -66,10 +68,15 @@ def test_provider_for_model_prefixes() -> None:
         assert provider_for_model(name) == "moonshot", name
     for name in ("deepseek-v4.1-flash", "deepseek-chat", "glm-5.3-flash"):
         assert provider_for_model(name) == "zen", name
+    # Qwen TokenPlan face: bare "qwen" prefix, no separator (like moonshot's
+    # "k3") — qwen3.8-max etc. carry the provider face directly.
+    for name in ("qwen3.8-max", "qwen-max", "qwen-plus", "qwen3-coder-plus"):
+        assert provider_for_model(name) == "qwen", name
     # Unknown / non-official prefixes must NOT be guessed.
     assert provider_for_model("claude-3-sonnet") is None
     assert provider_for_model("my-fake-model") is None
     assert provider_for_model("gpt") is None  # prefix must match exactly
+    assert provider_for_model("qwe") is None  # "qwen" prefix must match exactly
     assert provider_for_model("") is None
     assert provider_for_model(None) is None
     assert provider_for_model(42) is None
@@ -89,6 +96,28 @@ def test_host_provider_mapping() -> None:
     assert host_provider("https://opencode.ai") == "zen"
     assert host_provider("https://opencode.ai/zen") == "zen"
     assert host_provider("https://opencode.ai/zen/") == "zen"
+    # Qwen TokenPlan: the /compatible-mode path is irrelevant to the host
+    # gate; host_provider parses the NORMALIZED (trailing /v1 stripped) URL.
+    assert (
+        host_provider("https://token-plan.maas.qianwenaiapi.com") == "qwen"
+    )
+    assert (
+        host_provider(
+            "https://token-plan.maas.qianwenaiapi.com/compatible-mode"
+        )
+        == "qwen"
+    )
+    assert (
+        host_provider(
+            "https://token-plan.maas.qianwenaiapi.com/compatible-mode/"
+        )
+        == "qwen"
+    )
+    # Lookalike hosts of the Qwen endpoint must NOT pass.
+    assert (
+        host_provider("https://token-plan.maas.qianwenaiapi.com.evil.invalid")
+        is None
+    )
     # Scheme-relative case-insensitivity of hosts.
     assert host_provider("https://API.OPENAI.COM") == "openai"
     assert host_provider("http://127.0.0.1:9") is None
@@ -152,6 +181,36 @@ def test_startup_accepts_zen_base(
     monkeypatch.delenv(cfg.ENV_ALLOW_CUSTOM_UPSTREAM, raising=False)
     with TestClient(m.app) as client:
         assert client.get("/health").status_code == 200
+
+
+def test_startup_accepts_qwen_token_plan_base(
+    monkeypatch: pytest.MonkeyPatch, fake_chain: Any
+) -> None:
+    """Qwen TokenPlan base (SDK-style /compatible-mode/v1) passes the startup
+    allowlist: normalization strips the trailing /v1 and host_provider must
+    resolve the RESULTING URL's host (token-plan.maas.qianwenaiapi.com) as
+    official."""
+    setup_relay_env(
+        monkeypatch,
+        "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1",
+    )
+    monkeypatch.delenv(cfg.ENV_ALLOW_CUSTOM_UPSTREAM, raising=False)
+    with TestClient(m.app) as client:
+        assert client.get("/health").status_code == 200
+
+
+def test_startup_rejects_qwen_lookalike_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lookalike of the Qwen TokenPlan host must not pass the allowlist."""
+    setup_relay_env(
+        monkeypatch,
+        "https://token-plan.maas.qianwenaiapi.com.evil.invalid/compatible-mode/v1",
+    )
+    monkeypatch.delenv(cfg.ENV_ALLOW_CUSTOM_UPSTREAM, raising=False)
+    with pytest.raises(ConfigError, match="official"):
+        with TestClient(m.app):
+            pass
 
 
 def test_startup_flag_allows_custom_host_with_warning(
@@ -246,6 +305,51 @@ def test_zen_models_pass_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     _state_with_base_url(monkeypatch, "https://opencode.ai/zen/v1")
     m._check_model_provider_consistency({"model": "deepseek-v4.1-flash"})  # no raise
     m._check_model_provider_consistency({"model": "glm-5.3-flash"})  # no raise
+
+
+def test_qwen_models_pass_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Qwen TokenPlan model face through the token-plan upstream."""
+    _state_with_base_url(
+        monkeypatch, "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1"
+    )
+    m._check_model_provider_consistency({"model": "qwen3.8-max"})  # no raise
+    m._check_model_provider_consistency({"model": "qwen-max"})  # no raise
+    m._check_model_provider_consistency({"model": "qwen-plus"})  # no raise
+
+
+def test_qwen_host_rejects_foreign_provider_400(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A moonshot model name aimed at the token-plan host → 400 (kimi- prefix
+    does not belong to the qwen provider)."""
+    _state_with_base_url(
+        monkeypatch, "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1"
+    )
+    with pytest.raises(HTTPException) as exc:
+        m._check_model_provider_consistency({"model": "kimi-k2.6"})
+    assert exc.value.status_code == 400
+    assert "does not match" in exc.value.detail
+
+    with pytest.raises(HTTPException) as exc:
+        m._check_model_provider_consistency({"model": "glm-5.3-flash"})
+    assert exc.value.status_code == 400
+    assert "does not match" in exc.value.detail
+
+
+def test_qwen_model_on_foreign_host_rejected_400(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A qwen model name aimed at other official hosts → 400."""
+    _state_with_base_url(monkeypatch, "https://api.kimi.com/coding/v1")
+    with pytest.raises(HTTPException) as exc:
+        m._check_model_provider_consistency({"model": "qwen3.8-max"})
+    assert exc.value.status_code == 400
+    assert "does not match" in exc.value.detail
+
+    _state_with_base_url(monkeypatch, "https://api.openai.com")
+    with pytest.raises(HTTPException) as exc:
+        m._check_model_provider_consistency({"model": "qwen3.8-max"})
+    assert exc.value.status_code == 400
 
 
 def test_zen_host_rejects_foreign_provider_400(monkeypatch: pytest.MonkeyPatch) -> None:

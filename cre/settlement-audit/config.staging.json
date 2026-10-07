@@ -1,6 +1,6 @@
 {
   "chainSelectorName": "monad-testnet",
-  "escrowAddress": "0x157C551D145d3c4bBF8f3554c43Fb3C931D71aD5",
+  "escrowAddress": "0xe4D5Eb0dBDB6DB8063C07ECF7EDFcCdDB9Ad514c",
   "registryAddress": "0xeD347cDc1761750E20C024459b38dedFb1462254",
   "anchorAddress": "0xYOUR_RECEIPT_ANCHOR_CONTRACT_ADDRESS",
   "relayBaseUrl": "http://127.0.0.1:8787",

@@ -731,7 +731,7 @@ h1 {
 .fld-row .fld { flex: 1; }
 .btn-end { flex: none; }
 
-input[type="text"], input[type="url"], input[type="number"], input[type="search"], select, textarea {
+input[type="text"], input[type="url"], input[type="number"], input[type="search"], input[type="password"], select, textarea {
   font-family: var(--mono); font-size: 13px; color: var(--text);
   background: var(--bg-2); border: 1px solid var(--line); padding: 10px 12px;
   width: 100%; min-width: 0; border-radius: 0; outline: none;
@@ -764,6 +764,11 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
 }
 .mcheck input { accent-color: var(--green); width: 12px; height: 12px; margin: 0; }
 .mcheck:has(input:checked) { color: var(--green); border-color: var(--green-dim); background: rgba(61,220,151,0.06); }
+/* M15 shared catalog: a model the stored key cannot serve — visible for
+   honesty, never selectable */
+.mcheck.off { color: var(--faint); border-style: dashed; background: transparent; cursor: not-allowed; }
+.mcheck.off input { accent-color: var(--faint); }
+.mtag.off { opacity: 0.55; border-style: dashed; }
 .model-verify { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .model-verify .btn { flex: none; }
 .model-verify-note {
@@ -900,6 +905,10 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
 .verify-detail:empty { display: none; }
 .verify-detail .empty-hint { margin: 0; }
 .verify-detail .empty-hint .btn { margin-left: 6px; }
+
+/* M15 shared-relay custody card */
+.sc-ops { margin-top: 2px; align-items: center; flex-wrap: wrap; }
+.sc-ops .btn { flex: none; }
 
 /* disputes */
 .disp-list { display: flex; flex-direction: column; gap: 8px; }
@@ -1126,4 +1135,25 @@ a.flow-step:hover b { color: var(--green); }
 .pol-back { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 30px; }
 @media (max-width: 700px) {
   .pol-back .btn { width: 100%; text-align: center; }
+}
+
+/* ═══ POLICY CONSENT GATE (console paid-action bar) ═══
+   Restrained by design: one dashed bar above the tabs, reuses the
+   existing .mswitch checkbox face + flashbd pulse. */
+.policy-consent {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap;
+  border: 1px dashed var(--line);
+  background: var(--bg-2);
+  padding: 12px 16px;
+  margin: 0 0 18px;
+}
+.policy-consent.flash-bd { animation: flashbd 0.9s ease; }
+.policy-consent-note {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.04em;
+  color: var(--faint); max-width: 46ch; line-height: 1.6;
+}
+@media (max-width: 700px) {
+  .policy-consent { flex-direction: column; gap: 8px; }
+  .policy-consent-note { max-width: none; }
 }

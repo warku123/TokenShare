@@ -8,6 +8,12 @@ PIN (m3-m5-e2e.md 「接口契约 PIN」, must not drift):
     X-Receipt = base64url(JSON {domain, message, signature})
     Verification: recover_typed_data(...) == Registry listing operator (seller).
 
+ M15 shared mode: an OPTIONAL explicit buyer-side pin (expected_signer,
+ --expected-signer / env EXPECTED_SIGNER) instead requires recover == that
+ independent TEE address; receipt.message.seller must STILL equal the
+ on-chain listing operator (economic seller never changes). The pin is never
+ auto-derived from relay-reported fields and there is no TOFU.
+
 `upstreamHost` + `model` (authenticity audit fields, PIN v1.1) let the buyer
 see WHICH official host and WHICH model served the call.
 
@@ -123,6 +129,7 @@ def verify_receipt(
     expected_seller: str,
     expected_payment_id: int | None = None,
     expected_chain_id: int | None = None,
+    expected_signer: str | None = None,
 ) -> ReceiptCheck:
     """Verify the receipt signature against the Registry listing operator.
 
@@ -131,9 +138,19 @@ def verify_receipt(
          chainId:expected_chain_id} (name/version verbatim, chainId from the
          CLI config; skipped when expected_chain_id is None);
       1. signature recovers to an address (recover over EIP-712);
-      2. recovered address == expected seller (Registry listing operator);
-      3. receipt.message.seller == expected seller;
+      2. recovered address == expected signer:
+         - expected_signer given (M15 shared mode, independent TEE signer):
+           recover == expected_signer;
+         - otherwise (single-tenant default, old 4-arg behavior unchanged):
+           recover == expected_seller;
+      3. receipt.message.seller == expected seller — ALWAYS checked against
+         the on-chain listing operator, even when an independent TEE signer
+         is pinned (the two checks are independent);
       4. receipt.message.paymentId == the paymentId we used (optional).
+
+    `expected_signer` is an explicit buyer-side pin only; it is never derived
+    from relay-reported fields (/info, headers, ...) and does not weaken any
+    domain/paymentId/seller check.
     """
     if expected_chain_id is not None and not _domain_matches(receipt.domain, expected_chain_id):
         return ReceiptCheck(False, None, "domain-mismatch")
@@ -144,7 +161,8 @@ def verify_receipt(
     except Exception as exc:
         return ReceiptCheck(False, None, f"recover-failed: {exc}")
 
-    if not _same_address(recovered, expected_seller):
+    recover_expected = expected_signer if expected_signer else expected_seller
+    if not _same_address(recovered, recover_expected):
         return ReceiptCheck(False, recovered, "recover-mismatch")
     if not _same_address(receipt.message.get("seller"), expected_seller):
         return ReceiptCheck(False, recovered, "seller-mismatch")

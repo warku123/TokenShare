@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="TokenShare console — register a seller listing, or deposit, lock and pay per call as a buyer. Wallet-only, keys never touch the page.">
+<meta name="description" content="TokenShare console — register a seller listing, or deposit, lock and pay per call as a buyer. Wallet-only signing: wallet keys never touch the page; shared mode seals the upstream key in-browser, never stored.">
 <title>TokenShare — Console</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="styles.css">
@@ -30,7 +30,7 @@
     <div>
       <h1 class="con-title">CONSOLE<span class="cursor" aria-hidden="true"></span></h1>
       <p class="con-sub">Seller registers an official-plan listing. Buyer deposits, locks, and pays per call.
-        All signing happens in your wallet — keys never touch this page.</p>
+        All chain signing happens in your wallet — wallet keys never touch this page.</p>
     </div>
     <div class="wallet-box">
       <button class="btn" id="wallet-connect" type="button">[ CONNECT WALLET ]</button>
@@ -52,6 +52,17 @@
     </div>
   </section>
 
+  <!-- ══ POLICY CONSENT — UX gate for paid actions (NOT a security control) ══ -->
+  <div class="policy-consent" id="policy-consent">
+    <label class="mswitch policy-consent-lbl">
+      <input type="checkbox" id="policy-agree" disabled>
+      <span class="mswitch-lbl">I have read and agree to the <a href="policy.html" target="_blank" rel="noopener">Platform Policy &amp; Risk Notice</a>
+        <i id="policy-consent-hint">connect a wallet to confirm — required before paid actions (register · custody verify/authorize · deposit · lock · mint key · calls). refunds, withdrawals, deactivation and revokes stay open.</i>
+      </span>
+    </label>
+    <span class="policy-consent-note">UX gate only — remembered per wallet in this tab's session storage, keyed to the policy version. It is not a signature, not on-chain, and not a security control.</span>
+  </div>
+
   <div class="mkt-notice" id="config-banner" hidden></div>
   <div class="mkt-notice net-warn" id="net-banner" hidden>
     <b>Wrong network</b> — switch to <code class="inl" id="net-banner-name">—</code>.
@@ -66,6 +77,39 @@
 
   <!-- ════════════ SELLER ════════════ -->
   <section class="panel" id="panel-seller" role="tabpanel" aria-labelledby="tab-seller">
+
+    <!-- ══ M15 SHARED-RELAY CUSTODY — rendered only when config.js carries
+         a complete m15 block; the classic single-seller form below is
+         untouched when it stays hidden ══ -->
+    <article class="card rv" id="custody-card" hidden>
+      <h2 class="card-title">SHARED RELAY CUSTODY<span class="card-tag">planned shared mode · the key is sealed in your browser to the pinned enclave key</span></h2>
+      <div class="card-body">
+        <p class="step-hint">One trusted relay serves many sellers. VERIFY checks the live relay against the deployment pins
+          (origin · signer · upload key · app id · report data), then your upstream key is encrypted in this browser to the
+          pinned TEE key and submitted — the relay stores it inside the enclave and probes your live model catalog with it.
+          The key is never written to page storage, logs, or the URL — but JavaScript cannot guarantee a secure wipe of
+          memory, so close this tab when you are done.</p>
+        <div class="kv"><span>RELAY ORIGIN</span><b class="mono wrap-anywhere" id="sc-relay">—</b></div>
+        <div class="fld-row">
+          <label class="fld"><span class="fld-lbl">UPSTREAM BASE URL <i>official API base — a trailing /v1 is stripped</i></span>
+            <input type="url" id="s-upstream-url" placeholder="https://api.kimi.com/coding" spellcheck="false" autocomplete="off"></label>
+          <label class="fld"><span class="fld-lbl">UPSTREAM API KEY <i>sealed to the pinned TEE key · never stored by this page</i></span>
+            <input type="password" id="s-upstream-key" placeholder="sk-…" spellcheck="false" autocomplete="off"></label>
+        </div>
+        <div class="model-verify">
+          <button class="btn btn-sm" id="s-verify-btn" type="button">[ VERIFY + SEAL KEY ]</button>
+          <span class="model-verify-note" id="s-verify-note"></span>
+        </div>
+        <div class="verify-detail" id="sc-pins"></div>
+        <div class="verify-detail" id="sc-status"></div>
+        <div class="fld-row sc-ops">
+          <button class="btn btn-sm btn-ghost" id="sc-authorize" type="button" hidden>[ AUTHORIZE DELEGATE ]</button>
+          <button class="btn btn-sm btn-ghost" id="sc-revoke-delegate" type="button" hidden>[ REVOKE DELEGATE ]</button>
+          <button class="btn btn-sm btn-ghost" id="sc-revoke-key" type="button" hidden>[ REVOKE STORED KEY ]</button>
+        </div>
+        <div class="txbox" id="sc-tx"></div>
+      </div>
+    </article>
 
     <div class="grid-2">
       <!-- my listing -->
@@ -82,13 +126,13 @@
       <article class="card rv">
         <h2 class="card-title">REGISTER / UPDATE<span class="card-tag">Registry</span></h2>
         <div class="card-body">
-          <label class="fld">
+          <label class="fld" id="s-endpoint-fld">
             <span class="fld-lbl">RELAY ENDPOINT <i>base URL — buyers POST {endpoint}/v1/chat/completions</i></span>
             <input type="url" id="s-endpoint" placeholder="https://relay.example.com:8787" spellcheck="false" autocomplete="off">
           </label>
 
           <div class="fld">
-            <span class="fld-lbl">MODELS <i>step 1 — LOAD FROM RELAY probes /verify-upstream · step 2 — check the models to list</i></span>
+            <span class="fld-lbl">MODELS <i id="s-models-hint">step 1 — LOAD FROM RELAY probes /verify-upstream · step 2 — check the models to list</i></span>
             <div class="model-verify">
               <button class="btn btn-sm btn-ghost" id="s-load-models" type="button">[ ↺ LOAD FROM RELAY ]</button>
               <span class="model-verify-note" id="s-models-note"></span>
@@ -136,7 +180,7 @@
       <a class="flow-step" href="#card-locks"><b>3</b>MINT KEY</a><span class="flow-arr">→</span>
       <a class="flow-step" href="#card-call"><b>4</b>CALL / USAGE</a><span class="flow-arr">→</span>
       <a class="flow-step" href="#card-refund"><b>5</b>REFUND</a>
-      <span class="flow-tail">spend by real usage — whatever's left comes back</span>
+      <span class="flow-tail">spend by relay-reported usage — whatever's left comes back</span>
     </p>
 
     <!-- lock — the buyer's core move gets the full-width hero -->
@@ -217,7 +261,7 @@
     <article class="card rv" id="card-locks">
       <h2 class="card-title">SESSION LOCKS<span class="card-tag">localStorage · this browser — mint agent keys, watch accrued usage</span></h2>
       <div class="card-body">
-        <p class="step-hint">Step 3 · your locks live in this browser. MINT turns one into an OpenAI-compatible api key for agents — it spends by real usage, up to the lock's max. USAGE opens the live meter.</p>
+        <p class="step-hint">Step 3 · your locks live in this browser. MINT turns one into an OpenAI-compatible api key for agents — it spends by relay-reported usage, up to the lock's max. USAGE opens the live meter.</p>
         <div class="locks-list" id="locks-list"></div>
       </div>
     </article>
@@ -280,7 +324,7 @@
 
 <footer class="footer">
   <div class="wrap">
-    <p class="foot-fine">Wallet-only signing · zero keys on the page · amounts in USDC 6-decimal native units on-chain.</p>
+    <p class="foot-fine">Wallet keys never touch the page · shared mode: the upstream key is sealed in-browser and never stored (JS cannot guarantee a memory wipe) · amounts in USDC 6-decimal native units on-chain.</p>
   </div>
 </footer>
 

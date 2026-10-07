@@ -88,6 +88,14 @@ def test_normalize_variants() -> None:
     assert _normalize_openai_base_url(
         "https://opencode.ai/zen/v1"
     ) == "https://opencode.ai/zen"
+    # Qwen TokenPlan: /compatible-mode/v1 -> /compatible-mode
+    # (host gate then sees token-plan.maas.qianwenaiapi.com).
+    assert _normalize_openai_base_url(
+        "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1"
+    ) == "https://token-plan.maas.qianwenaiapi.com/compatible-mode"
+    assert _normalize_openai_base_url(
+        "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1/"
+    ) == "https://token-plan.maas.qianwenaiapi.com/compatible-mode"
 
 
 def test_zen_base_composes_official_forward_url() -> None:
@@ -107,6 +115,36 @@ def test_zen_base_composes_official_forward_url() -> None:
     # Same composition for the models path (startup / verify-upstream probe).
     assert (
         normalized + "/v1/models" == "https://opencode.ai/zen/v1/models"
+    )
+
+
+def test_qwen_token_plan_base_composes_official_forward_url() -> None:
+    """Qwen TokenPlan (token-plan.maas.qianwenaiapi.com) normalization +
+    composition pin, following the Kimi /coding and Zen /zen precedents: the
+    SDK-style base https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1
+    strips to https://token-plan.maas.qianwenaiapi.com/compatible-mode, and
+    forwarding with the absolute path /v1/chat/completions composes exactly
+    https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1/chat/
+    completions (no /compatible-mode/v1/v1 doubling — matches the live
+    OpenAI-compatible endpoint probed 2026-10-07)."""
+    from relay.app.main import CHAT_COMPLETIONS_PATH
+
+    normalized = _normalize_openai_base_url(
+        "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1"
+    )
+    assert normalized == (
+        "https://token-plan.maas.qianwenaiapi.com/compatible-mode"
+    )
+    assert (
+        normalized + CHAT_COMPLETIONS_PATH
+        == "https://token-plan.maas.qianwenaiapi.com"
+        "/compatible-mode/v1/chat/completions"
+    )
+    # Same composition for the models path (startup / verify-upstream probe).
+    assert (
+        normalized + "/v1/models"
+        == "https://token-plan.maas.qianwenaiapi.com"
+        "/compatible-mode/v1/models"
     )
 
 

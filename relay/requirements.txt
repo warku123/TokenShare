@@ -4,5 +4,12 @@ web3>=7,<8
 eth-account>=0.13,<1
 httpx>=0.27,<1
 # dstack-sdk — required ONLY in TEE mode (Phala Cloud CVM, /var/run/dstack.sock
-# present); the import is lazy, so a missing package never breaks host-mode boots.
-dstack-sdk>=0.1,<1
+# present) and for shared-mode key derivation inside the CVM; the import is
+# lazy, so a missing package never breaks host-mode boots.
+# >=0.5.4,<0.6: the shared-custody branch (M15 R1) uses the bare legacy
+# get_key(path) raw-32-byte surface and MUST NOT run against an SDK that
+# redirects get_key to the unsupported secp256r1 mode or a v1 KDF.
+dstack-sdk>=0.5.4,<0.6
+# pycryptodome — NIST P-256 ECDH + AES-256-GCM for the shared custody
+# envelope (ECDH-P256-HKDF-SHA256-A256GCM) and the encrypted keystore.
+pycryptodome>=3.20

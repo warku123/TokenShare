@@ -31,6 +31,13 @@ window.TS = (() => {
     "function nextPaymentId() view returns (uint256)",
     "function refund(uint256 paymentId)",
     "function withdraw(uint256 amount)",
+    /* M15 shared-relay custody: seller-approved settle delegate. The web
+       page writes it via raw calldata (T.custody.delegateCalldata — the
+       pinned, unit-tested path); the view below powers the custody card's
+       DELEGATE row. Absent on pre-M15 deployments → reads revert, UI
+       degrades to "unreadable". */
+    "function approveSettleDelegate(address delegate)",
+    "function settleDelegateOf(address seller) view returns (address)",
     "event Locked(uint256 indexed paymentId, address indexed buyer, address indexed seller, uint256 maxAmount, uint64 expiresAt)",
     "event Refunded(uint256 indexed paymentId, address indexed buyer, uint256 amount, address indexed caller)",
     /* custom errors (contracts/src/Escrow.sol) — declared so ethers
@@ -647,8 +654,16 @@ window.TS = (() => {
 
   /* Mirrors cli/tokenshare_cli/receipt.py verify_receipt:
      0 domain verbatim (name/version + chainId) · 1 recover ·
-     2 recovered == seller · 3 message.seller == seller · 4 paymentId */
-  function verifyReceipt(receipt, expectedSeller, expectedChainId, expectedPaymentId) {
+     2 recovered == seller · 3 message.seller == seller · 4 paymentId.
+     M15 shared mode: opts.expectedSigner pins the RECOVERED key to the
+     configured shared-relay signer (the relay signs for many operators);
+     message.seller still must equal the chain listing's operator. The pin
+     is applied by the CALLER only when the listing endpoint matches the
+     configured shared relay origin (T.custody.matchesSharedRelay) — never
+     to arbitrary endpoints, never from /info (no TOFU). Old 4-arg calls
+     behave exactly as before. */
+  function verifyReceipt(receipt, expectedSeller, expectedChainId, expectedPaymentId, opts) {
+    const expectedSigner = opts && opts.expectedSigner;
     const d = receipt.domain || {};
     if (d.name !== RECEIPT_DOMAIN_NAME || d.version !== RECEIPT_DOMAIN_VERSION) {
       return { ok: false, reason: "domain-mismatch" };
@@ -663,7 +678,11 @@ window.TS = (() => {
     } catch (e) {
       return { ok: false, reason: "recover-failed: " + (e.shortMessage || e.message) };
     }
-    if (!sameAddr(recovered, expectedSeller)) return { ok: false, recovered, reason: "recover-mismatch" };
+    if (expectedSigner) {
+      if (!sameAddr(recovered, expectedSigner)) return { ok: false, recovered, reason: "signer-mismatch" };
+    } else {
+      if (!sameAddr(recovered, expectedSeller)) return { ok: false, recovered, reason: "recover-mismatch" };
+    }
     if (!sameAddr(receipt.message.seller, expectedSeller)) return { ok: false, recovered, reason: "seller-mismatch" };
     if (expectedPaymentId != null) {
       try {
@@ -825,6 +844,440 @@ window.TS = (() => {
       default: return null;
     }
   }
+
+  /* ══════════════════════════════════════════════════════════
+     M15 — shared-relay key custody (protocol frozen v1-e1).
+
+     One trusted TEE relay holds many sellers' upstream keys. This
+     namespace is PURE + environment-agnostic (no window/document, no
+     bare ethers): every hash/primitive arrives injected, so Node tests
+     drive the exact code the browser runs (scripts/check-custody-web.mjs).
+
+     Frozen formats (byte-exact, single line, | separated):
+       msg = TokenShare key custody|action=submit|seller={seller}|chain={chain_id}|escrow={escrow}|registry={registry}|relay={origin}|upstream={upstream_base_url}|nonce={nonce}|body_sha256={body_sha256}|issued={issued}|expires={expires}
+       aad = TokenShare custody envelope|action=submit|seller={seller}|chain={chain_id}|escrow={escrow}|registry={registry}|relay={origin}|upstream={upstream_base_url}|nonce={nonce}|issued={issued}|expires={expires}
+       revoke msg = TokenShare key custody|action=revoke|seller={seller}|chain={chain_id}|escrow={escrow}|registry={registry}|relay={origin}|nonce={nonce}|issued={issued}|expires={expires}
+     The AAD deliberately carries NO body hash (the body CONTAINS the
+     envelope; hashing it into the AAD would be circular). The submit
+     message binds body_sha256 = sha256(raw body bytes), 64 lower hex,
+     no 0x. Addresses lower hex · ints decimal · origin canonical.
+
+     Envelope: ECDH(P-256 ephemeral × pinned upload pubkey) → Z (32B
+     x-coord) → HKDF-SHA256(salt=sha256("tokenshare-custody-salt-v1"),
+     info="tokenshare-custody-aesgcm-v1") → AES-256-GCM(iv 12B random,
+     AAD above, 16B tag appended). epk/iv/ct = unpadded base64url.
+     Plaintext = JSON.stringify({api_key}) — ASCII only.
+
+     Trust boundary: /info + /attestation pin checks prove the LIVE
+     binding (origin/signer/upload key/app id/report data) against the
+     operator-pinned config. The quote itself is self-reported — the
+     operator's offline verification (verifier URL + date + digest in
+     config) is displayed honestly; this page never claims a fresh DCAP
+     proof. A pin mismatch is a HARD failure (custody disabled), never a
+     warning. Discovery fetches are never trusted for pinning (no TOFU).
+     ══════════════════════════════════════════════════════════ */
+  const custody = (() => {
+    const te = new TextEncoder();
+
+    /* ── byte codecs (unpadded base64url / lower hex) ── */
+    function b64urlToBytes(s) {
+      s = String(s || "").trim().replace(/[\r\n]/g, "");
+      if (!/^[A-Za-z0-9_-]*$/.test(s)) throw new Error("not unpadded base64url");
+      s = s.replace(/-/g, "+").replace(/_/g, "/");
+      s += "=".repeat((4 - (s.length % 4)) % 4);
+      const bin = atob(s);
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    }
+    const bytesToHex = (b) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+    function hexToBytes(h) {
+      h = String(h || "").trim().replace(/^0x/i, "");
+      if (!/^[0-9a-fA-F]*$/.test(h) || h.length % 2) throw new Error("bad hex");
+      const out = new Uint8Array(h.length / 2);
+      for (let i = 0; i < out.length; i++) out[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16);
+      return out;
+    }
+    const assertAscii = (s, what) => {
+      if (!/^[\x20-\x7E]*$/.test(s)) throw new Error(`${what} must be printable ASCII`);
+    };
+
+    /* ── URL normalization ──
+       trim ASCII space · reject userinfo/query/fragment/pipe/non-ASCII ·
+       https required unless the caller passes allowHttp (dev policy —
+       the relay remains the official-upstream authority) · host lowercase
+       + default port omitted (URL class does both) · trailing slashes
+       stripped · ONE terminal "/v1" stripped:
+         https://api.kimi.com/coding/v1 → https://api.kimi.com/coding */
+    function normalizeUpstreamUrl(raw, { allowHttp = false } = {}) {
+      const s = String(raw || "").trim();
+      if (!s) return { ok: false, reason: "empty URL" };
+      if (s.includes("|")) return { ok: false, reason: "the pipe character is not allowed" };
+      if (/[^\x21-\x7E]/.test(s)) return { ok: false, reason: "non-ASCII / whitespace / control characters are not allowed" };
+      let u;
+      try { u = new URL(s); } catch { return { ok: false, reason: "not a parseable URL" }; }
+      if (u.username || u.password) return { ok: false, reason: "userinfo (user:pass@host) is not allowed" };
+      if (u.search) return { ok: false, reason: "query strings are not allowed" };
+      if (u.hash) return { ok: false, reason: "fragments (#…) are not allowed" };
+      if (u.protocol !== "https:" && !(allowHttp && u.protocol === "http:")) {
+        return { ok: false, reason: "https is required" };
+      }
+      let path = u.pathname.replace(/\/+$/, "");
+      if (path.endsWith("/v1")) path = path.slice(0, -3).replace(/\/+$/, "");
+      const port = u.port ? `:${u.port}` : "";
+      return { ok: true, url: `${u.protocol}//${u.hostname.toLowerCase()}${port}${path}` };
+    }
+    /* relay origin: an ORIGIN only — same hygiene, plus root path and no
+       "/v1" stripping (the relay is pinned as an origin, not an API base) */
+    function normalizeRelayOrigin(raw, { allowHttp = false } = {}) {
+      const s = String(raw || "").trim();
+      if (!s) return { ok: false, reason: "empty origin" };
+      if (s.includes("|")) return { ok: false, reason: "the pipe character is not allowed" };
+      if (/[^\x21-\x7E]/.test(s)) return { ok: false, reason: "non-ASCII / whitespace / control characters are not allowed" };
+      let u;
+      try { u = new URL(s); } catch { return { ok: false, reason: "not a parseable URL" }; }
+      if (u.username || u.password) return { ok: false, reason: "userinfo is not allowed" };
+      if (u.search) return { ok: false, reason: "query strings are not allowed" };
+      if (u.hash) return { ok: false, reason: "fragments are not allowed" };
+      if (u.protocol !== "https:" && !(allowHttp && u.protocol === "http:")) {
+        return { ok: false, reason: "https is required" };
+      }
+      if (u.pathname.replace(/\/+$/, "") !== "") return { ok: false, reason: "relay origin must be a root origin (no path)" };
+      const port = u.port ? `:${u.port}` : "";
+      return { ok: true, origin: `${u.protocol}//${u.hostname.toLowerCase()}${port}` };
+    }
+
+    /* ── m15 config validation: EVERY identity pin must be present and
+       well-formed before VERIFY is enabled. Absent m15 → single-seller
+       mode (old form preserved). Present but partial/malformed →
+       fail-closed (custody disabled, hard error shown). Values are
+       normalized once here (lower hex, canonical origin) and every later
+       comparison runs on the normalized form. */
+    const HEX40 = /^0x[0-9a-fA-F]{40}$/;
+    const HEX64 = /^(0x)?[0-9a-fA-F]{64}$/;
+    function validateM15Config(raw) {
+      if (raw == null) return { ok: false, absent: true, missing: ["m15"], bad: [] };
+      const missing = [], bad = [];
+      const need = (cond, key) => { if (!cond) missing.push(key); return cond; };
+      need(typeof raw === "object", "m15");
+      if (missing.length) return { ok: false, missing, bad };
+      need(raw.mode === "shared", "mode");
+      const o = raw.relayOrigin ? normalizeRelayOrigin(raw.relayOrigin) : null;
+      need(o && o.ok, "relayOrigin");
+      need(HEX40.test(raw.expectedSigner || ""), "expectedSigner");
+      const appIdOk = typeof raw.appId === "string" && /^(0x)?[0-9a-fA-F]+$/.test(raw.appId) &&
+        raw.appId.replace(/^0x/i, "").length >= 40 && raw.appId.replace(/^0x/i, "").length <= 64;
+      need(appIdOk, "appId");
+      need(HEX64.test(raw.uploadPubkeySha256 || ""), "uploadPubkeySha256");
+      const ev = raw.attestEvidence;
+      need(ev && typeof ev === "object", "attestEvidence");
+      if (ev && typeof ev === "object") {
+        need(typeof ev.verifier === "string" && /^https:\/\/[^\s/$.?#].[^\s]*$/.test(ev.verifier), "attestEvidence.verifier");
+        need(typeof ev.verifiedAt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(ev.verifiedAt), "attestEvidence.verifiedAt");
+        need(HEX64.test(ev.digest || ""), "attestEvidence.digest");
+      }
+      if (missing.length) return { ok: false, missing, bad };
+      return {
+        ok: true,
+        cfg: {
+          mode: "shared",
+          relayOrigin: o.origin,
+          expectedSigner: String(raw.expectedSigner).toLowerCase(),
+          appId: String(raw.appId).toLowerCase().replace(/^0x/, ""),
+          uploadPubkeySha256: String(raw.uploadPubkeySha256).toLowerCase().replace(/^0x/, ""),
+          evidence: {
+            verifier: ev.verifier,
+            verifiedAt: ev.verifiedAt,
+            digest: String(ev.digest).toLowerCase().replace(/^0x/, ""),
+          },
+        },
+      };
+    }
+
+    /* ── frozen message / AAD / body formats ── */
+    const ENVELOPE_ALG = "ECDH-P256-HKDF-SHA256-A256GCM";
+    const HKDF_SALT_STRING = "tokenshare-custody-salt-v1";
+    const HKDF_INFO_STRING = "tokenshare-custody-aesgcm-v1";
+    const BODY_MAX_BYTES = 64 * 1024;
+
+    const custodyFields = (f) =>
+      `seller=${f.seller}|chain=${f.chain}|escrow=${f.escrow}|registry=${f.registry}|relay=${f.relay}`;
+    const buildCustodyAad = (f) =>
+      `TokenShare custody envelope|action=submit|${custodyFields(f)}|upstream=${f.upstream}|nonce=${f.nonce}|issued=${f.issued}|expires=${f.expires}`;
+    const buildCustodySubmitMessage = (f) =>
+      `TokenShare key custody|action=submit|${custodyFields(f)}|upstream=${f.upstream}|nonce=${f.nonce}|body_sha256=${f.bodySha256}|issued=${f.issued}|expires=${f.expires}`;
+    const buildCustodyRevokeMessage = (f) =>
+      `TokenShare key custody|action=revoke|${custodyFields(f)}|nonce=${f.nonce}|issued=${f.issued}|expires=${f.expires}`;
+
+    /* body: JSON.stringify with the EXACT pinned key order (insertion
+       order of the literal below is the wire order), ASCII, ≤64 KiB */
+    function canonicalSubmitBody({ nonce, issued_at, expires_at, upstream_base_url, envelope }) {
+      const body = JSON.stringify({
+        nonce, issued_at, expires_at, upstream_base_url,
+        envelope: { alg: envelope.alg, epk: envelope.epk, iv: envelope.iv, ct: envelope.ct },
+      });
+      assertAscii(body, "custody body");
+      if (te.encode(body).length > BODY_MAX_BYTES) throw new Error("custody body exceeds 64 KiB");
+      return body;
+    }
+    function canonicalRevokeBody({ nonce, issued_at, expires_at }) {
+      const body = JSON.stringify({ nonce, issued_at, expires_at });
+      assertAscii(body, "custody revoke body");
+      if (te.encode(body).length > BODY_MAX_BYTES) throw new Error("custody body exceeds 64 KiB");
+      return body;
+    }
+
+    /* ── envelope seal (WebCrypto; subtle + RNG injected) ──
+       uploadPubBytes: 65B uncompressed P-256 point (0x04‖x‖y), pinned by
+       uploadPubkeySha256 in config and re-checked live against /info.
+       JS strings/buffers can't be securely wiped — callers clear the
+       input field after POST as best effort, no stronger promise. */
+    async function encryptEnvelope({ uploadPubBytes, apiKey, aad, subtle, getRandomValues }) {
+      if (!(uploadPubBytes instanceof Uint8Array) || uploadPubBytes.length !== 65 || uploadPubBytes[0] !== 4) {
+        throw new Error("upload pubkey must be a 65-byte uncompressed P-256 point");
+      }
+      const plaintext = JSON.stringify({ api_key: String(apiKey) });
+      assertAscii(plaintext, "api key");
+      const pubKey = await subtle.importKey("raw", uploadPubBytes, { name: "ECDH", namedCurve: "P-256" }, false, []);
+      const eph = await subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+      const z = await subtle.deriveBits({ name: "ECDH", public: pubKey }, eph.privateKey, 256); /* 32B x-coord */
+      const salt = await subtle.digest("SHA-256", te.encode(HKDF_SALT_STRING));
+      const hkdfKey = await subtle.importKey("raw", z, "HKDF", false, ["deriveBits"]);
+      const aesBits = await subtle.deriveBits(
+        { name: "HKDF", hash: "SHA-256", salt, info: te.encode(HKDF_INFO_STRING) }, hkdfKey, 256);
+      const aesKey = await subtle.importKey("raw", aesBits, { name: "AES-GCM" }, false, ["encrypt"]);
+      const iv = getRandomValues(new Uint8Array(12));
+      const ctBuf = await subtle.encrypt(
+        { name: "AES-GCM", iv, additionalData: te.encode(aad), tagLength: 128 }, aesKey, te.encode(plaintext));
+      const epkRaw = new Uint8Array(await subtle.exportKey("raw", eph.publicKey));
+      return {
+        alg: ENVELOPE_ALG,
+        epk: b64urlEncode(epkRaw),
+        iv: b64urlEncode(iv),
+        ct: b64urlEncode(new Uint8Array(ctBuf)), /* ciphertext ‖ 16B tag */
+      };
+    }
+
+    /* ── live pin verification: /info.shared + /attestation vs config ──
+       hashers: { sha256Hex: async (bytes)→hex64, keccak256Hex: (bytes)→hex64 }.
+       Every check becomes a UI row; ANY failure → ok:false (DEPLOYMENT
+       MISMATCH — custody disabled). dstack may omit appId at runtime →
+       fail-closed, never invent. */
+    async function checkRelayPins({ info, attest, cfg, sha256Hex, keccak256Hex }) {
+      const rows = [];
+      const row = (key, ok, detail) => { rows.push({ key, ok: !!ok, detail: String(detail) }); return !!ok; };
+      const sh = info && typeof info === "object" && info.shared && typeof info.shared === "object" ? info.shared : null;
+      if (!sh) {
+        row("shared-mode", false, "/info carries no shared section — this is not a shared-custody relay");
+        return { ok: false, rows, pubBytes: null };
+      }
+      const o = normalizeRelayOrigin(String(sh.origin || ""));
+      row("origin", o.ok && o.origin === cfg.relayOrigin,
+        o.ok ? `${sh.origin}` : `unparseable origin "${sh.origin}"`);
+      row("signer", typeof sh.signer === "string" && sh.signer.toLowerCase() === cfg.expectedSigner,
+        String(sh.signer || "").toLowerCase() === cfg.expectedSigner
+          ? `${sh.signer}`
+          : `relay reports ${sh.signer || "—"} · pinned ${cfg.expectedSigner}`);
+      let pub = null, pubOk = false, hashOk = false, computed = "";
+      try { pub = b64urlToBytes(sh.uploadPubkey); } catch { pub = null; }
+      pubOk = !!pub && pub.length === 65 && pub[0] === 4;
+      if (pubOk) {
+        computed = String(await sha256Hex(pub)).toLowerCase();
+        const declared = String(sh.uploadPubkeySha256 || "").toLowerCase().replace(/^0x/, "");
+        hashOk = computed === cfg.uploadPubkeySha256 && declared === cfg.uploadPubkeySha256;
+      }
+      row("upload-key", pubOk && hashOk,
+        !pubOk ? "uploadPubkey is not a 65-byte uncompressed P-256 point"
+          : hashOk ? `sha256 ${computed.slice(0, 16)}… matches the pinned hash`
+          : `hash mismatch — computed ${computed} · /info declares ${sh.uploadPubkeySha256 || "—"} · pinned ${cfg.uploadPubkeySha256}`);
+      const att = attest && typeof attest === "object" ? attest : null;
+      if (!att) {
+        row("attestation", false, "/attestation unavailable — fail-closed");
+      } else {
+        const appId = String(att.appId || "").toLowerCase().replace(/^0x/, "");
+        row("app-id", !!appId && appId === cfg.appId,
+          appId ? `quote appId matches pin` : "quote carries no appId — fail-closed (never inferred)");
+        row("derived-address", String(att.derivedAddress || "").toLowerCase() === cfg.expectedSigner,
+          String(att.derivedAddress || "").toLowerCase() === cfg.expectedSigner
+            ? `${att.derivedAddress}`
+            : `quote derives ${att.derivedAddress || "—"} · pinned signer ${cfg.expectedSigner}`);
+        let rdOk = false, rdDetail = "unparseable reportData";
+        try {
+          const rd = hexToBytes(att.reportData); /* API shape: 0x + hex */
+          if (rd.length !== 64) {
+            rdDetail = `reportData is ${rd.length} bytes, expected 64`;
+          } else if (!pubOk) {
+            rdDetail = "skipped — upload pubkey unreadable";
+          } else {
+            /* reportData = signer(20B) ‖ zeros(12B) ‖ keccak256(uploadPub65)(32B) */
+            const expect = new Uint8Array(64);
+            expect.set(hexToBytes(cfg.expectedSigner), 0);
+            expect.set(hexToBytes(keccak256Hex(pub)), 32);
+            rdOk = expect.every((v, i) => v === rd[i]);
+            rdDetail = rdOk ? "reportData = signer ‖ zeros ‖ keccak256(uploadPub)" : "reportData binding mismatch";
+          }
+        } catch (e) { rdDetail = `reportData parse failed — ${e.message}`; }
+        row("report-data", rdOk, rdDetail);
+      }
+      return { ok: rows.every((r) => r.ok), rows, pubBytes: pubOk ? pub : null };
+    }
+
+    /* fetch /info + /attestation and run the pin matrix (discovery only —
+       the fetched values are CHECKED against config pins, never pinned) */
+    async function probeSharedRelay(cfg, timeoutMs, hashers) {
+      const [infoR, attR] = await Promise.all([
+        fetchJson(joinUrl(cfg.relayOrigin, "/info"), {}, timeoutMs),
+        fetchJson(joinUrl(cfg.relayOrigin, "/attestation"), {}, timeoutMs),
+      ]);
+      if (infoR.corsOrNetwork || attR.corsOrNetwork) {
+        return { ok: false, unreachable: true, pubBytes: null,
+          rows: [{ key: "reachability", ok: false, detail: `relay unreachable (${(infoR.error || attR.error) === "timeout" ? "timeout" : "network/CORS"})` }] };
+      }
+      if (!infoR.ok || !infoR.body) {
+        return { ok: false, pubBytes: null, rows: [{ key: "info", ok: false, detail: `/info HTTP ${infoR.status}` }] };
+      }
+      if (!attR.ok || !attR.body) {
+        return { ok: false, pubBytes: null, rows: [{ key: "attestation", ok: false, detail: `/attestation HTTP ${attR.status} — fail-closed` }] };
+      }
+      return checkRelayPins({ info: infoR.body, attest: attR.body, cfg, ...hashers });
+    }
+
+    /* ── nonce validation: the relay CHOOSES nonce values — every field
+       is re-checked against the trusted deployment config before the
+       wallet ever sees the message (a tampered nonce is never signed) */
+    function checkNonce(n, { chainId, escrowAddr, registryAddr, relayOrigin }, nowSec) {
+      if (!n || typeof n !== "object") return { ok: false, reason: "empty nonce response" };
+      if (typeof n.nonce !== "string" || !/^0x[0-9a-f]{64}$/.test(n.nonce)) {
+        return { ok: false, reason: "nonce is not 0x + 64 lowercase hex" };
+      }
+      if (!Number.isInteger(n.issued_at) || !Number.isInteger(n.expires_at)) {
+        return { ok: false, reason: "issued_at / expires_at must be integers" };
+      }
+      const win = n.expires_at - n.issued_at;
+      if (!(win > 0 && win <= 600)) return { ok: false, reason: `validity window ${win}s exceeds the 600s bound` };
+      if (nowSec >= n.expires_at) return { ok: false, reason: "nonce already expired — retry for a fresh one" };
+      if (Number(n.chain_id) !== Number(chainId)) {
+        return { ok: false, reason: `nonce chain_id ${n.chain_id} ≠ config ${chainId} — tampered nonce refused` };
+      }
+      if (String(n.escrow_addr || "").toLowerCase() !== String(escrowAddr).toLowerCase()) {
+        return { ok: false, reason: "nonce escrow_addr ≠ config escrowAddr — tampered nonce refused" };
+      }
+      if (String(n.registry_addr || "").toLowerCase() !== String(registryAddr).toLowerCase()) {
+        return { ok: false, reason: "nonce registry_addr ≠ config registryAddr — tampered nonce refused" };
+      }
+      const o = normalizeRelayOrigin(String(n.origin || ""));
+      if (!o.ok || o.origin !== relayOrigin) {
+        return { ok: false, reason: "nonce origin ≠ the pinned relay origin — tampered nonce refused" };
+      }
+      if (String(n.mode || "") !== "shared") return { ok: false, reason: `nonce mode "${n.mode}" ≠ "shared"` };
+      return { ok: true };
+    }
+
+    /* ── Escrow.approveSettleDelegate calldata (the AUTHORIZE button).
+       keccak256TextHex: (utf8 string) → 64 lower hex, no 0x.
+       delegate "0x0…0" revokes. One pinned construction shared by the
+       page and the Node unit test — no parallel encoders to drift. */
+    function delegateCalldata(keccak256TextHex, delegate) {
+      const d = String(delegate || "").toLowerCase();
+      if (!/^0x[0-9a-f]{40}$/.test(d)) throw new Error("delegate must be 0x + 40 hex");
+      const sel = String(keccak256TextHex("approveSettleDelegate(address)")).replace(/^0x/, "").slice(0, 8);
+      return "0x" + sel + "0".repeat(24) + d.slice(2);
+    }
+    const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+    /* ── buyer side: does a chain listing's endpoint denote THE pinned
+       shared relay? Strict origin match — https only, root path only, no
+       userinfo/query/fragment; hostname + effective port compared (URL
+       drops default ports). Other sellers always keep the single-seller
+       receipt rule; the shared signer is NEVER applied to arbitrary
+       endpoints, and /info is never consulted for this (no TOFU). */
+    function matchesSharedRelay(endpoint, relayOrigin) {
+      try {
+        const u = new URL(String(endpoint || ""));
+        const r = new URL(String(relayOrigin || ""));
+        if (u.protocol !== "https:" || r.protocol !== "https:") return false;
+        if (u.username || u.password || u.search || u.hash) return false;
+        if (u.pathname.replace(/\/+$/, "") !== "") return false;
+        return u.host === r.host;
+      } catch { return false; }
+    }
+
+    /* PUBLISH always registers the trusted relay origin as the listing
+       endpoint in shared mode — never the upstream API base URL */
+    const registerEndpoint = (cfg) => cfg.relayOrigin;
+
+    /* ── form-gate predicates (console.js wires these; the Node test
+       drives them through the edit/stale/failure/async-race matrix)
+       plus the catalog RESUME eligibility gate (below) ── */
+    function applyVerifyResult(cur, snap, result) {
+      if (!result || !result.ok) return { applied: false, reason: (result && result.reason) || "verify failed" };
+      if (cur.gen !== snap.gen) {
+        return { applied: false, reason: "upstream URL / key edited while verifying — result discarded; VERIFY again" };
+      }
+      if ((cur.address || "").toLowerCase() !== (snap.address || "").toLowerCase()) {
+        return { applied: false, reason: "wallet account changed while verifying — result discarded; VERIFY again" };
+      }
+      return {
+        applied: true,
+        anchor: { upstream: result.upstream, fingerprint: result.fingerprint, gen: snap.gen, address: (snap.address || "").toLowerCase() },
+      };
+    }
+
+    /* ── catalog RESUME eligibility (refresh / reconnect re-anchoring of
+       the relay-stored catalog). Fail-closed matrix: the stored face may
+       only re-anchor when the connection session is completely untouched —
+       no anchor yet, no URL/key edit since the session baseline
+       (gen === sessionStartGen; resetCustodySession re-baselines, every
+       keystroke bumps gen past it), no failed VERIFY this session, pins
+       currently verified — AND the /status answer must land on the exact
+       generation + wallet it was requested for. gen is monotonic within a
+       page lifetime, so a late response from a previous account or from a
+       disconnect→reconnect cycle (each bumps gen) can never re-anchor an
+       older session's catalog/pins/face. Anything else forces a fresh
+       VERIFY instead of trusting the resumed face. console.js wires this;
+       the Node test drives the positive (first connect / refresh /
+       reconnect) and negative (edit / verify-failure / pins / in-flight
+       race / old-account or same-address late return) matrix. ── */
+    function canResumeCatalog(r) {
+      const v = (k) => (r && typeof r === "object" ? r[k] : undefined);
+      const cur = String(v("currentAddress") || "").toLowerCase();
+      const req = String(v("requestAddress") || "").toLowerCase();
+      if (v("anchor")) return { ok: false, reason: "a catalog is already anchored — resume not needed" };
+      if (v("sessionFailed")) return { ok: false, reason: "a VERIFY failed this session — fix the cause and VERIFY again" };
+      if (v("gen") !== v("sessionStartGen")) return { ok: false, reason: "upstream URL / key edited this session — the stored face is stale; VERIFY again" };
+      if (!v("pinsOk")) return { ok: false, reason: "deployment pins not verified — refusing to trust the stored face" };
+      if (v("requestGen") !== v("gen")) return { ok: false, reason: "inputs or account changed while the status request was in flight — result discarded" };
+      if (!cur || req !== cur) return { ok: false, reason: "wallet account changed — result discarded" };
+      if (v("hasKey") !== true) return { ok: false, reason: "the relay stores no key for this seller" };
+      if (!v("entryCount")) return { ok: false, reason: "the relay-stored catalog is empty" };
+      return { ok: true };
+    }
+
+    function publishReady({ pinsOk, verifyStatus, anchor, gen, address, keyStored, selectedCount, servableCount }) {
+      if (!pinsOk) return { ok: false, reason: "relay deployment pins not verified — refusing to publish through an unverified relay" };
+      if (verifyStatus === "loading") return { ok: false, reason: "verify in flight — wait for the result before publishing" };
+      if (verifyStatus === "error") return { ok: false, reason: "the last VERIFY failed — fix the cause and VERIFY again" };
+      if (verifyStatus !== "ok" || !anchor) return { ok: false, reason: "run VERIFY first — the relay probes the live catalog with your sealed key" };
+      if (anchor.gen !== gen || anchor.address !== (address || "").toLowerCase()) {
+        return { ok: false, reason: "upstream URL / key / account changed after verify — VERIFY again" };
+      }
+      if (!keyStored) return { ok: false, reason: "no upstream key stored at the relay — VERIFY seals and submits it" };
+      if (!servableCount) return { ok: false, reason: "the verified catalog has no servable models for this key — nothing may be listed" };
+      if (!selectedCount) return { ok: false, reason: "check at least one servable model" };
+      return { ok: true };
+    }
+
+    return {
+      b64urlToBytes, bytesToHex, hexToBytes,
+      normalizeUpstreamUrl, normalizeRelayOrigin, validateM15Config,
+      ENVELOPE_ALG, HKDF_SALT_STRING, HKDF_INFO_STRING, BODY_MAX_BYTES,
+      buildCustodyAad, buildCustodySubmitMessage, buildCustodyRevokeMessage,
+      canonicalSubmitBody, canonicalRevokeBody,
+      encryptEnvelope, checkRelayPins, probeSharedRelay, checkNonce,
+      delegateCalldata, ZERO_ADDRESS, matchesSharedRelay, registerEndpoint,
+      applyVerifyResult, canResumeCatalog, publishReady,
+    };
+  })();
 
   /* ══════════════════════════════════════════════════════════
      M11 — EIP-6963 multi-wallet discovery + self-drawn selector.
@@ -1201,6 +1654,57 @@ window.TS = (() => {
     };
   })();
 
+  /* ── policy consent gate (web policy reading consent) ──────
+     Paid seller/buyer actions require an in-session reading consent,
+     bound to BOTH the policy version and the connected wallet address.
+     sessionStorage (per-tab): key "tokenshare.policyConsent.v1", value
+       {"version":"2026-10-08","wallet":"0x…","ts":<epoch ms>}
+     A wallet switch/disconnect, a different wallet, or a POLICY_VERSION
+     bump all invalidate the record → the gate re-arms (re-tick needed).
+     Deliberately NO wallet signature — this is a plain UI-level
+     acknowledgement, nothing on-chain, nothing signed. */
+  const POLICY_VERSION = "2026-10-08";
+  const POLICY_CONSENT_KEY = "tokenshare.policyConsent.v1";
+
+  const policyConsent = (() => {
+    /* sessionStorage access can throw (sandboxed iframe / some file://
+       contexts) and is absent in Node-driven test harnesses — every
+       touch is guarded; a missing store simply means "no consent". */
+    const store = () => {
+      try { return window.sessionStorage || null; } catch { return null; }
+    };
+    const read = () => {
+      const s = store();
+      if (!s) return null;
+      try {
+        const rec = JSON.parse(s.getItem(POLICY_CONSENT_KEY));
+        return rec && typeof rec === "object" ? rec : null;
+      } catch { return null; }
+    };
+    return {
+      version: POLICY_VERSION,
+      key: POLICY_CONSENT_KEY,
+      get: read,
+      set(wallet) {
+        const s = store();
+        if (!s || !wallet) return null;
+        const rec = { version: POLICY_VERSION, wallet: String(wallet), ts: Date.now() };
+        try { s.setItem(POLICY_CONSENT_KEY, JSON.stringify(rec)); } catch { /* blocked storage */ }
+        return rec;
+      },
+      clear() {
+        const s = store();
+        if (s) { try { s.removeItem(POLICY_CONSENT_KEY); } catch { /* blocked storage */ } }
+      },
+      /* valid ONLY for the current policy version AND this exact wallet */
+      isValid(wallet) {
+        const rec = read();
+        if (!rec || rec.version !== POLICY_VERSION || !wallet) return false;
+        return String(rec.wallet || "").toLowerCase() === String(wallet).toLowerCase();
+      },
+    };
+  })();
+
   return {
     cfg, cfgReady, chainIdHex,
     ESCROW_ABI, REGISTRY_ABI, ERC20_ABI, PAYMENT_STATES,
@@ -1219,6 +1723,8 @@ window.TS = (() => {
     decodeEscrowErr, humanizeEscrowErr, lockShortfall,
     txLine, runTx, parseLockedPaymentId,
     locks, disputes, apikeys, relayErrorCopy,
+    policyConsent, POLICY_VERSION, POLICY_CONSENT_KEY,
+    custody,
     wallet, WALLET_RDNS_KEY,
   };
 })();

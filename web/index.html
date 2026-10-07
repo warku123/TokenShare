@@ -41,9 +41,10 @@
         Sellers rent out the spare quota of their <b>official LLM subscription plans</b> —
         a relay holds their own platform key and forwards only to the provider's official
         endpoint. Buyers lock a few cents of USDC on-chain and pay per request. An
-        immutable escrow holds the funds, settlement is priced on real usage in three
+        immutable escrow holds the funds, settlement is priced on relay-reported usage in three
         tiers, and every call comes back with an EIP-712 receipt anyone can verify.
-        No custody, no upgrade keys, no trusted third party.
+        Seller keys stay off-chain; the escrow holds only USDC. Custody modes, receipt limits
+        &amp; refund rules → <a href="policy.html">policy</a>.
       </p>
       <div class="hero-cta rv" style="--d:.2s">
         <a class="btn" href="console.html#buyer">[ OPEN CONSOLE ]</a>
@@ -102,13 +103,15 @@
       <span class="market-entry-l2">every seller read directly from the Registry on-chain — pagination, model filters, operator/model search, price sort</span>
     </a>
 
-    <!-- ══ PROOF — real on-chain artifacts, explorer-verifiable ══ -->
+    <!-- ══ PROOF — historical Escrow v3.1 round · real on-chain artifacts, explorer-verifiable ══ -->
     <div class="proof rv">
       <div class="proof-head">
         <h3>PROOF — DON'T TRUST THE PAGE, CLICK THE CHAIN</h3>
-        <p class="proof-sub">a full deposit → lock → per-call capture → settle round, executed on Monad testnet against Escrow
+        <p class="proof-sub">Historical Escrow v3.1 proof: a full deposit → lock → per-call capture → settle round, executed on Monad testnet against Escrow v3.1
           <a href="https://testnet.monadvision.com/address/0x157C551D145d3c4bBF8f3554c43Fb3C931D71aD5" target="_blank" rel="noopener">0x157C…71aD5 ↗</a>
-          — every link below opens the real transaction.</p>
+          — every link below opens the real transaction. The current Escrow v3.2
+          <a href="https://testnet.monadvision.com/address/0xe4D5Eb0dBDB6DB8063C07ECF7EDFcCdDB9Ad514c" target="_blank" rel="noopener">0xe4D5…514c ↗</a>
+          adds an opt-in settle delegate — now authorized by both live shared-mode sellers (the TEE relay's signer); see <a href="policy.html">policy</a>.</p>
       </div>
       <div class="proof-grid">
         <div class="proof-txs">
@@ -185,7 +188,7 @@
           <span class="fnum">5</span>
           <h3>REFUND</h3>
           <code>refund(paymentId)</code>
-          <p>No settle before the deadline → anyone releases the lock. Buyer made whole, always.</p>
+          <p>No settle before the deadline → anyone releases the lock. The un-captured remainder returns to the buyer.</p>
         </div>
       </div>
     </div>
@@ -297,8 +300,8 @@
     <div class="features">
       <article class="card feat rv">
         <svg class="fico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="4" y="10" width="16" height="10"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/><circle cx="12" cy="15" r="1.5"/></svg>
-        <h3>NO CUSTODY</h3>
-        <p>Official-plan keys live in the seller relay's environment only. Contracts never see a key, a prompt, or a completion. The escrow holds USDC — nothing else.</p>
+        <h3>KEYS OFF-CHAIN</h3>
+        <p>Contracts never see a key, a prompt, or a completion. Single mode: keys live in the seller's own relay. Shared mode (live): sealed inside a platform TEE relay (see <a href="policy.html">policy</a>). The escrow holds USDC — nothing else.</p>
       </article>
       <article class="card feat rv" style="--d:.05s">
         <svg class="fico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg>
@@ -338,7 +341,7 @@
         <p class="foot-line">Built for the Monad Metropolis hackathon — Track: Trust, Identity &amp; AI Infrastructure.<br>Listings on this page are read live from the Registry on Monad testnet.</p>
       </div>
     </div>
-    <p class="foot-fine">No custody. No upgrade keys. No trusted third party. — Prototype on testnet; handles no real funds.</p>
+    <p class="foot-fine">Seller keys stay off-chain (shared mode: sealed in a live platform TEE relay — see <a href="policy.html">policy</a>) · no upgrade keys on the escrow · prototype on testnet; handles no real funds.</p>
   </div>
 </footer>
 

@@ -8,6 +8,36 @@
   const T = window.TS;
   const cfg = T.cfg;
 
+  /* ═══ M15 shared-relay custody — config gate ═══════════════
+     cfg.m15 ABSENT → classic single-seller form, untouched.
+     Present + complete → shared mode: the relay endpoint is pinned
+     (no manual input), VERIFY seals the upstream key to the TEE.
+     Present + malformed → fail-closed (custody disabled, hard error). */
+  const m15v = T.custody.validateM15Config(cfg.m15);
+  const shared = m15v.ok ? m15v.cfg : null;
+  const m15Broken = !shared && cfg.m15 != null;
+
+  const custodyState = {
+    gen: 0,             // bumped by every upstream-URL/key edit + account change — anchors a verified/resumed catalog
+    sessionStartGen: 0, // gen baseline at the last session reset — "session untouched" = gen still equals it (resume gate)
+    sessionFailed: false, // a VERIFY failed this connection session — blocks catalog resume until a fresh VERIFY/reset
+    pinsOk: false,      // live /info + /attestation pin matrix passed against config
+    anchor: null,       // {kind:"verified"|"resumed", upstream|null, fingerprint, gen, address}
+    keyStored: false,   // this-session POST success, or relay /status has_key
+    fingerprint: null,  // relay-reported sha256 of the stored key (display only)
+    delegate: undefined, // chain settleDelegateOf(me): undefined = unread, else lower-hex
+    statusInfo: null,   // last public /sellers/{me}/status body (display only — never identity authority)
+  };
+  /* injected hashers — the custody core stays environment-agnostic */
+  const hashers = {
+    sha256Hex: async (bytes) => T.custody.bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))),
+    keccak256Hex: (bytes) => ethers.keccak256(bytes).slice(2),
+    keccak256TextHex: (s) => ethers.keccak256(ethers.toUtf8Bytes(s)).slice(2),
+  };
+  /* the register endpoint: pinned relay origin in shared mode, else the
+     manual input. EVERY register/preview/gate read goes through here. */
+  const formEndpoint = () => (shared ? shared.relayOrigin : $("s-endpoint").value.trim());
+
   document.documentElement.classList.add("js");
 
   const $ = (id) => document.getElementById(id);
@@ -119,8 +149,12 @@
     if (mirror) mirror.textContent = "see wallet bar ↑";
     $("b-escrow-bal").textContent = "—";
     $("wallet-faucets").hidden = true;
-    syncLockGate();
+    /* policy consent is wallet-bound — disconnect / account-switch
+       invalidates it (record dropped, re-tick required) */
+    T.policyConsent.clear();
+    syncPolicyGate(); /* consent checkbox back to its disconnected (disabled) face */
     renderWallet();
+    resetCustodySession(); /* M15: account context wiped with the connection */
     loadMyListing();
   }
 
@@ -215,7 +249,11 @@
     state.walletName = (sel && sel.info && sel.info.name) || "";
     renderNet(true);
     renderWallet();
+    syncPolicyGate(); /* fresh address → consent re-resolves (new wallet = fresh tick) */
     await Promise.all([refreshBalances(), loadMyListing(), loadListingsIntoSelects()]);
+    /* M15: fresh account context → re-run the live pin check, read the
+       delegate from chain, and offer the relay-stored catalog (resume) */
+    if (shared) refreshCustodySession().catch(() => {});
   }
 
   /* CONNECT → the EIP-6963 selector modal; the single
@@ -298,6 +336,103 @@
     btn.disabled = true;
     try { await fn(); } finally { btn.disabled = false; }
   };
+
+  /* ═══ policy consent gate (web policy reading consent) ═════
+     Paid seller/buyer actions require the reading consent bound to the
+     policy version + connected wallet. Storage + validity live in
+     common.js T.policyConsent (sessionStorage "tokenshare.policyConsent.v1"
+     = {"version","wallet","ts"}; a version bump / account switch /
+     disconnect invalidates it → re-tick required). Two layers: gated
+     buttons render disabled with a hint, AND every paid handler
+     re-checks at entry — a devtools re-enable throws
+     PolicyConsentRequired and never reaches a tx / signature popup.
+     Exit paths stay open: refund / withdraw / deactivate / removeModel /
+     buyer key revoke / seller custody key+delegate revoke / disconnect /
+     switch. The consent itself never asks for a wallet signature. */
+  class PolicyConsentRequired extends Error {
+    constructor() {
+      super("policy consent required — tick the Policy & Risks checkbox above first");
+      this.name = "PolicyConsentRequired";
+      this.code = "POLICY_CONSENT_REQUIRED";
+    }
+  }
+  const policyBox = () => $("policy-agree");
+  const POLICY_GATE_TITLE =
+    "disabled — tick the Policy & Risks consent checkbox (top of page) to enable this paid action";
+  const consentOk = () => T.policyConsent.isValid(state.address);
+  const requirePolicyConsent = () => { if (!consentOk()) throw new PolicyConsentRequired(); };
+
+  /* flash the consent bar + focus the checkbox — the guard's UX tail */
+  const consentNudge = () => {
+    const bar = $("policy-consent");
+    if (bar) {
+      bar.classList.remove("flash-bd");
+      void bar.offsetWidth;
+      bar.classList.add("flash-bd");
+      bar.scrollIntoView({ block: "nearest" });
+    }
+    const cb = policyBox();
+    if (cb && !cb.disabled) cb.focus({ preventScroll: true });
+  };
+
+  /* guard wrapper for PAID actions only: consent gate runs first; any
+     other error keeps the original guard() semantics (propagates) */
+  const guardPaid = (btn, fn) => {
+    const p = guard(btn, async () => {
+      try { requirePolicyConsent(); await fn(); }
+      catch (e) {
+        if (e instanceof PolicyConsentRequired) { consentNudge(); return; }
+        throw e;
+      }
+    });
+    /* guard() re-enabled the button in its finally — re-apply the consent
+       disabled-state (the checkbox may have flipped while the tx ran) */
+    return p.finally(syncPolicyGate);
+  };
+
+  /* Statically-wired paid-action buttons. b-lock-btn is deliberately
+     absent — syncLockGate co-owns its disabled state (balance gate ∨
+     consent gate). Dynamic [ MINT API KEY ] rows gate inside
+     renderSessionLocks. Exit paths (revokes / deactivations) are never
+     listed here. Only buttons THIS gate disabled get re-enabled —
+     pre-existing disables (e.g. m15Broken s-verify-btn) stay untouched. */
+  const POLICY_GATED_BTNS = ["s-submit", "s-verify-btn", "sc-authorize", "b-dep-btn", "c-send"];
+  function syncPolicyGate() {
+    const ok = consentOk();
+    const cb = policyBox();
+    if (cb) {
+      cb.disabled = !state.address; /* consent binds to a wallet */
+      cb.checked = ok;              /* mirror the stored record */
+      const hint = $("policy-consent-hint");
+      if (hint) {
+        hint.textContent = state.address
+          ? "required before paid actions (register · custody verify/authorize · deposit · lock · mint key · calls) — refunds, withdrawals, deactivation and revokes stay open."
+          : "connect a wallet to confirm — required before paid actions (register · custody verify/authorize · deposit · lock · mint key · calls). refunds, withdrawals, deactivation and revokes stay open.";
+      }
+    }
+    for (const id of POLICY_GATED_BTNS) {
+      const b = $(id);
+      if (!b) continue;
+      if (!ok) {
+        if (!b.disabled) { b.disabled = true; b.dataset.policyDisabled = "1"; }
+        if (!b.title) { b.title = POLICY_GATE_TITLE; b.dataset.policyTitle = "1"; }
+      } else {
+        if (b.dataset.policyDisabled) { b.disabled = false; delete b.dataset.policyDisabled; }
+        if (b.dataset.policyTitle) { b.removeAttribute("title"); delete b.dataset.policyTitle; }
+      }
+    }
+    renderSessionLocks(); /* MINT rows mirror the consent state */
+    syncLockGate();       /* lock button: balance gate ∨ consent gate */
+  }
+
+  if (policyBox()) policyBox().addEventListener("change", () => {
+    const cb = policyBox();
+    if (!state.address) { cb.checked = false; return; } /* cb is disabled then — belt */
+    if (cb.checked) T.policyConsent.set(state.address);
+    else T.policyConsent.clear();
+    syncPolicyGate();
+  });
+
   const needConfig = () => {
     if (T.cfgReady()) return false;
     configBanner.hidden = false;
@@ -426,7 +561,8 @@
   const modelsState = {
     status: "idle",   // idle | loading | ok | error
     base: null,       // endpoint the accessible set was verified against
-    accessible: [],   // relay-tested model face (upstream /v1/models)
+    accessible: [],   // relay-tested model face (upstream /v1/models) — shared mode: SERVABLE names only
+    entries: null,    // shared mode: full catalog [{model, servable, reason}] — non-servable render greyed, unselectable
     checked: new Set(), // authoritative user picks — survives loading re-renders
     reason: "",       // human reason when status === "error"
   };
@@ -543,26 +679,53 @@
     return "run LOAD FROM RELAY first — only models the relay can actually call may be listed (no phantom models)";
   }
 
+  /* M15 shared-mode PUBLISH gate: the pure publishReady predicate
+     (unit-tested in scripts/check-custody-web.mjs) + the catalog-source
+     pin. Failed verify / edited URL-or-key / account switch / zero
+     servable models all land here as hard blocks. */
+  function sharedGate() {
+    const g = T.custody.publishReady({
+      pinsOk: custodyState.pinsOk,
+      verifyStatus: modelsState.status,
+      anchor: custodyState.anchor,
+      gen: custodyState.gen,
+      address: state.address,
+      keyStored: custodyState.keyStored,
+      selectedCount: selectedModels().length,
+      servableCount: modelsState.accessible.length,
+    });
+    if (g.ok && modelsState.base !== shared.relayOrigin) {
+      return { ok: false, reason: "catalog source drifted from the pinned relay origin — VERIFY again" };
+    }
+    return g;
+  }
+
   function renderModelNote() {
     const note = $("s-models-note");
-    const endpoint = $("s-endpoint").value.trim();
+    const endpoint = formEndpoint();
     if (modelsState.status === "loading") {
       note.className = "model-verify-note";
-      note.textContent = `GET ${modelsState.base}/verify-upstream …`;
+      note.textContent = shared ? "VERIFY in flight — the relay is probing the live catalog …" : `GET ${modelsState.base}/verify-upstream …`;
     } else if (modelsState.status === "error") {
       note.className = "model-verify-note err";
-      note.textContent = `✗ ${modelsState.reason} — fix and re-run the precheck`;
+      note.textContent = `✗ ${modelsState.reason} — fix and re-run the ${shared ? "VERIFY" : "precheck"}`;
     } else if (modelsState.status === "ok") {
       if (endpoint !== modelsState.base) {
         note.className = "model-verify-note warn";
         note.textContent = `⚠ endpoint changed (prechecked ${T.hostOf(modelsState.base)}) — re-run before submitting`;
+      } else if (shared) {
+        const greyed = (modelsState.entries || []).filter((e) => !e.servable).length;
+        note.className = "model-verify-note ok";
+        note.textContent = `✓ TEE-verified catalog — ${modelsState.accessible.length} servable model(s)${greyed ? ` · ${greyed} greyed (this key cannot serve them)` : ""} — pick from servable only`;
       } else {
         note.className = "model-verify-note ok";
         note.textContent = `✓ ${T.hostOf(modelsState.base)} can actually call ${modelsState.accessible.length} model(s) — pick from these only`;
       }
     } else {
       note.className = "model-verify-note";
-      note.textContent = "not prechecked yet — load the real callable model face from the relay before submitting";
+      note.textContent = shared
+        ? "not verified yet — run [ VERIFY + SEAL KEY ] in KEY CUSTODY above; only catalog models the relay can actually call become checkable"
+        : "not prechecked yet — load the real callable model face from the relay before submitting";
     }
   }
 
@@ -570,8 +733,13 @@
     const zone = $("s-model-checks");
     $("s-load-models").disabled = modelsState.status === "loading";
     if (modelsState.status === "ok") {
-      zone.innerHTML = modelsState.accessible.map((m) =>
-        `<label class="mcheck"><input type="checkbox" name="s-model" value="${T.esc(m)}"${modelsState.checked.has(m) ? " checked" : ""}><span>${T.esc(m)}</span></label>`
+      /* shared mode renders the FULL catalog: non-servable models are
+         greyed, disabled, and carry the relay's reason — visible but
+         never selectable, so a key's real capability boundary shows */
+      zone.innerHTML = (modelsState.entries || modelsState.accessible.map((m) => ({ model: m, servable: true }))).map((e) =>
+        e.servable
+          ? `<label class="mcheck"><input type="checkbox" name="s-model" value="${T.esc(e.model)}"${modelsState.checked.has(e.model) ? " checked" : ""}><span>${T.esc(e.model)}</span></label>`
+          : `<label class="mcheck off" title="${T.esc(e.reason || "the stored key cannot serve this model")}"><input type="checkbox" disabled><span>${T.esc(e.model)}</span></label>`
       ).join("");
     } else {
       zone.innerHTML = "";
@@ -723,13 +891,19 @@
   const fmtTriple = (p) => (p ? `(${p.c ?? "?"}, ${p.i ?? "?"}, ${p.o ?? "?"})` : "(?)");
 
   function updatePreview() {
-    const endpoint = $("s-endpoint").value.trim();
+    const endpoint = formEndpoint();
     const { models, prices, bad } = collectPrices();
     const active = $("s-active").checked;
     const lines = [];
     const mine = state.myListing;
     const btn = $("s-submit");
-    if (active && !modelsGateOk(endpoint)) {
+    if (active && shared) {
+      /* shared mode: PUBLISH is blocked until the full custody gate
+         passes — pins verified, catalog fresh-anchored, key stored,
+         ≥1 servable model checked */
+      const g = sharedGate();
+      if (!g.ok) { lines.push(`<span class="t-a">! ${T.esc(g.reason)}</span>`); lines.push(""); }
+    } else if (active && !modelsGateOk(endpoint)) {
       lines.push(`<span class="t-a">! ${T.esc(gateReason())}</span>`);
       lines.push("");
     }
@@ -818,8 +992,13 @@
     txbox.appendChild(btn);
   }
   /* after a successful register/updateModelPrice: refresh listing + re-run the
-     inline verify so chips & diagnostics reflect the new on-chain truth */
-  const reverifyAfterTx = (endpoint) => { runVerify(endpoint).catch(() => {}); };
+     inline verify so chips & diagnostics reflect the new on-chain truth.
+     Shared mode has no /verify-upstream precheck — the custody status
+     (listing_bound / catalog) refreshes instead. */
+  const reverifyAfterTx = (endpoint) => {
+    if (shared) { refreshCustodyStatus().catch(() => {}); return; }
+    runVerify(endpoint).catch(() => {});
+  };
 
   /* multi-tx update flow: models after a failure are not attempted —
      list them as skipped so the partial state is explicit */
@@ -831,20 +1010,31 @@
     }
   }
 
-  $("s-submit").addEventListener("click", () => guard($("s-submit"), async () => {
+  $("s-submit").addEventListener("click", () => guardPaid($("s-submit"), async () => {
     if (needWallet() || needConfig()) return;
     const txbox = $("s-tx");
     txbox.innerHTML = "";
-    const endpoint = $("s-endpoint").value.trim();
+    const endpoint = formEndpoint(); /* shared mode: the pinned relay origin, never the upstream URL */
     const { models, prices, bad } = collectPrices();
     const active = $("s-active").checked;
 
     if (active) {
       if (!endpoint) return formErr(txbox, "endpoint required (https://…:8787)");
-      if (!modelsGateOk(endpoint)) return formErr(txbox, gateReason());
-      if (!models.length) return formErr(txbox, "check at least one relay-verified model");
+      if (shared) {
+        const g = sharedGate();
+        if (!g.ok) return formErr(txbox, g.reason);
+      } else if (!modelsGateOk(endpoint)) return formErr(txbox, gateReason());
+      if (!models.length) return formErr(txbox, shared ? "check at least one servable catalog model" : "check at least one relay-verified model");
       if (bad.length) return formErr(txbox, `${bad.join(", ")} — ${PRICE_ERR} · prices are USDC per 1M tokens`);
     }
+    /* shared mid-flight re-check: the user can edit URL/key (or switch
+       account) while a wallet popup is open — every signing leg of the
+       register paths re-validates the custody gate right before it sends */
+    const sharedRecheck = () => {
+      if (!shared) return null;
+      const g = sharedGate();
+      return g.ok ? null : `form changed mid-flight (${g.reason}) — nothing more was sent; re-review and submit again`;
+    };
 
     const reg = T.registry(state.signer);
     const mine = state.myListing;
@@ -863,6 +1053,8 @@
              queue and mark the rest skipped */
           const changed = changedModels(mine, models, prices);
           if (!changed.length) return formErr(txbox, "every model price matches on-chain — nothing to send");
+          const staleU = sharedRecheck();
+          if (staleU) return formErr(txbox, staleU);
           for (let idx = 0; idx < changed.length; idx++) {
             const m = changed[idx];
             const p = prices.get(m);
@@ -879,6 +1071,8 @@
            (register carries the full parallel Price[] in one atomic tx) */
         const rcpt1 = await T.runTx(T.txLine(txbox, "deactivate() — step 1/2"), reg.deactivate());
         if (!rcpt1) return;
+        const stale2 = sharedRecheck();
+        if (stale2) return formErr(txbox, `deactivate already sent · ${stale2}`);
         const pf = await preflight(() => reg.register.staticCall(endpoint, models, priceArr));
         if (pf) { formErr(txbox, pf.text); return; }
         const rcpt2 = await T.runTx(T.txLine(txbox, "register(…) — step 2/2"), reg.register(endpoint, models, priceArr));
@@ -886,6 +1080,8 @@
         return;
       }
       if (active) {
+        const staleR = sharedRecheck();
+        if (staleR) return formErr(txbox, staleR);
         const pf = await preflight(() => reg.register.staticCall(endpoint, models, priceArr));
         if (pf) {
           formErr(txbox, pf.text);
@@ -1097,6 +1293,561 @@
   /* — upstream precheck card — removed (merged into the register form as
      the inline LOAD FROM RELAY step; see runVerify / renderVerifyDetail) — */
 
+  /* ═══ M15 shared-relay custody — seller side ════════════════
+     Active only when config.js carries a complete m15 block. The flow:
+       upstreamBaseURL + API key → [ VERIFY + SEAL KEY ]
+         → live pin check (/info + /attestation vs config pins)
+         → nonce (re-validated against config before any signature)
+         → in-browser envelope seal to the pinned TEE upload key
+         → EIP-191 custody message → wallet signature → POST /sellers/keys
+         → relay probes the live catalog → checkbox models + prices
+       → PUBLISH (register endpoint = pinned relay origin, automatic)
+       → AUTHORIZE (separate explicit tx: approveSettleDelegate).
+     Editing URL/key or switching account stales the verified catalog;
+     a failed verify blocks PUBLISH. */
+
+  const setVerifyNote = (text, cls) => {
+    const n = $("s-verify-note");
+    if (!n) return;
+    n.className = "model-verify-note" + (cls ? " " + cls : "");
+    n.textContent = text;
+  };
+
+  /* every keystroke in the upstream URL / key fields bumps the input
+     generation → a verified/resumed catalog anchored to an older
+     generation is stale and PUBLISH blocks until a fresh VERIFY */
+  function markCustodyEdited() {
+    custodyState.gen++;
+    if (custodyState.anchor && custodyState.anchor.gen !== custodyState.gen) {
+      setVerifyNote("⚠ upstream URL / key edited — the catalog below is stale; VERIFY again to publish", "warn");
+    }
+    updatePreview();
+  }
+
+  /* account context wipe (connect/switch/disconnect): new generation,
+     anchor + stored-key flags cleared, key field emptied programmatically
+     (no input event — a programmatic clear must not itself mark stale) */
+  function resetCustodySession() {
+    if (!shared && !m15Broken) return;
+    custodyState.gen++;
+    custodyState.sessionStartGen = custodyState.gen; /* session baseline — resume requires gen to still equal it */
+    custodyState.sessionFailed = false;
+    custodyState.anchor = null;
+    custodyState.keyStored = false;
+    custodyState.fingerprint = null;
+    custodyState.statusInfo = null;
+    custodyState.delegate = undefined;
+    custodyState.pinsOk = false;
+    const keyEl = $("s-upstream-key");
+    if (keyEl) keyEl.value = "";
+    if (shared) {
+      modelsState.status = "idle";
+      modelsState.base = null;
+      modelsState.accessible = [];
+      modelsState.entries = null;
+      modelsState.checked = new Set();
+      modelsState.reason = "";
+      renderModelZone();
+      $("s-verify-detail").innerHTML = "";
+      setVerifyNote("");
+    }
+  }
+
+  async function refreshCustodySession() {
+    resetCustodySession();
+    await refreshCustodyStatus();
+  }
+
+  /* pin matrix → the custody card. Honest trust boundary: the quote is
+     self-reported by the relay; the operator's offline verification
+     (verifier/date/digest) is pinned in config and displayed as such —
+     this page re-checks the LIVE binding, never claims a fresh DCAP proof */
+  function renderPins(rows) {
+    const allOk = rows.length > 0 && rows.every((r) => r.ok);
+    $("sc-pins").innerHTML =
+      `<div class="kv"><span>DEPLOYMENT PINS</span><b>${allOk
+        ? `<span class="ok">✓ live relay matches the pinned config</span>`
+        : `<span class="bad">✗ DEPLOYMENT MISMATCH — custody disabled, do not submit keys</span>`}</b></div>` +
+      rows.map((r) =>
+        `<div class="kv"><span>${T.esc(r.key.toUpperCase())}</span><b class="${r.ok ? "ok" : "bad"}">${r.ok ? "✓ " : "✗ "}${T.esc(r.detail)}</b></div>`
+      ).join("") +
+      `<p class="fld-hint">attestation evidence (pinned by the operator): quote verified via ${T.esc(shared.evidence.verifier)} ` +
+      `on ${T.esc(shared.evidence.verifiedAt)} · digest <span class="mono">${T.esc(shared.evidence.digest.slice(0, 16))}…</span> — ` +
+      `the quote is self-reported by the relay; this page re-checks the live binding above and does not re-run DCAP proof verification.</p>`;
+  }
+
+  /* custody status cluster — chain truth for the delegate row, public
+     relay /status for the rest (display only; pins above are the
+     identity authority) */
+  function renderCustodyStatus() {
+    const box = $("sc-status");
+    if (!shared) { box.innerHTML = ""; return; }
+    const st = custodyState.statusInfo;
+    const fp = custodyState.fingerprint;
+    const rows = [];
+    rows.push(`<div class="kv"><span>STORED KEY</span><b>${custodyState.keyStored
+      ? `<span class="ok">✓ on file at the relay</span>${fp ? ` · <span class="mono" title="key fingerprint (sha256)">${T.esc(fp.slice(0, 12))}…</span>` : ""}`
+      : `<span class="dim">none — VERIFY seals + submits it</span>`}</b></div>`);
+    if (st && st.upstream_host) {
+      rows.push(`<div class="kv"><span>UPSTREAM (STORED)</span><b class="mono">${T.esc(st.upstream_host)} ` +
+        `<span class="${st.upstream_official === false ? "bad" : "ok"}">${st.upstream_official === false ? "· NOT official" : "· official"}</span></b></div>`);
+    }
+    if (st) {
+      rows.push(`<div class="kv"><span>LISTING BIND</span><b>${st.listing_bound
+        ? `<span class="ok">✓ bound${st.listing_active === false ? " · inactive" : " · active"}</span>`
+        : `<span class="dim">not bound — PUBLISH registers the listing below</span>`}</b></div>`);
+      if (st.updated_at) rows.push(`<div class="kv"><span>RELAY STATUS AT</span><b class="mono dim">${T.esc(String(st.updated_at))}</b></div>`);
+    }
+    const d = custodyState.delegate;
+    if (!state.address) {
+      rows.push(`<div class="kv"><span>DELEGATE</span><b class="dim">connect a wallet — the chain truth reads with it</b></div>`);
+    } else if (d === undefined) {
+      rows.push(`<div class="kv"><span>DELEGATE</span><b class="dim">unreadable — the on-chain escrow may predate M15</b></div>`);
+    } else if (!d || d === T.custody.ZERO_ADDRESS) {
+      rows.push(`<div class="kv"><span>DELEGATE</span><b class="dim">none — the relay cannot settle for you yet · AUTHORIZE below</b></div>`);
+    } else if (d === shared.expectedSigner) {
+      rows.push(`<div class="kv"><span>DELEGATE</span><b class="ok">✓ authorized — pinned relay signer <span class="mono">${T.esc(T.truncAddr(d))}</span></b></div>`);
+    } else {
+      rows.push(`<div class="kv"><span>DELEGATE</span><b class="bad">⚠ authorized to <span class="mono">${T.esc(T.truncAddr(d))}</span> — NOT the pinned signer; revoke recommended</b></div>`);
+    }
+    box.innerHTML = rows.join("");
+    const hasDelegate = d !== undefined && d && d !== T.custody.ZERO_ADDRESS;
+    $("sc-authorize").hidden = !(custodyState.pinsOk && d !== shared.expectedSigner);
+    $("sc-revoke-delegate").hidden = !hasDelegate;
+    $("sc-revoke-key").hidden = !custodyState.keyStored;
+  }
+
+  async function refreshDelegateRow() {
+    if (!shared || !state.address) return;
+    try {
+      const d = await T.escrow(T.readProvider()).settleDelegateOf(state.address);
+      if (!state.address) return;
+      custodyState.delegate = String(d).toLowerCase();
+    } catch { custodyState.delegate = undefined; } /* pre-M15 escrow → reverts */
+  }
+
+  /* nonce: fetched per operation (single-use), then RE-VALIDATED against
+     the trusted deployment config — a tampered nonce is never signed */
+  async function fetchValidatedNonce(meLower) {
+    const r = await T.fetchJson(T.joinUrl(shared.relayOrigin, `/sellers/nonce/${meLower}`), {}, 10000);
+    if (r.corsOrNetwork) return { err: `relay unreachable (${r.error === "timeout" ? "timeout" : "network/CORS"})` };
+    if (!r.ok || !r.body) return { err: `nonce endpoint HTTP ${r.status}` };
+    const chk = T.custody.checkNonce(r.body, {
+      chainId: cfg.chainId, escrowAddr: cfg.escrowAddr, registryAddr: cfg.registryAddr,
+      relayOrigin: shared.relayOrigin,
+    }, Math.floor(Date.now() / 1000));
+    if (!chk.ok) return { err: `nonce rejected — ${chk.reason}` };
+    return { nonce: r.body };
+  }
+
+  /* relay custody error codes → grounded copy; relay detail rides along
+     length-capped and escaped — never echo the key ourselves */
+  function custodyHttpError(r) {
+    /* FastAPI carries the protocol code in `detail` (never key material);
+       some proxies wrap as {error|code}. `detail` shown separately only
+       when it is NOT the code itself. */
+    const rawDetail = r.body && typeof r.body === "object" && r.body.detail ? String(r.body.detail).slice(0, 200) : "";
+    const code = (r.body && typeof r.body === "object" &&
+      (r.body.error || r.body.code)) ? String(r.body.error || r.body.code) : rawDetail;
+    const byCode = {
+      bad_request: "the relay rejected the request shape (bad_request)",
+      envelope_invalid: "the sealed envelope failed decryption or binding checks inside the enclave (envelope_invalid)",
+      upstream_not_official: "not an official platform upstream (upstream_not_official) — the relay enforces the allowlist",
+      upstream_key_rejected: "the upstream platform rejected this key (upstream_key_rejected) — check it, then VERIFY again",
+      unauthorized: "signature check failed at the relay (unauthorized) — sign with the connected seller wallet",
+      nonce_invalid: "nonce rejected (nonce_invalid) — retry VERIFY for a fresh one",
+      origin_mismatch: "the relay rejected this page's origin (origin_mismatch) — the relay deployment must allow this frontend origin (its origin allowlist / CORS configuration); nothing was sent",
+      upstream_unreachable: "the relay could not reach the upstream platform (upstream_unreachable) — check the base URL",
+      keystore_unavailable: "the relay could not persist the key (keystore_unavailable) — the previous key is preserved; retry",
+      not_shared_mode: "this relay is not running in shared-custody mode (not_shared_mode)",
+    };
+    const base = byCode[code] || `HTTP ${r.status}${code ? ` (${code})` : ""}`;
+    return rawDetail && rawDetail !== code ? `${base} — ${rawDetail}` : base;
+  }
+
+  /* a failed verify blocks PUBLISH (modelsState error propagates through
+     sharedGate) and leaves no anchor behind — it also marks the session
+     failed so the catalog-resume gate refuses to auto-restore the stored
+     face until a fresh VERIFY (or a new connect session) lands */
+  function custodyFail(reason) {
+    modelsState.status = "error";
+    modelsState.reason = reason;
+    modelsState.accessible = [];
+    modelsState.entries = null;
+    custodyState.sessionFailed = true;
+    renderModelZone();
+    setVerifyNote(`✗ ${reason}`, "err");
+  }
+
+  /* async-race abort: edits / account switch landed mid-flight — discard
+     the in-flight result without destroying a previously stored anchor's
+     chips beyond what the generation bump already stales */
+  function staleAbort(reason) {
+    modelsState.status = custodyState.anchor ? "ok" : "idle";
+    if (!custodyState.anchor) { modelsState.accessible = []; modelsState.entries = null; }
+    renderModelZone();
+    setVerifyNote(`⚠ ${reason}`, "warn");
+  }
+
+  function sanitizeCatalog(raw) {
+    if (!Array.isArray(raw)) return [];
+    const out = [];
+    for (const e of raw) {
+      if (!e || typeof e !== "object") continue;
+      const m = typeof e.model === "string" ? e.model.trim() : "";
+      if (!m) continue;
+      /* fail-closed: only an explicit servable:true is selectable */
+      out.push({ model: m, servable: e.servable === true, reason: typeof e.reason === "string" ? e.reason.slice(0, 160) : "" });
+    }
+    return out;
+  }
+
+  function renderSharedVerifyDetail(b, entries, normUrl) {
+    const bad = entries.filter((e) => !e.servable);
+    $("s-verify-detail").innerHTML =
+      `<div class="kv"><span>UPSTREAM</span><b class="mono wrap-anywhere">${T.esc(normUrl)} ` +
+        `<span class="${b.official === false ? "bad" : "ok"}">${b.official === false ? "· NOT official" : "· official"}</span></b></div>` +
+      `<div class="kv"><span>KEY FINGERPRINT</span><b class="mono" title="sha256 of the stored key — click-free display only">${T.esc(b.key_fingerprint.slice(0, 16))}…</b></div>` +
+      `<div class="kv"><span>CATALOG</span><b>${entries.length
+        ? entries.map((e) => `<span class="mtag${e.servable ? "" : " off"}"${e.servable ? "" : ` title="${T.esc(e.reason || "not servable")}"`}>${T.esc(e.model)}</span>`).join(" ")
+        : "—"}</b></div>` +
+      (bad.length
+        ? `<div class="kv"><span>NOT SERVABLE</span><b class="bad">${bad.map((e) => `<span class="mtag" title="${T.esc(e.reason || "not servable")}">${T.esc(e.model)}</span>`).join(" ")}</b></div>`
+        : "") +
+      `<div class="kv"><span>LISTING BIND</span><b>${b.listing_bound ? "✓ bound at the relay" : "not bound yet — PUBLISH registers below"}</b></div>` +
+      `<div class="kv"><span>DELEGATE</span><b>${b.delegate_authorized ? "✓ authorized" : "not authorized — AUTHORIZE in KEY CUSTODY after PUBLISH"}</b></div>`;
+  }
+
+  /* VERIFY = pin re-check → nonce → in-browser seal → sign → POST →
+     live catalog. The single source of a publishable shared catalog. */
+  async function runSharedVerify() {
+    if (needWallet() || needConfig() || !shared) return;
+    if (!custodyState.pinsOk) {
+      custodyFail("deployment pins not verified — refusing to seal a key to an unverified relay");
+      return;
+    }
+    const nz = T.custody.normalizeUpstreamUrl($("s-upstream-url").value);
+    if (!nz.ok) { custodyFail(`upstream base URL rejected — ${nz.reason}`); return; }
+    const apiKey = $("s-upstream-key").value.trim();
+    if (!apiKey) {
+      custodyFail("paste the upstream API key — it is sealed to the pinned TEE key inside this browser and never stored");
+      return;
+    }
+
+    const g0 = custodyState.gen;
+    const me = (state.address || "").toLowerCase();
+    const stillCurrent = () => custodyState.gen === g0 && (state.address || "").toLowerCase() === me;
+    const wasOk = modelsState.status === "ok"; /* before the loading flip */
+    modelsState.status = "loading";
+    modelsState.base = shared.relayOrigin;
+    renderModelZone();
+
+    /* 1 — live pin re-check (pins can drift between page load and now) */
+    setVerifyNote("step 1/4 · re-checking the live relay against the pinned deployment …", "");
+    const pr = await T.custody.probeSharedRelay(shared, 12000, hashers);
+    if (!stillCurrent()) { staleAbort("inputs or account changed while verifying — result discarded; VERIFY again"); return; }
+    renderPins(pr.rows);
+    custodyState.pinsOk = pr.ok;
+    if (!pr.ok) {
+      custodyFail("DEPLOYMENT MISMATCH — the live relay does not match the pinned config; the key was NOT sent");
+      return;
+    }
+
+    /* 2 — nonce, validated against config before any signature */
+    setVerifyNote("step 2/4 · fetching a one-time nonce …", "");
+    const nr = await fetchValidatedNonce(me);
+    if (!stillCurrent()) { staleAbort("inputs or account changed while verifying — result discarded; VERIFY again"); return; }
+    if (nr.err) { custodyFail(nr.err); return; }
+    const n = nr.nonce;
+
+    /* 3 — seal the key in-browser (ECDH P-256 → HKDF-SHA256 → AES-256-GCM) */
+    setVerifyNote("step 3/4 · sealing the key in-browser (ECDH P-256 → HKDF-SHA256 → AES-256-GCM) …", "");
+    const fields = {
+      seller: me, chain: cfg.chainId,
+      escrow: cfg.escrowAddr.toLowerCase(), registry: cfg.registryAddr.toLowerCase(),
+      relay: shared.relayOrigin, upstream: nz.url,
+      nonce: n.nonce, issued: n.issued_at, expires: n.expires_at,
+    };
+    const aad = T.custody.buildCustodyAad(fields);
+    let envelope, body, bodySha;
+    try {
+      envelope = await T.custody.encryptEnvelope({
+        uploadPubBytes: pr.pubBytes, apiKey, aad,
+        subtle: crypto.subtle, getRandomValues: (b) => crypto.getRandomValues(b),
+      });
+      body = T.custody.canonicalSubmitBody({
+        nonce: n.nonce, issued_at: n.issued_at, expires_at: n.expires_at,
+        upstream_base_url: nz.url, envelope,
+      });
+      bodySha = await hashers.sha256Hex(new TextEncoder().encode(body));
+    } catch (e) { custodyFail(`envelope assembly failed — ${e.message || e}`); return; }
+    const msg = T.custody.buildCustodySubmitMessage({ ...fields, bodySha256: bodySha });
+
+    /* 4 — wallet signature over the exact custody message, then POST the
+       exact body bytes that were hashed into it */
+    setVerifyNote("step 4/4 · sign the custody message in your wallet …", "");
+    let sig;
+    try { sig = await state.signer.signMessage(msg); }
+    catch (e) {
+      custodyFail(`signing ${(e && e.code === "ACTION_REJECTED") ? "rejected in wallet" : "failed"} — ${T.esc((e && (e.shortMessage || e.message)) || "")} · the key was NOT sent`);
+      return;
+    }
+    if (!stillCurrent()) { staleAbort("inputs or account changed while signing — nothing was sent; VERIFY again"); return; }
+
+    setVerifyNote("POST /sellers/keys — the enclave verifies, stores, then probes the live catalog …", "");
+    const r = await T.fetchJson(T.joinUrl(shared.relayOrigin, "/sellers/keys"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Tokenshare-Seller": me, "X-Tokenshare-Signature": sig },
+      body,
+    }, 30000);
+    if (r.corsOrNetwork) {
+      custodyFail(`relay unreachable (${r.error === "timeout" ? "timeout after 30s" : "network/CORS"}) — the key was sealed in-browser; the relay may not have received it`);
+      return;
+    }
+    if (!r.ok || !r.body) { custodyFail(custodyHttpError(r)); return; }
+    const b = r.body;
+    if (b.stored !== true || typeof b.key_fingerprint !== "string" || !Array.isArray(b.catalog)) {
+      custodyFail("malformed success response from the relay (stored / key_fingerprint / catalog) — refusing to trust it");
+      return;
+    }
+    const entries = sanitizeCatalog(b.catalog);
+
+    /* async-race guard — a VERIFY result only lands on the exact input
+       generation + account it was started for */
+    const applied = T.custody.applyVerifyResult(
+      { gen: custodyState.gen, address: me },
+      { gen: g0, address: me },
+      { ok: true, upstream: nz.url, fingerprint: b.key_fingerprint });
+    if (!applied.applied) { staleAbort(applied.reason); return; }
+
+    /* clear the key field programmatically (no input event — the fresh
+     * catalog stays valid); a MANUAL retype marks it stale again */
+    $("s-upstream-key").value = "";
+    custodyState.anchor = { ...applied.anchor, kind: "verified" };
+    custodyState.sessionFailed = false; /* a successful VERIFY re-establishes this session's trust */
+    custodyState.keyStored = true;
+    custodyState.fingerprint = b.key_fingerprint;
+    custodyState.statusInfo = {
+      mode: "shared", has_key: true, key_fingerprint: b.key_fingerprint,
+      upstream_host: b.upstream_host || null, upstream_official: b.official !== false,
+      listing_bound: !!b.listing_bound, listing_active: b.listing_active,
+      delegate_authorized: !!b.delegate_authorized, catalog: b.catalog,
+    };
+    modelsState.entries = entries;
+    const servable = entries.filter((e) => e.servable).map((e) => e.model);
+    applyVerified(shared.relayOrigin, servable, wasOk);
+    renderSharedVerifyDetail(b, entries, nz.url);
+    if (!servable.length) {
+      setVerifyNote("✓ key stored — but the catalog has ZERO servable models for it; PUBLISH stays disabled", "warn");
+    } else {
+      setVerifyNote(`✓ key sealed + stored (fingerprint ${b.key_fingerprint.slice(0, 12)}…) · ${servable.length} servable / ${entries.length} catalog model(s) — check models below, then PUBLISH`, "ok");
+    }
+    renderCustodyStatus();
+    refreshDelegateRow().then(renderCustodyStatus).catch(() => {});
+  }
+
+  /* status + pins + delegate refresh (connect, post-verify, post-tx).
+     The optional catalog RESUME is deliberately narrow — the connection
+     session must be completely untouched (no anchor, no URL/key edit
+     since the session baseline, no failed VERIFY, pins verified) and the
+     /status answer must land on the exact generation + wallet it was
+     requested for, so a late response from a previous account or a
+     disconnect→reconnect cycle can never re-anchor the stored face. Any
+     touch forces a fresh VERIFY instead of trusting the resumed face.
+     Eligibility itself is the pinned T.custody.canResumeCatalog
+     predicate (unit-tested in scripts/check-custody-web.mjs). */
+  async function refreshCustodyStatus() {
+    if (!shared || !state.address) return;
+    const me = state.address.toLowerCase();
+    const g0 = custodyState.gen; /* request generation — re-checked by the resume gate before anything anchors */
+    setVerifyNote("checking the live relay against the pinned deployment …", "");
+    const pr = await T.custody.probeSharedRelay(shared, 12000, hashers);
+    if ((state.address || "").toLowerCase() !== me) return; /* account switched mid-flight — drop */
+    custodyState.pinsOk = pr.ok;
+    renderPins(pr.rows);
+    if (!pr.ok) {
+      setVerifyNote("DEPLOYMENT MISMATCH — custody disabled; do not submit keys", "err");
+      renderCustodyStatus();
+      return;
+    }
+    setVerifyNote("✓ deployment pins verified — VERIFY a key to load the live catalog", "ok");
+    await refreshDelegateRow();
+    const r = await T.fetchJson(T.joinUrl(shared.relayOrigin, `/sellers/${me}/status`), {}, 10000);
+    if ((state.address || "").toLowerCase() !== me) return;
+    if (r.ok && r.body && r.body.mode === "shared") {
+      custodyState.statusInfo = r.body;
+      custodyState.keyStored = !!r.body.has_key; /* relay is the storage authority — sync both ways */
+      const entries = sanitizeCatalog(r.body.catalog);
+      const elig = T.custody.canResumeCatalog({
+        anchor: custodyState.anchor,
+        sessionFailed: custodyState.sessionFailed,
+        gen: custodyState.gen,
+        sessionStartGen: custodyState.sessionStartGen,
+        pinsOk: custodyState.pinsOk,
+        requestGen: g0,
+        requestAddress: me,
+        currentAddress: state.address,
+        hasKey: !!r.body.has_key,
+        entryCount: entries.length,
+      });
+      if (elig.ok) {
+        custodyState.anchor = {
+          kind: "resumed", upstream: null,
+          fingerprint: r.body.key_fingerprint || null, gen: custodyState.gen, address: me,
+        };
+        custodyState.fingerprint = r.body.key_fingerprint || null;
+        modelsState.entries = entries;
+        applyVerified(shared.relayOrigin, entries.filter((e) => e.servable).map((e) => e.model), false);
+        setVerifyNote(
+          `✓ resumed the relay-stored catalog (key on file${custodyState.fingerprint ? ` · fingerprint ${custodyState.fingerprint.slice(0, 12)}…` : ""}) — ` +
+          `pins re-verified live just now; editing UPSTREAM URL / KEY marks it stale and forces a fresh VERIFY`, "ok");
+      }
+    } else if (!r.corsOrNetwork) {
+      custodyState.statusInfo = null; /* e.g. 404 — nothing stored yet */
+    }
+    renderCustodyStatus();
+    updatePreview();
+  }
+
+  /* AUTHORIZE — separate, explicit user transaction. The warning is the
+     product surface, not fine print. */
+  const confirmAuthorizeDelegate = () => dangerConfirm({
+    ariaLabel: "confirm authorize settle delegate",
+    title: "confirm — escrow.approveSettleDelegate()",
+    copy:
+      "Authorize the shared relay as your settle delegate: it may then settle ANY of your Locked payments — " +
+      "including older locks and locks past their TTL — up to each lock's full maxAmount, WITHOUT proving service. " +
+      "Buyers can still refund unconsumed amounts after the TTL. The delegate can never withdraw or redirect your escrow balance.",
+    det: `Escrow.approveSettleDelegate(${shared ? shared.expectedSigner : "…"}) · 1 tx · revoke any time via [ REVOKE DELEGATE ]`,
+    goLabel: "[ SIGN AUTHORIZE ]",
+  });
+
+  async function sendDelegateTx(label, delegateAddr) {
+    const txbox = $("sc-tx");
+    const data = T.custody.delegateCalldata(hashers.keccak256TextHex, delegateAddr);
+    try {
+      /* static preflight: an escrow predating M15 reverts here with no
+         wallet popup spent */
+      await state.provider.call({ to: cfg.escrowAddr, data, from: state.address });
+    } catch (e) {
+      formErr(txbox, `simulation failed — this chain's escrow may predate M15 (approveSettleDelegate missing): ${T.esc(e.shortMessage || e.message || "unknown")}`);
+      return null;
+    }
+    return T.runTx(T.txLine(txbox, label), state.signer.sendTransaction({ to: cfg.escrowAddr, data }));
+  }
+
+  async function authorizeDelegateFlow() {
+    if (needWallet() || needConfig() || !shared) return;
+    const txbox = $("sc-tx");
+    txbox.innerHTML = "";
+    if (!custodyState.pinsOk) return formErr(txbox, "relay deployment pins not verified — AUTHORIZE stays disabled");
+    if (!(await confirmAuthorizeDelegate())) return;
+    const rcpt = await sendDelegateTx(`approveSettleDelegate(${T.truncAddr(shared.expectedSigner)}) — pinned relay signer`, shared.expectedSigner);
+    if (rcpt) { await refreshDelegateRow(); renderCustodyStatus(); }
+  }
+
+  /* REVOKE DELEGATE — approve(zero): clear UX, its own explicit tx */
+  const confirmRevokeDelegate = () => dangerConfirm({
+    ariaLabel: "confirm revoke settle delegate",
+    title: "confirm — escrow.approveSettleDelegate(0x0)",
+    copy:
+      "Revoking removes the relay's settle authority immediately — it can no longer settle ANY of your Locked payments " +
+      "(new settles by the relay revert NotSeller) until you AUTHORIZE again. Amounts already settled are unaffected; " +
+      "buyers still refund unconsumed locks after their TTL.",
+    det: `Escrow.approveSettleDelegate(0x0000000000000000000000000000000000000000) · 1 tx`,
+    goLabel: "[ SIGN REVOKE ]",
+  });
+
+  async function revokeDelegateFlow() {
+    if (needWallet() || needConfig() || !shared) return;
+    const txbox = $("sc-tx");
+    txbox.innerHTML = "";
+    if (!(await confirmRevokeDelegate())) return;
+    const rcpt = await sendDelegateTx("approveSettleDelegate(0x0) — revoke delegate", T.custody.ZERO_ADDRESS);
+    if (rcpt) { await refreshDelegateRow(); renderCustodyStatus(); }
+  }
+
+  /* REVOKE STORED KEY — relay-side DELETE, no chain transaction. Fresh
+     nonce + action=revoke signature, same header discipline as submit. */
+  const confirmRevokeKey = () => dangerConfirm({
+    ariaLabel: "confirm revoke stored upstream key",
+    title: "confirm — relay DELETE /sellers/keys",
+    copy:
+      "The relay deletes your sealed upstream key immediately. Your Registry listing stays on-chain, but buyer calls " +
+      "fail at upstream auth until you VERIFY a new key. The on-chain delegate authorization is separate and unaffected.",
+    det: "DELETE /sellers/keys · fresh one-time nonce + EIP-191 signature (action=revoke) · no chain transaction",
+    goLabel: "[ SIGN + REVOKE KEY ]",
+  });
+
+  async function revokeKeyFlow() {
+    if (needWallet() || needConfig() || !shared) return;
+    const txbox = $("sc-tx");
+    txbox.innerHTML = "";
+    if (!custodyState.pinsOk) return formErr(txbox, "relay deployment pins not verified — refusing to talk to custody endpoints");
+    if (!(await confirmRevokeKey())) return;
+    const me = (state.address || "").toLowerCase();
+    const nr = await fetchValidatedNonce(me);
+    if (nr.err) return formErr(txbox, nr.err);
+    const n = nr.nonce;
+    const msg = T.custody.buildCustodyRevokeMessage({
+      seller: me, chain: cfg.chainId,
+      escrow: cfg.escrowAddr.toLowerCase(), registry: cfg.registryAddr.toLowerCase(),
+      relay: shared.relayOrigin, nonce: n.nonce, issued: n.issued_at, expires: n.expires_at,
+    });
+    let sig;
+    try { sig = await state.signer.signMessage(msg); }
+    catch (e) {
+      return formErr(txbox, `signing ${(e && e.code === "ACTION_REJECTED") ? "rejected in wallet" : "failed"} — ${T.esc((e && (e.shortMessage || e.message)) || "")}`);
+    }
+    const body = T.custody.canonicalRevokeBody({ nonce: n.nonce, issued_at: n.issued_at, expires_at: n.expires_at });
+    const r = await T.fetchJson(T.joinUrl(shared.relayOrigin, "/sellers/keys"), {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json", "X-Tokenshare-Seller": me, "X-Tokenshare-Signature": sig },
+      body,
+    }, 15000);
+    if (r.corsOrNetwork) return formErr(txbox, `relay unreachable (${r.error === "timeout" ? "timeout" : "network/CORS"}) — the key is NOT revoked; retry`);
+    if (!r.ok) return formErr(txbox, custodyHttpError(r));
+    const line = T.txLine(txbox, "DELETE /sellers/keys — sealed key revoked at the relay");
+    line.confirmed(null);
+    custodyState.keyStored = false;
+    custodyState.anchor = null;
+    custodyState.fingerprint = null;
+    setVerifyNote("stored key revoked — VERIFY a fresh key to re-enable PUBLISH", "warn");
+    refreshCustodyStatus().catch(() => {});
+  }
+
+  /* card init + shared-mode form transform (classic form untouched when
+     m15 is absent). A malformed m15 block fails closed with a hard error. */
+  function initCustodyCard() {
+    $("custody-card").hidden = false;
+    $("s-endpoint-fld").hidden = true;
+    $("s-load-models").hidden = true;
+    const hint = $("s-models-hint");
+    if (hint) hint.textContent = "step 2 — VERIFY in KEY CUSTODY loads the live catalog · check the models to list";
+    if (m15Broken) {
+      $("sc-relay").textContent = "—";
+      $("sc-pins").innerHTML =
+        `<div class="kv"><span>CONFIG</span><b class="bad">✗ the m15 block in config.js is incomplete or malformed — custody is disabled (fail-closed). ` +
+        `Missing / invalid: ${T.esc((m15v.missing || []).join(", ") || "unknown")}</b></div>` +
+        `<p class="fld-hint">every identity pin is mandatory (relayOrigin · expectedSigner · appId · uploadPubkeySha256 · attestEvidence). ` +
+        `The register form below stays in classic single-seller mode.</p>`;
+      $("s-verify-btn").disabled = true;
+      setVerifyNote("fix the m15 config block — custody is disabled", "err");
+      return;
+    }
+    $("sc-relay").textContent = shared.relayOrigin;
+    $("s-endpoint").value = shared.relayOrigin; /* hidden; keeps legacy readers consistent */
+    setVerifyNote("idle — connect a wallet; the live pin check runs automatically", "");
+    $("s-upstream-url").addEventListener("input", markCustodyEdited);
+    $("s-upstream-key").addEventListener("input", markCustodyEdited);
+    $("s-verify-btn").addEventListener("click", () => guardPaid($("s-verify-btn"), runSharedVerify));
+    $("sc-authorize").addEventListener("click", () => guardPaid($("sc-authorize"), authorizeDelegateFlow));
+    $("sc-revoke-delegate").addEventListener("click", () => guard($("sc-revoke-delegate"), revokeDelegateFlow));
+    $("sc-revoke-key").addEventListener("click", () => guard($("sc-revoke-key"), revokeKeyFlow));
+    renderCustodyStatus();
+  }
+  if (shared || m15Broken) initCustodyCard();
+
   /* ═══ BUYER tab ═══════════════════════════════════════════ */
 
   /* — seller pickers info — */
@@ -1302,12 +2053,13 @@
     const sf = T.lockShortfall(readPrice("b-max"), bal);
     note.hidden = !sf;
     note.textContent = sf ? sf.text : "";
-    $("b-lock-btn").disabled = Boolean(sf);
+    /* balance gate ∨ policy consent gate */
+    $("b-lock-btn").disabled = Boolean(sf) || !T.policyConsent.isValid(state.address);
   }
   $("b-max").addEventListener("input", syncLockGate);
 
   /* — deposit (approve → deposit) — */
-  $("b-dep-btn").addEventListener("click", () => guard($("b-dep-btn"), async () => {
+  $("b-dep-btn").addEventListener("click", () => guardPaid($("b-dep-btn"), async () => {
     if (needWallet() || needConfig()) return;
     const txbox = $("b-dep-tx");
     txbox.innerHTML = "";
@@ -1372,7 +2124,7 @@
                 `<span class="mono dim">${seller}</span>` +
                 (max != null ? `<span class="mono dim">max $${max}</span>` : "") +
                 `<span class="lock-when dim">${T.esc(when)}</span>` +
-                `<button class="btn btn-sm btn-ghost" type="button" data-mint="${pid}" data-seller="${T.esc(String(l.seller || ""))}">[ MINT API KEY ]</button>` +
+                `<button class="btn btn-sm btn-ghost" type="button" data-mint="${pid}" data-seller="${T.esc(String(l.seller || ""))}"${consentOk() ? "" : ` disabled title="${POLICY_GATE_TITLE}"`}>[ MINT API KEY ]</button>` +
                 `<button class="btn btn-sm btn-ghost" type="button" data-usage="${pid}" data-seller="${T.esc(String(l.seller || ""))}">[ USAGE ]</button>` +
               `</div>` +
               `<div class="lock-usage" data-usage-panel="${pid}" hidden></div>` +
@@ -1391,6 +2143,7 @@
        the listing renders, key rides data-copy → global click-to-copy) — */
   function openMintModal(paymentId, seller) {
     if (needWallet() || needConfig()) return;
+    if (!consentOk()) { consentNudge(); return; } /* paid action — gate before the modal opens */
     const overlay = document.createElement("div");
     overlay.className = "wsel-overlay";
     overlay.innerHTML =
@@ -1451,7 +2204,7 @@
           ? `<button class="btn btn-wide" type="button" data-mint-go>[ SIGN + MINT ]</button>`
           : `<p class="empty-hint err">${st !== "Locked" ? `payment is ${st} — a key only works while the lock is Locked` : "lock expired — refund and re-lock for a fresh key"}</p>`);
       const go = body.querySelector("[data-mint-go]");
-      if (go) go.addEventListener("click", () => guard(go, async () => {
+      if (go) go.addEventListener("click", () => guardPaid(go, async () => {
         let sig;
         try { sig = await state.signer.signMessage(msg); }
         catch (e) {
@@ -1772,7 +2525,7 @@
   /* guard() unconditionally re-enables the button in its finally — the
      trailing .finally re-applies the balance gate after every click run */
   $("b-lock-btn").addEventListener("click", () =>
-    Promise.resolve(guard($("b-lock-btn"), async () => {
+    Promise.resolve(guardPaid($("b-lock-btn"), async () => {
     if (needWallet() || needConfig()) return;
     const txbox = $("b-lock-tx");
     txbox.innerHTML = "";
@@ -1803,6 +2556,7 @@
       mintBtn.className = "btn btn-sm";
       mintBtn.type = "button";
       mintBtn.textContent = "[ MINT API KEY ]";
+      mintBtn.disabled = !consentOk(); /* belt — the lock just passed the same gate */
       mintBtn.addEventListener("click", () => openMintModal(pid.toString(), seller));
       $("b-payment-id").appendChild(mintBtn);
       T.locks.add({
@@ -1838,7 +2592,7 @@
     renderDisputes();
   }
 
-  $("c-send").addEventListener("click", () => guard($("c-send"), async () => {
+  $("c-send").addEventListener("click", () => guardPaid($("c-send"), async () => {
     if (needWallet()) return;
     const l = listingOf($("c-seller").value);
     const model = $("c-model").value;
@@ -1934,9 +2688,20 @@
     }
 
     let receipt, check;
+    /* M15 shared mode: when the listing endpoint IS the configured shared
+       relay (strict origin match — root path, https, no userinfo/query/
+       fragment), receipts are signed by the pinned relay signer while
+       message.seller stays the chain listing's operator. Every other
+       seller keeps the single-seller rule; the pin never comes from
+       /info (no TOFU) and never applies to arbitrary endpoints. */
+    const sharedPin = shared && T.custody.matchesSharedRelay(l.endpoint, shared.relayOrigin)
+      ? shared.expectedSigner : null;
+    const expectDesc = sharedPin
+      ? `shared relay signer ${T.esc(T.truncAddr(sharedPin))} (pinned in config)`
+      : "listing.operator";
     try {
       receipt = T.decodeReceiptHeader(receiptHeader);
-      check = T.verifyReceipt(receipt, l.operator, cfg.chainId, paymentId);
+      check = T.verifyReceipt(receipt, l.operator, cfg.chainId, paymentId, { expectedSigner: sharedPin });
     } catch (e) {
       check = { ok: false, reason: "decode-failed: " + e.message };
     }
@@ -1945,7 +2710,7 @@
       const m = receipt.message;
       rcptPanel.classList.add("ok");
       rcptPanel.innerHTML =
-        `<b>✓ receipt signature verified</b> <span class="mono dim">recovered ${T.esc(T.truncAddr(check.recovered))} == listing.operator</span>` +
+        `<b>✓ receipt signature verified</b> <span class="mono dim">recovered ${T.esc(T.truncAddr(check.recovered))} == ${expectDesc} · seller field == listing.operator</span>` +
         `<div class="rcpt-grid">` +
         `<div><span>ACTUAL</span><b>$${T.fmtUsdc(m.actualAmount)}</b></div>` +
         `<div><span>UPSTREAM</span><b class="mono">${T.esc(m.upstreamHost)}</b></div>` +
@@ -1956,7 +2721,7 @@
       rcptPanel.classList.add("bad");
       rcptPanel.innerHTML =
         `<b>✗ receipt verification failed — ${T.esc(check.reason)}</b>` +
-        `<p class="dim mono" style="margin-top:6px">recorded in the disputes ledger (localStorage). recovered: ${T.esc(check.recovered || "—")} · expected: ${T.esc(T.truncAddr(l.operator))}</p>`;
+        `<p class="dim mono" style="margin-top:6px">recorded in the disputes ledger (localStorage). recovered: ${T.esc(check.recovered || "—")} · expected signer: ${T.esc(sharedPin ? T.truncAddr(sharedPin) + " (shared relay, pinned)" : T.truncAddr(l.operator))} · seller field must equal: ${T.esc(T.truncAddr(l.operator))}</p>`;
       recordDispute(paymentId, check.reason, l.operator);
     }
   }));
@@ -2004,6 +2769,7 @@
   T.installCopyHandlers();
   renderModelZone();
   renderSessionLocks();
+  syncPolicyGate(); /* boot: consent bar + gated buttons mirror the stored record */
   renderApiKeys();
   renderDisputes();
   updatePreview();

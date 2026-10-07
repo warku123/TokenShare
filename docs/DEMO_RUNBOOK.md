@@ -1,12 +1,14 @@
 # TokenShare 演示 Runbook（T-1h 检查清单）
 
 > 目标：演示开始前 1 小时按本单逐项打勾，确保现场零意外。
-> **地址快照 = 2026-09-23 部署（contracts/deployed.monad.json）**。演示前务必与 `web/config.js` 现值核对——重部署后以 config.js 为准。
+> **地址快照 = 2026-10-07 部署（Escrow v3.2，contracts/deployed.monad.json）**。演示前务必与 `web/config.js` 现值核对——重部署后以 config.js 为准。
+
+> ⚠️ **运行时提示（2026-10-07）**：当前在跑的本地 demo relay（PID 44254，端口 8787）是**旧 Escrow v3.1 快照注入的进程**——地址在启动时注入，进程不感知新部署。**现在不要重启/kill 它**。未来获准刷新时：先 `make stop` 再 `make demo`（会按新快照注入地址）；直接 `make demo` 会**复用旧实例**、不刷新地址。Docker 镜像地址为运行时注入，无需 rebuild。
 
 ```bash
 # ── 公共变量（值取自 web/config.js，如已重部署请同步更新）──
 RPC=https://testnet-rpc.monad.xyz          # chainId 10143 · Monad Testnet
-ESCROW=0x157C551D145d3c4bBF8f3554c43Fb3C931D71aD5
+ESCROW=0xe4D5Eb0dBDB6DB8063C07ECF7EDFcCdDB9Ad514c   # v3.2，2026-10-07
 REGISTRY=0xeD347cDc1761750E20C024459b38dedFb1462254
 USDC=0x534b2f3A21130d7a60830c2Df862319e593943A3   # Circle 官方 USDC，6 位小数
 SELLER=0x38c26E1782b7E6F656Aa35EbF473e2ff0D718Dd6

@@ -1,0 +1,35 @@
+{
+  "note": "synthetic test keys, never production",
+  "schema": 1,
+  "alg": "ECDH-P256-HKDF-SHA256-A256GCM",
+  "salt_seed_ascii": "tokenshare-custody-salt-v1",
+  "info_ascii": "tokenshare-custody-aesgcm-v1",
+  "upload_priv_hex": "0xf9585aa8d7cc0b4ad39e965a009dae09f8fa1b827dd8b74f4902ce36acd96e1a",
+  "upload_pub_b64url": "BFr3eZ4wPFQkx5Vn66pxNBH-uFV_Gw9StcwWtOTudeaamEcYWBVBldRByN9sQ1_oONbYIUwzIDQLpxOqorKBY4w",
+  "eph_priv_hex": "0x1a6ae3a0b488f8b1510e02518d84575bff5c62e2db45d8ef7c3fb3083be4861c",
+  "plaintext_json": "{\"api_key\":\"sk-synthetic-vector-key-6ba6457c828db0f9\"}",
+  "message": "TokenShare key custody|action=submit|seller=0xb805b3a43b27e79081df31d2602f16f795d06ca0|chain=84532|escrow=0x1111111111111111111111111111111111111111|registry=0x2222222222222222222222222222222222222222|relay=https://relay.example|upstream=https://api.kimi.com/coding|nonce=0x206b64a401cf5e293b28a5d707980157379b7df4abb4b80e7592fe845b260a6c|body_sha256=74a66d59ec073aa16ed60bb5c1460ef5f933dbcd8cf1ec3eb8585be1f43d6cd7|issued=1770000000|expires=1770000600",
+  "aad_ascii": "TokenShare custody envelope|action=submit|seller=0xb805b3a43b27e79081df31d2602f16f795d06ca0|chain=84532|escrow=0x1111111111111111111111111111111111111111|registry=0x2222222222222222222222222222222222222222|relay=https://relay.example|upstream=https://api.kimi.com/coding|nonce=0x206b64a401cf5e293b28a5d707980157379b7df4abb4b80e7592fe845b260a6c|issued=1770000000|expires=1770000600",
+  "iv_b64url": "aZ4fAi9YstimPUGl",
+  "aad_fields": {
+    "seller": "0xb805b3a43b27e79081df31d2602f16f795d06ca0",
+    "chain_id": 84532,
+    "escrow_addr": "0x1111111111111111111111111111111111111111",
+    "registry_addr": "0x2222222222222222222222222222222222222222",
+    "origin": "https://relay.example",
+    "upstream_base_url": "https://api.kimi.com/coding",
+    "nonce": "0x206b64a401cf5e293b28a5d707980157379b7df4abb4b80e7592fe845b260a6c",
+    "issued": 1770000000,
+    "expires": 1770000600
+  },
+  "raw_body": "{\"nonce\":\"0x206b64a401cf5e293b28a5d707980157379b7df4abb4b80e7592fe845b260a6c\",\"issued_at\":1770000000,\"expires_at\":1770000600,\"upstream_base_url\":\"https://api.kimi.com/coding\",\"envelope\":{\"alg\":\"ECDH-P256-HKDF-SHA256-A256GCM\",\"epk\":\"BBLwoCPaLf0_dmkSWs_QBHwHq6WaI4DPhINLic-1GYEBBVb31yqqOMMm_EKPoMrSDv5oKutGePRsWgvwNb3QXiM\",\"iv\":\"aZ4fAi9YstimPUGl\",\"ct\":\"fQMljNNzpCmaAP8iT1ZP7kcMCCXoZV3ARQ1tnmHrCaZDnW3xgKmcBnoIVXtwdzVR2NFGvIBpWrIMPWhwlO5GF1fO7amyuQ\"}}",
+  "body_sha256": "74a66d59ec073aa16ed60bb5c1460ef5f933dbcd8cf1ec3eb8585be1f43d6cd7",
+  "eoa_priv_hex": "0xc25a1a22619d6f5cdfb081ff04655cca2dba670fb5c834875ae77b9931439df7",
+  "signer": "0xb805B3A43B27E79081Df31D2602f16f795D06cA0",
+  "signature": "0x731e8859d6be73fe4013c4d04a217343a8e9d50550cdbd055cda70bfe3a3fd8928ed3d2ce9a2ae36c44826d3f2fce3078af2dee17c5b8ba14445dc9669e38c5b1b",
+  "expected": {
+    "epk_b64url": "BBLwoCPaLf0_dmkSWs_QBHwHq6WaI4DPhINLic-1GYEBBVb31yqqOMMm_EKPoMrSDv5oKutGePRsWgvwNb3QXiM",
+    "iv_b64url": "aZ4fAi9YstimPUGl",
+    "ct_b64url": "fQMljNNzpCmaAP8iT1ZP7kcMCCXoZV3ARQ1tnmHrCaZDnW3xgKmcBnoIVXtwdzVR2NFGvIBpWrIMPWhwlO5GF1fO7amyuQ"
+  }
+}

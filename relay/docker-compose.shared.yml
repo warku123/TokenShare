@@ -1,0 +1,154 @@
+# TokenShare SHARED-custody relay — DEDICATED compose file (M15 R1, v1.0-e1).
+#
+# This is the ONLY compose file for RELAY_MODE=shared deployments (local smoke
+# AND Phala Cloud). Never start shared mode from relay/docker-compose.yml:
+# that file is single-mode only — it pins RELAY_MODE=single literally on its
+# `relay` service and has NO shared service and NO keystore volume, so a
+# "shared" start from it is either refused or persistence-less by design.
+#
+# Deploy (manual, needs your Phala account — see README-docker.md §3):
+#   phala deploy -n <name> -c relay/docker-compose.shared.yml -e relay/.env -t tdx.small --wait
+# Local smoke (laptop: no dstack socket → the three SHARED_* env keys from
+# relay/.env.example "Key source B" are REQUIRED, see README-docker.md §2):
+#   cd relay && docker compose -f docker-compose.shared.yml up
+#
+# ENV DELIVERY (NB1) — how values reach the container:
+#   * On Phala Cloud, `phala deploy -e .env` feeds the file to the SERVER-SIDE
+#     compose INTERPOLATION: every `${VAR}` in the environment block below is
+#     substituted there (and stored encrypted by the cloud). It is NOT a
+#     container `env_file` — a setting that is not referenced via `${...}`
+#     below NEVER reaches the CVM container.
+#   * Locally, compose interpolation reads `.env` from the compose file's own
+#     directory (relay/.env) by default, or whatever `--env-file` names; the
+#     `env_file:` block merges the SAME local file only as an optional
+#     convenience for extra dev/optional vars (`required: false`; does not
+#     exist on the CVM).
+#   * Required settings FAIL THE RENDER (`:?`) when missing — clear error, no
+#     silent half-configured boot. No fake keys/addresses anywhere.
+#
+# WHAT IS PINNED LITERALLY (deliberately NOT `${VAR:-...}` interpolations —
+# `environment:` overrides env_file by design, so a stray value in .env can
+# never clobber these):
+#   * RELAY_MODE=shared            — the whole point of this file.
+#   * SHARED_KEYSTORE_PATH=/data/tokenshare/keystore.json — MUST match the
+#     volume mount below (the code default; persistence depends on it).
+#   * PORT=8787                    — literal, matching the 8787 published
+#     mapping and the literal 8787 healthcheck route (M1: no PORT-env drift;
+#     the application default in relay/app/config.py is unchanged).
+#
+# WHAT IS REFERENCED VIA INTERPOLATION (values come ONLY from the deploy env;
+# none of them carries a default key/address/origin value):
+#   * RELAY_PUBLIC_ORIGIN — REQUIRED in shared mode: one canonical
+#     https://host[:port] buyer-facing origin, no path/trailing slash (the
+#     Phala gateway form, e.g. https://<app-id>-8787.<gateway-domain>).
+#     The relay fails fast (no degraded mode) when missing/invalid; non-https
+#     origins are refused unless ALLOW_INSECURE_ENDPOINT=1 (DEV/TEST ONLY —
+#     that dev flag is deliberately NOT interpolated here, so it can never
+#     ride into a cloud deploy; local dev sets it in relay/.env).
+#   * Chain values RPC_URL / CHAIN_ID / ESCROW_ADDR / REGISTRY_ADDR /
+#     USDC_ADDR (the custody messages bind them).
+#   * RELAY_CORS_ORIGINS — REQUIRED, pinned explicitly to the production
+#     frontend origin(s). The demo default * is NEVER applied silently;
+#     missing CORS fails the render.
+#   * The three SHARED_* env keys — dev fallback for socket-less machines
+#     only (empty defaults; inside the CVM the dstack socket wins and these
+#     are IGNORED by config.py).
+#
+# KEYS: with /var/run/dstack.sock present the three operational keys (signer /
+# KEK / upload) are DERIVED inside the TEE via the BARE legacy get_key paths
+# `tokenshare/shared/{signer,kek,upload}/v1` (dstack-sdk>=0.5.4,<0.6; no
+# host-mode 0.6, no v1 KDF, no P-256 algorithm mode — see config.py). None of
+# RELAY_SELLER_KEY / OPENAI_API_KEY is needed in shared mode.
+#
+# REGISTRAR: there is NO registrar service here ON PURPOSE. In shared mode
+# the listing operator is each seller's OWN external EOA; the shared signer
+# is not a seller EOA and must never be registered. registrar.py fail-fasts
+# on RELAY_MODE=shared before any key derivation/network access.
+#
+# M15 status: R1 code complete, review gate PASSED (static suite); R2 (shared
+# chat) code implemented, independent R2 review gate PASSED (318-test static
+# suite, 24 R2 tests; compose-env tests excluded) — all evidence is
+# local/mock, NOT a live chain, NOT live TEE, NOT a final audit. The
+# remaining shared-chat flow work is in flight and not yet passed; the
+# cloud deploy itself stays gated (§6/§7 of README-docker.md). See
+# README-docker.md before deploying.
+services:
+  relay-shared:
+    # Build context = repo root (the image embeds the Foundry ABI artifacts
+    # from contracts/out/ — see relay/Dockerfile). Production deploys go
+    # through the §6 readiness gate: a pushed AMD64 image referenced by
+    # digest (own registry/digest — never an invented one).
+    build:
+      context: ..
+      dockerfile: relay/Dockerfile
+    # Phala Cloud CVMs are Intel TDX (x86_64): force the platform so builds
+    # made on Apple Silicon hosts produce an amd64 image.
+    platform: linux/amd64
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      RELAY_MODE: shared
+      # Must match the volume mount below (or persistence is lost).
+      SHARED_KEYSTORE_PATH: /data/tokenshare/keystore.json
+      # Literal PORT pin (M1): mapping, uvicorn bind and healthcheck route
+      # all agree on 8787; .env cannot shift it.
+      PORT: "8787"
+      # --- Required shared-mode runtime settings (compose INTERPOLATION
+      # references — resolved server-side on Phala from the `-e .env` inputs,
+      # locally from relay/.env or --env-file). Missing = render error.
+      RELAY_PUBLIC_ORIGIN: ${RELAY_PUBLIC_ORIGIN:?RELAY_PUBLIC_ORIGIN is required in shared mode (canonical https origin, no path) - set it in the deploy env}
+      RPC_URL: ${RPC_URL:?RPC_URL is required (chain endpoint for custody messages) - set it in the deploy env}
+      CHAIN_ID: ${CHAIN_ID:?CHAIN_ID is required (expected chain id) - set it in the deploy env}
+      ESCROW_ADDR: ${ESCROW_ADDR:?ESCROW_ADDR is required (Escrow contract address) - set it in the deploy env}
+      REGISTRY_ADDR: ${REGISTRY_ADDR:?REGISTRY_ADDR is required (Registry contract address) - set it in the deploy env}
+      USDC_ADDR: ${USDC_ADDR:?USDC_ADDR is required (USDC contract address) - set it in the deploy env}
+      # Production CORS is pinned EXPLICITLY to the frontend origin(s) — the
+      # demo default * never applies silently here.
+      RELAY_CORS_ORIGINS: ${RELAY_CORS_ORIGINS:?RELAY_CORS_ORIGINS is required in shared mode - pin the production frontend origin(s) (comma-separated; never * in production)}
+      # Dev fallback ONLY (socket-less laptop per .env.example "Key source B";
+      # empty defaults — inside the CVM the dstack socket wins and these are
+      # IGNORED). No placeholder key material is baked here.
+      SHARED_SIGNER_KEY: ${SHARED_SIGNER_KEY:-}
+      SHARED_KEK_HEX: ${SHARED_KEK_HEX:-}
+      SHARED_UPLOAD_KEY: ${SHARED_UPLOAD_KEY:-}
+      # M15 bootstrap gate (two-phase first boot), default 0 = normal serving.
+      # Phase 1 boots with RELAY_BOOTSTRAP_MODE=1 and a temporary
+      # https://<placeholder>.invalid origin: the gate serves ONLY
+      # GET/HEAD /health,/info,/attestation (everything else answers an exact
+      # 503 {"detail":"bootstrap_mode"}) and the keystore path must NOT exist.
+      # Phase 2 updates THIS file's env (final gateway origin + flag 0) and
+      # restarts ONCE. The flag is frozen at startup — there is no runtime
+      # switch. See README-docker.md §3.3 for the full runbook.
+      RELAY_BOOTSTRAP_MODE: ${RELAY_BOOTSTRAP_MODE:-0}
+    env_file:
+      # LOCAL convenience only (optional tunables like FORWARD_MARGIN_S).
+      # NOT the Phala Cloud delivery path — only the `${...}` environment
+      # references above reach the CVM container.
+      - path: .env
+        required: false
+    volumes:
+      # TEE key derivation + attestation quotes (dstack guest agent socket).
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      # Persistent encrypted keystore (uid-10001 ownership via image-dir
+      # volume init). Restart-continuity must be REAL-tested before being
+      # trusted — not guaranteed by this file alone.
+      - keystore-data:/data/tokenshare
+    healthcheck:
+      # python:3.12-slim has no curl/wget; use the stdlib one-liner. LITERAL
+      # 8787 route — matches the pinned PORT env and the published mapping.
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request as u; u.urlopen('http://127.0.0.1:8787/health', timeout=3)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+# Persistent shared-mode keystore storage. Docker initializes a FRESH named
+# volume from the image content at the mount point (/data/tokenshare exists
+# in the image owned by 10001:10001, mode 0750 — see relay/Dockerfile), so
+# the non-root relay can create its 0600 keystore.json: no chmod ladder,
+# never 0777.
+volumes:
+  keystore-data:

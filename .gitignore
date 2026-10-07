@@ -1,6 +1,8 @@
 # secrets / local env
 .env
 .env.local
+# credential files: any filename ending in literal "key" (e.g. qwen_key)
+*key
 
 # agent local state
 .slim/

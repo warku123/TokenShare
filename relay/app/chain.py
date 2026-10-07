@@ -129,6 +129,12 @@ _SETTLE_PARTIAL_SELECTOR = "c97ac54c"
 _CAPTURED_OF_SIGNATURE = "capturedOf(uint256)"
 _CAPTURED_OF_SELECTOR = "d5d177a3"
 
+# M15 R2: Escrow settle-delegate read (settleDelegateOf). ABI-driven via the
+# Foundry artifact (it carries the mapping getter) — a chain still running
+# v3.1 WITHOUT the function reverts at call time and the read RAISES; R2
+# callers MUST fail closed on that (shared buyer flow → 424, never forward).
+# Single-mode flows never touch this method and keep working on v3.1.
+
 
 def _check_selector(signature: str, expected: str) -> str:
     selector = keccak(signature.encode("ascii"))[:4].hex()
@@ -319,6 +325,26 @@ class ChainClient:
             price_input=int(price_input),
             price_output=int(price_output),
         )
+
+    def read_settle_delegate(self, seller: str) -> str | None:
+        """Escrow.settleDelegateOf(seller) → the currently approved settle
+        delegate (checksummed address) or None for the zero address (no
+        delegate). M15 R2 shared-flow preflight ONLY — the single-mode
+        flows never call this and keep working on a v3.1 Escrow.
+
+        RAISES on any chain failure (RPC down / revert / the deployed
+        Escrow lacking the function, i.e. current-chain v3.1) — callers
+        MUST fail closed: the shared buyer flow maps every failure to 424
+        DELEGATE_NOT_AUTHORIZED and never forwards upstream quota. It is
+        deliberately NOT swallowed here so "cannot prove delegation" can
+        never masquerade as "no delegate approved" vs "chain broken" in
+        logs while both still refuse service."""
+        raw = self.escrow.functions.settleDelegateOf(
+            Web3.to_checksum_address(seller)
+        ).call()
+        if raw is None or str(raw).lower() == ZERO_ADDRESS:
+            return None
+        return str(raw)
 
     # ------------------------------------------------------------------ write
 

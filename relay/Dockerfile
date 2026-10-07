@@ -45,6 +45,15 @@ COPY contracts/out/Registry.sol/Registry.json /contracts/out/Registry.sol/Regist
 # /var/run/dstack.sock must be readable by this uid — on Phala Cloud CVMs the
 # socket is world-accessible by default (see README-docker.md for troubleshooting).
 RUN useradd --system --no-create-home --uid 10001 tokenshare
+
+# M15 R1 shared custody: pre-create the keystore directory OWNED BY THE
+# RUNTIME UID (10001) with restrictive mode (0750, never 0777). A fresh named
+# volume mounted at /data/tokenshare (docker-compose.yml `keystore-data`)
+# initializes FROM this image directory, preserving the uid/gid/mode — that is
+# the explicit volume-init mechanism; no root init container, no `user:`,
+# no over-permissive dirs at runtime. The keystore FILE itself is always
+# written atomically with mode 0600 by relay/app/keystore.py.
+RUN install -d -o 10001 -g 10001 -m 0750 /data/tokenshare
 USER tokenshare
 
 EXPOSE 8787

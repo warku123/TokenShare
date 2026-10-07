@@ -26,6 +26,7 @@ from tokenshare_cli.signing import receipt_types  # noqa: E402
 BUYER_KEY = "0x" + "11" * 32
 SELLER_KEY = "0x" + "22" * 32
 OTHER_KEY = "0x" + "33" * 32
+TEE_KEY = "0x" + "44" * 32  # M15 shared mode: independent TEE receipt signer
 CHAIN_ID = 31337
 
 ESCROW_ADDR = "0x" + "aa" * 20

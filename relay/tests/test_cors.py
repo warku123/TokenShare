@@ -89,6 +89,10 @@ def test_middleware_registered_on_app() -> None:
     assert cors, "CORSMiddleware missing from the app middleware stack"
     options = getattr(cors[0], "kwargs", {}) or {}
     assert options.get("allow_origins") == ["*"]
-    assert options.get("allow_methods") == ["GET", "POST", "OPTIONS"]
+    # M15 R1: DELETE + the custody wallet headers were ADDED for the shared
+    # custody endpoints (additive — every legacy entry stays).
+    assert options.get("allow_methods") == ["GET", "POST", "DELETE", "OPTIONS"]
     assert "X-Payment-Id" in (options.get("allow_headers") or [])
+    assert "X-Tokenshare-Seller" in (options.get("allow_headers") or [])
+    assert "X-Tokenshare-Signature" in (options.get("allow_headers") or [])
     assert "X-Receipt" in (options.get("expose_headers") or [])

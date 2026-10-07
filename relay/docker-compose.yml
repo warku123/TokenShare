@@ -1,14 +1,43 @@
-# TokenShare seller relay — compose for Phala Cloud TDX CVMs (M7-A).
+# TokenShare seller relay — compose for Phala Cloud TDX CVMs (SINGLE MODE ONLY).
+# (M7-A single-mode TEE relay; the M15 R1 shared-custody deployment lives in
+# the DEDICATED relay/docker-compose.shared.yml — never in this file.)
 #
 # Deploy (manual, needs your Phala account — see README-docker.md):
 #   phala deploy -n tokenshare-relay -c docker-compose.yml -e .env -t tdx.small --wait
 #
+# ENV DELIVERY (NB1) — how values reach the container:
+#   * On Phala Cloud, `phala deploy -e .env` feeds the file to the SERVER-SIDE
+#     compose INTERPOLATION: every `${VAR}` below is substituted there (and
+#     stored encrypted by the cloud). It is NOT a container `env_file` — a
+#     setting that is not referenced via `${...}` below NEVER reaches the CVM
+#     container.
+#   * Locally, compose interpolation reads `.env` from the compose file's own
+#     directory (relay/.env) by default, or whatever `--env-file` names; the
+#     `env_file:` block further down merges the SAME local file only as an
+#     optional convenience for extra dev/optional vars (it is `required:
+#     false` and does not exist on the CVM).
+#   * Required settings therefore FAIL THE RENDER (`:?`) when missing — clear
+#     error, no silent half-configured boot. No fake keys/addresses anywhere.
+#
+# MODE SELECTION — run EXACTLY ONE relay container per CVM:
+#   * default (SINGLE, M7-A, unchanged): plain `docker compose up` builds and
+#     starts the `relay` service below. The one-shot `registrar` service
+#     belongs to this mode only (`--profile register`). RELAY_MODE is pinned
+#     LITERALLY to `single` here (see the environment block), so a stray
+#     RELAY_MODE=shared in .env can never silently turn this service into a
+#     volume-less shared relay.
+#   * SHARED custody (M15 R1): use the dedicated relay/docker-compose.shared.yml
+#     (single `relay-shared` service + persistent keystore volume). NEVER mix
+#     the two files in one `docker compose -f a -f b` invocation and never run
+#     both on the same CVM — they both publish 8787.
+#
 # Key points (per the M7 material):
-#   - /var/run/dstack.sock MUST be mounted: the seller key is derived inside
+#   - /var/run/dstack.sock MUST be mounted: the relay keys are derived inside
 #     the TEE via dstack get_key and /attestation serves the TDX quote.
-#   - ports 8787 (inbound via https://<app-id>-8787.<gateway-domain>).
-#   - env comes from .env (phala deploy -e .env injects it too). In TEE mode
-#     RELAY_SELLER_KEY may stay unset — it is ignored.
+#   - port 8787 — LITERAL everywhere (published mapping, PORT env and
+#     healthcheck route all pin 8787; no ${PORT:-...} drift).
+#   - No secrets are baked into this file — the interpolation references
+#     below carry no default key/address values.
 services:
   relay:
     # Build context = repo root (the image embeds the Foundry ABI artifacts
@@ -22,36 +51,101 @@ services:
     restart: unless-stopped
     ports:
       - "8787:8787"
+    environment:
+      # Literal SINGLE-mode pin (NOT `${VAR:-...}` — `environment:` takes
+      # precedence over env_file by design here): the default relay of this
+      # compose is ALWAYS single mode, whatever .env says. Shared custody
+      # deployments must use relay/docker-compose.shared.yml instead; a
+      # shared relay started from this file would run WITHOUT the persistent
+      # /data volume, which is exactly the misconfiguration this pin forbids.
+      RELAY_MODE: single
+      # Literal PORT pin (M1): the published 8787 mapping, the uvicorn bind
+      # (Dockerfile CMD) and the healthcheck route all agree on 8787. .env
+      # cannot shift it (environment overrides env_file).
+      PORT: "8787"
+      # --- Required single-mode runtime settings (compose INTERPOLATION
+      # references, resolved server-side on Phala from the `-e .env` inputs,
+      # locally from relay/.env or --env-file). Missing = render error.
+      RPC_URL: ${RPC_URL:?RPC_URL is required (chain endpoint for reads/settles) - set it in the deploy env}
+      CHAIN_ID: ${CHAIN_ID:?CHAIN_ID is required (expected chain id) - set it in the deploy env}
+      ESCROW_ADDR: ${ESCROW_ADDR:?ESCROW_ADDR is required (Escrow contract address) - set it in the deploy env}
+      REGISTRY_ADDR: ${REGISTRY_ADDR:?REGISTRY_ADDR is required (Registry contract address) - set it in the deploy env}
+      USDC_ADDR: ${USDC_ADDR:?USDC_ADDR is required (USDC contract address) - set it in the deploy env}
+      # Single mode ALWAYS needs the upstream api key (TEE derives only the
+      # seller key). No default value is provided for any key.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY is required in single mode (upstream key) - set it in the deploy env}
+      # Official host-root base URL — mirrors relay/app/config.py
+      # DEFAULT_OPENAI_BASE_URL; .env can point it at another OFFICIAL host.
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com}
+      # CORS must be pinned EXPLICITLY (production frontend origin(s)).
+      # Missing = render error; the demo default * is never applied silently.
+      RELAY_CORS_ORIGINS: ${RELAY_CORS_ORIGINS:?RELAY_CORS_ORIGINS is required - pin the frontend origin(s) (comma-separated; * only for local demo)}
+      # Non-TEE dev fallback ONLY — config.py requires RELAY_SELLER_KEY just
+      # when NO dstack socket exists (host-mode laptop/CI); inside the CVM the
+      # socket is present and this var is IGNORED. The empty default keeps
+      # TEE boots renderable while local host-mode runs resolve it from their
+      # own env source. Never baked with a placeholder key here.
+      RELAY_SELLER_KEY: ${RELAY_SELLER_KEY:-}
     env_file:
-      # Not fatal when absent — the relay itself fails fast on missing
-      # required vars (no degraded mode); `phala deploy -e .env` injects the
-      # same file server-side.
+      # LOCAL convenience only (see the ENV DELIVERY note above): merges the
+      # optional tunables (FORWARD_MARGIN_S/PROMPT_TOKEN_CAP/... ) and dev
+      # flags from relay/.env when it exists. NOT fatal when absent — the
+      # relay itself fails fast on missing required vars (no degraded mode).
+      # NOT the Phala Cloud delivery path — only the `${...}` environment
+      # references above reach the CVM container.
       - path: .env
         required: false
     volumes:
       # TEE key derivation + attestation quotes (dstack guest agent socket).
       - /var/run/dstack.sock:/var/run/dstack.sock
     healthcheck:
-      # python:3.12-slim has no curl/wget; use the stdlib one-liner.
+      # python:3.12-slim has no curl/wget; use the stdlib one-liner. LITERAL
+      # 8787 route — matches the pinned PORT env and the published mapping.
       test:
         - CMD-SHELL
-        - python -c "import os,urllib.request as u; u.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8787')+'/health', timeout=3)"
+        - python -c "import urllib.request as u; u.urlopen('http://127.0.0.1:8787/health', timeout=3)"
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
 
   # ---------------------------------------------------------------------------
-  # One-shot Registry registrar (M7-B). Runs in the SAME CVM as the relay and
-  # mounts the SAME dstack socket: it derives the SAME TEE seller key the
-  # relay uses and signs Registry.register/deactivate from inside the enclave
-  # (the private key never leaves it). Required because the relay's key can
+  # One-shot Registry registrar (M7-B) — SINGLE MODE ONLY.
+  # It derives the TEE path `wallet/ethereum/tokenshare` and asserts the
+  # Registry listing operator == the relay's OWN derived seller address — the
+  # historical (single/TEE-operator) flow. In SHARED mode (M15 R1) sellers are
+  # EXTERNAL EOAs: the seller registers its listing and calls Escrow
+  # approveSettleDelegate ITSELF via explicit web-frontend transactions — the
+  # registrar MUST NOT run in a shared deployment (the shared signer is not a
+  # seller EOA; registering it would break buyer verification). registrar.py
+  # now enforces this itself: it fail-fasts on RELAY_MODE=shared BEFORE any
+  # key derivation, network access or registration (see test
+  # tests/test_registrar_shared_guard.py). This file keeps it behind the
+  # `register` profile so it never starts with the default relay.
+  #
+  # Runs in the SAME CVM as the relay and mounts the SAME dstack socket: it
+  # derives the SAME TEE seller key the relay uses and signs
+  # Registry.register/deactivate from inside the enclave (the private key
+  # never leaves it). Required because the relay's key can
   # never be exported, yet the listing operator MUST equal the relay's
   # signing address or buyer signature checks fail.
   #
+  # NB1/NB2: the registrar's own inputs use the same `${...}` interpolation
+  # mechanism — on Phala they resolve from the `-e .env` inputs (they never
+  # reached the CVM via env_file before NB1), locally from relay/.env /
+  # --env-file. The three registration-ONLY inputs (REGISTRAR_ENDPOINT /
+  # REGISTRAR_MODELS / REGISTRAR_PRICES) default EMPTY: they are required
+  # only when the registrar actually runs, and REGISTRAR_ENDPOINT cannot be
+  # known before the first deploy — so a first deploy does NOT fail on them
+  # (compose interpolates even profile-gated services). If the registrar
+  # then runs without them, registrar.py's own pre-execution validation
+  # fail-fasts before any key derivation, network access or signing. The
+  # shared chain values (RPC_URL / CHAIN_ID / REGISTRY_ADDR) stay
+  # render-fatal like the relay's.
+  #
   # Env: REGISTRAR_* vars (endpoint/models/prices) + RPC_URL/CHAIN_ID/
-  # REGISTRY_ADDR — injected via env_file/.env or `phala deploy -e .env`
-  # (see relay/README-docker.md section "TEE on-chain registration").
+  # REGISTRY_ADDR (see relay/README-docker.md section "TEE on-chain
+  # registration").
   #
   # Runs once and exits (idempotent: an already-matching listing exits 0
   # immediately, so CVM restarts have no side effects). Local single run —
@@ -71,8 +165,33 @@ services:
     # CVM boot; the idempotent already-OK fast exit keeps restarts harmless.
     restart: "no"
     command: ["python", "registrar.py"]
+    environment:
+      # The registrar is single-mode-only by definition (its guard would
+      # refuse anything else; pin it so .env can never flip it).
+      RELAY_MODE: single
+      # Registrar inputs — compose interpolation (see ENV DELIVERY above).
+      # NB2: compose interpolates ALL services (even profile-gated ones) at
+      # config/render time, so the registration-ONLY inputs below (the three
+      # REGISTRAR_*-prefixed fields — verified against registrar.py
+      # load_env: REGISTRAR_ENDPOINT / REGISTRAR_MODELS / REGISTRAR_PRICES)
+      # use EMPTY defaults — they are required only when the registrar
+      # actually RUNS, and REGISTRAR_ENDPOINT is unknown before the first
+      # deploy (the gateway URL exists only after it). Without them the
+      # registrar fail-fasts in its own pre-execution validation (missing
+      # required environment variable(s)) BEFORE any key derivation, network
+      # access or signing — no degraded registration (evidence:
+      # test_compose_env.py + tests/test_registrar_shared_guard.py).
+      # The chain values below are SHARED relay requirements and stay
+      # render-fatal (`:?`).
+      RPC_URL: ${RPC_URL:?RPC_URL is required (registrar chain endpoint) - set it in the deploy env}
+      CHAIN_ID: ${CHAIN_ID:?CHAIN_ID is required (registrar expected chain id) - set it in the deploy env}
+      REGISTRY_ADDR: ${REGISTRY_ADDR:?REGISTRY_ADDR is required (registrar Registry address) - set it in the deploy env}
+      REGISTRAR_ENDPOINT: ${REGISTRAR_ENDPOINT:-}
+      REGISTRAR_MODELS: ${REGISTRAR_MODELS:-}
+      REGISTRAR_PRICES: ${REGISTRAR_PRICES:-}
     env_file:
-      # Same env source as the relay (extra REGISTRAR_* vars live here too).
+      # Same local source as the relay (extra optional vars live here too).
+      # NOT the Phala Cloud delivery path.
       - path: .env
         required: false
     volumes:

@@ -33,6 +33,11 @@ REQUIRED_VARS = (
 # Optional extra (not part of the PIN): default seller for `call`.
 SELLER_ADDR_VAR = "SELLER_ADDR"
 
+# Optional extra (M15 shared mode): explicit pin of the independent TEE
+# address that must have signed the X-Receipt. Never auto-derived from
+# relay-reported fields; `--expected-signer` (explicit flag) wins over it.
+SIGNER_ADDR_VAR = "EXPECTED_SIGNER"
+
 _ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
@@ -113,3 +118,14 @@ def load_seller_override() -> str | None:
     if value is None:
         return None
     return _require_addr(SELLER_ADDR_VAR, value)
+
+
+def load_expected_signer_override() -> str | None:
+    """Optional EXPECTED_SIGNER env (M15 shared mode): explicit pin of the
+    independent TEE address that must have signed the X-Receipt (recover ==
+    pin). Strictly validated as an Ethereum address; the CLI never accepts a
+    signer from relay-reported fields and does not fall back to TOFU."""
+    value = _read(SIGNER_ADDR_VAR)
+    if value is None:
+        return None
+    return _require_addr(SIGNER_ADDR_VAR, value)

@@ -24,6 +24,8 @@ contract EscrowTest is Test {
     address internal seller = makeAddr("seller");
     address internal thirdParty = makeAddr("thirdParty");
     address internal treasury = makeAddr("treasury"); // v3 fee recipient
+    address internal delegateA = makeAddr("delegateA"); // M15 settle delegates
+    address internal delegateB = makeAddr("delegateB");
 
     uint64 internal constant START_TIME = 1_000_000;
 
@@ -62,6 +64,12 @@ contract EscrowTest is Test {
     /// @dev Current lifecycle state of a payment.
     function _stateOf(uint256 paymentId) internal view returns (Escrow.State s) {
         (,,,, s) = escrow.getPayment(paymentId);
+    }
+
+    /// @dev `who` approves `delegate` as its settle delegate (M15).
+    function _approveDelegate(address who, address delegate) internal {
+        vm.prank(who);
+        escrow.approveSettleDelegate(delegate);
     }
 
     // =====================================================================
@@ -1563,5 +1571,337 @@ contract EscrowTest is Test {
         assertEq(usdc.balanceOf(address(escrow)), sumBalances, "holdings == balances (no Locked left)");
         assertTrue(_stateOf(p1) == Escrow.State.Settled, "p1 settled");
         assertTrue(_stateOf(p2) == Escrow.State.Refunded, "p2 refunded");
+    }
+
+    // =====================================================================
+    // settle delegation (M15)
+    // =====================================================================
+    //
+    // TRUST BOUNDARY (documented, not a bug): an approved delegate inherits
+    // the seller's FULL settlement authority. It can settle a payment's whole
+    // `maxAmount` WITHOUT any proof of service — even after the TTL elapsed,
+    // while the payment is still `Locked` — and credits ALWAYS land on the
+    // SELLER's balance. The buyer's maximum exposure is therefore `maxAmount`
+    // per payment; `refund` after TTL only protects the UNCONSUMED remainder.
+    // TEE attestation and prompt revocation are operational mitigations, NOT
+    // cryptographic proof of service usage.
+
+    /// @dev A lock created BEFORE the grant becomes settleable by the delegate:
+    ///      grants apply to ALL existing Locked payments (execution-time
+    ///      semantics, no lock snapshot).
+    function test_Delegate_PreGrantLock_BecomesSettleable() public {
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6); // locked BEFORE seller approves the delegate
+
+        _approveDelegate(seller, delegateA);
+
+        vm.expectEmit(true, true, true, true, address(escrow));
+        emit Escrow.Settled(pid, buyer, seller, 4e6, 6e6);
+        vm.prank(delegateA);
+        escrow.settle(pid, 4e6);
+
+        // credited to the SELLER, never to the delegate
+        assertEq(escrow.balances(seller), 4e6, "seller credited via delegate");
+        assertEq(escrow.balances(delegateA), 0, "delegate credited nothing");
+        assertEq(escrow.balances(buyer), 96e6, "buyer got the remainder");
+        assertTrue(_stateOf(pid) == Escrow.State.Settled, "terminal Settled");
+    }
+
+    /// @dev Delegate settlePartial: seller is credited immediately, the
+    ///      delegate gains zero, `captured` accumulates, payment stays Locked.
+    function test_Delegate_Partial_CreditsSellerNotDelegate() public {
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+        _approveDelegate(seller, delegateA);
+
+        vm.prank(delegateA);
+        escrow.settlePartial(pid, 4e6);
+
+        assertEq(escrow.balances(seller), 4e6, "seller credited the capture");
+        assertEq(escrow.balances(delegateA), 0, "delegate credited nothing");
+        assertEq(escrow.capturedOf(pid), 4e6, "captured accumulated");
+        assertTrue(_stateOf(pid) == Escrow.State.Locked, "still Locked");
+
+        // delegate may close out the payment too: top-up 6e6 to the seller
+        vm.prank(delegateA);
+        escrow.settle(pid, 10e6);
+        assertEq(escrow.balances(seller), 10e6, "seller credited the full cumulative actual");
+        assertEq(escrow.balances(delegateA), 0, "delegate still credited nothing");
+        assertEq(escrow.balances(buyer), 90e6, "buyer refunded nothing (full actual)");
+        assertTrue(_stateOf(pid) == Escrow.State.Settled, "terminal Settled");
+    }
+
+    /// @dev Delegated credits land on the seller's ledger only: the delegate
+    ///      has NO balance of its own and `withdraw` reverts InsufficientBalance.
+    function test_RevertDelegate_Withdraw_SellerFunds() public {
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+        _approveDelegate(seller, delegateA);
+
+        vm.prank(delegateA);
+        escrow.settlePartial(pid, 4e6);
+
+        assertEq(escrow.balances(delegateA), 0, "delegate ledger zero");
+
+        vm.prank(delegateA);
+        vm.expectRevert(abi.encodeWithSelector(Escrow.InsufficientBalance.selector, 4e6, 0));
+        escrow.withdraw(4e6); // cannot pull the seller's credited funds
+
+        vm.prank(delegateA);
+        vm.expectRevert(abi.encodeWithSelector(Escrow.InsufficientBalance.selector, 1, 0));
+        escrow.withdraw(1); // nothing of its own either
+
+        // the seller, and only the seller, cashes out
+        vm.prank(seller);
+        escrow.withdraw(4e6);
+        assertEq(usdc.balanceOf(seller), 4e6, "seller owns the credit");
+    }
+
+    /// @dev Revoking (approve zero) blocks the delegate on ALL of the seller's
+    ///      in-flight locks IMMEDIATELY — including locks created while the
+    ///      delegate was approved. The seller itself stays fully authorized.
+    function test_RevertDelegate_Revoked_NotSeller_OnExistingLocks() public {
+        _deposit(buyer, 100e6);
+        _approveDelegate(seller, delegateA);
+        uint256 pidLockedWhileApproved = _lock(10e6); // grant applies here too
+        vm.prank(delegateA);
+        escrow.settlePartial(pidLockedWhileApproved, 2e6);
+
+        vm.expectEmit(true, true, false, true, address(escrow));
+        emit Escrow.SettleDelegateApproved(seller, address(0));
+        _approveDelegate(seller, address(0)); // revoke
+
+        assertTrue(escrow.settleDelegateOf(seller) == address(0), "mapping zeroed");
+
+        vm.prank(delegateA);
+        vm.expectRevert(abi.encodeWithSelector(Escrow.NotSeller.selector, delegateA, seller));
+        escrow.settle(pidLockedWhileApproved, 4e6);
+
+        vm.prank(delegateA);
+        vm.expectRevert(abi.encodeWithSelector(Escrow.NotSeller.selector, delegateA, seller));
+        escrow.settlePartial(pidLockedWhileApproved, 1e6);
+
+        // a NEW lock after revoke is also protected
+        uint256 pidAfterRevoke = _lock(5e6);
+        vm.prank(delegateA);
+        vm.expectRevert(abi.encodeWithSelector(Escrow.NotSeller.selector, delegateA, seller));
+        escrow.settle(pidAfterRevoke, 1e6);
+
+        // seller direct settle still valid after revoke
+        vm.prank(seller);
+        escrow.settle(pidLockedWhileApproved, 4e6);
+        assertEq(escrow.balances(seller), 4e6, "seller: 2e6 captured + 2e6 top-up");
+        assertEq(escrow.balances(buyer), 91e6, "buyer: 85e6 + 6e6 remainder");
+        assertTrue(_stateOf(pidLockedWhileApproved) == Escrow.State.Settled, "seller settled after revoke");
+    }
+
+    /// @dev Cross-seller denial: a delegate approved by seller B cannot settle
+    ///      payments designated to seller A (and vice versa). Delegation is
+    ///      strictly per-seller, never per-payment or global.
+    function test_RevertDelegate_CrossSellerDenial() public {
+        address sellerB = makeAddr("sellerB");
+        _deposit(buyer, 100e6);
+
+        vm.startPrank(buyer);
+        uint256 pidA = escrow.lock(seller, 10e6, 0);
+        uint256 pidB = escrow.lock(sellerB, 8e6, 0);
+        vm.stopPrank();
+
+        _approveDelegate(seller, delegateA); // delegateA belongs to `seller`
+
+        vm.prank(delegateA);
+        vm.expectRevert(abi.encodeWithSelector(Escrow.NotSeller.selector, delegateA, sellerB));
+        escrow.settle(pidB, 4e6);
+
+        vm.prank(delegateA);
+        vm.expectRevert(abi.encodeWithSelector(Escrow.NotSeller.selector, delegateA, sellerB));
+        escrow.settlePartial(pidB, 1e6);
+
+        _approveDelegate(sellerB, delegateB); // delegateB belongs to sellerB
+
+        vm.prank(delegateB);
+        vm.expectRevert(abi.encodeWithSelector(Escrow.NotSeller.selector, delegateB, seller));
+        escrow.settle(pidA, 4e6);
+
+        // each delegate still works for its OWN principal
+        vm.prank(delegateA);
+        escrow.settlePartial(pidA, 4e6);
+        vm.prank(delegateB);
+        escrow.settlePartial(pidB, 3e6);
+        assertEq(escrow.balances(seller), 4e6, "sellerA credited");
+        assertEq(escrow.balances(sellerB), 3e6, "sellerB credited");
+    }
+
+    /// @dev Seller keeps FULL authority alongside its delegate: direct settle
+    ///      and direct captures interleave with delegated ones.
+    function test_Delegate_SellerDirect_AlongsideDelegate() public {
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+        _approveDelegate(seller, delegateA);
+
+        vm.prank(seller);
+        escrow.settlePartial(pid, 3e6); // seller direct capture
+
+        vm.prank(delegateA);
+        escrow.settlePartial(pid, 4e6); // delegated capture
+
+        vm.prank(seller);
+        escrow.settle(pid, 9e6); // seller direct close-out: +2e6 top-up
+
+        assertEq(escrow.balances(seller), 9e6, "seller credited 3+4+2 regardless of caller");
+        assertEq(escrow.balances(delegateA), 0, "delegate credited nothing");
+        assertEq(escrow.balances(buyer), 91e6, "buyer refunded maxAmount - actual");
+        assertEq(escrow.capturedOf(pid), 10e6, "captured bumped to maxAmount");
+        assertTrue(_stateOf(pid) == Escrow.State.Settled, "terminal Settled");
+    }
+
+    /// @dev Replacement: approving a new delegate revokes the old one
+    ///      INSTANTLY on every in-flight payment — old fails, new succeeds
+    ///      (including on locks created before the new delegate's grant).
+    function test_Delegate_Replacement_OldLoses_NewSucceeds() public {
+        _deposit(buyer, 100e6);
+        _approveDelegate(seller, delegateA);
+        uint256 pid = _lock(10e6); // pre-dates delegateB's grant
+
+        vm.expectEmit(true, true, false, true, address(escrow));
+        emit Escrow.SettleDelegateApproved(seller, delegateB);
+        _approveDelegate(seller, delegateB); // replacement
+
+        assertEq(escrow.settleDelegateOf(seller), delegateB, "mapping points at the new delegate");
+
+        vm.prank(delegateA);
+        vm.expectRevert(abi.encodeWithSelector(Escrow.NotSeller.selector, delegateA, seller));
+        escrow.settle(pid, 4e6);
+
+        vm.prank(delegateA);
+        vm.expectRevert(abi.encodeWithSelector(Escrow.NotSeller.selector, delegateA, seller));
+        escrow.settlePartial(pid, 1e6);
+
+        // the replacement's grant covers the PRE-EXISTING lock as well
+        vm.prank(delegateB);
+        escrow.settlePartial(pid, 4e6);
+        assertEq(escrow.balances(seller), 4e6, "seller credited via new delegate");
+        assertEq(escrow.balances(delegateB), 0, "new delegate credited nothing");
+    }
+
+    /// @dev Delegated settle stays allowed after the TTL elapsed (while Locked),
+    ///      exactly matching the seller's own TTL policy; it races `refund`.
+    function test_Delegate_Settle_AfterTtl() public {
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+        _approveDelegate(seller, delegateA);
+
+        (,,, uint64 expiry,) = escrow.getPayment(pid);
+        vm.warp(expiry + 1); // TTL elapsed, payment still Locked
+
+        vm.prank(delegateA);
+        escrow.settle(pid, 4e6);
+
+        assertEq(escrow.balances(seller), 4e6, "seller credited post-TTL via delegate");
+        assertTrue(_stateOf(pid) == Escrow.State.Settled, "terminal Settled");
+
+        // refund (past TTL) can no longer touch the settled payment
+        vm.prank(buyer);
+        vm.expectRevert(abi.encodeWithSelector(Escrow.NotLocked.selector, pid, Escrow.State.Settled));
+        escrow.refund(pid);
+    }
+
+    /// @dev TRUST BOUNDARY, pinned as behavior: a delegate may settle the FULL
+    ///      `maxAmount` with ZERO service delivered — no proof, no check, even
+    ///      after TTL. The buyer's maximum exposure is `maxAmount`; this is the
+    ///      accepted delegation trade-off, NOT an overcharge "immunity".
+    function test_Delegate_MaxAmount_ZeroService_TrustBoundary() public {
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+        _approveDelegate(seller, delegateA);
+
+        // no usage happened; TTL even elapsed; delegate still consumes it all
+        (,,, uint64 expiry,) = escrow.getPayment(pid);
+        vm.warp(expiry + 1);
+
+        vm.prank(delegateA);
+        escrow.settle(pid, 10e6);
+
+        assertEq(escrow.balances(seller), 10e6, "seller keeps the full maxAmount");
+        assertEq(escrow.balances(delegateA), 0, "delegate credited nothing");
+        assertEq(escrow.balances(buyer), 90e6, "buyer refund share is zero: max exposure realized");
+        assertTrue(_stateOf(pid) == Escrow.State.Settled, "terminal Settled");
+    }
+
+    /// @dev Event semantics: SettleDelegateApproved is emitted on grant AND on
+    ///      revoke (zero delegate), always naming the seller and the new state.
+    function test_Delegate_EventGrantAndRevoke() public {
+        vm.expectEmit(true, true, false, true, address(escrow));
+        emit Escrow.SettleDelegateApproved(seller, delegateA);
+        _approveDelegate(seller, delegateA);
+        assertEq(escrow.settleDelegateOf(seller), delegateA, "grant stored");
+
+        vm.expectEmit(true, true, false, true, address(escrow));
+        emit Escrow.SettleDelegateApproved(seller, address(0));
+        _approveDelegate(seller, address(0));
+        assertEq(escrow.settleDelegateOf(seller), address(0), "revoke stored");
+
+        // self-management only: each address writes ONLY its own slot
+        _approveDelegate(delegateA, delegateB);
+        assertEq(escrow.settleDelegateOf(delegateA), delegateB, "delegateA's own grant");
+        assertEq(escrow.settleDelegateOf(seller), address(0), "seller's slot untouched");
+    }
+
+    /// @dev Fee + captured interplay is preserved for delegated calls: each
+    ///      seller credit is charged the current FEE_BPS, `captured` tracks the
+    ///      GROSS amount, and the settle top-up pays the fee on the increment.
+    function test_Delegate_FeeAndCapturedInteractionsPreserved() public {
+        _newFeeEscrow(100); // 1% fee
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+        _approveDelegate(seller, delegateA);
+
+        // delegated capture at 100 bps: fee 40_000, seller net 3_960_000
+        vm.expectEmit(true, false, false, true, address(escrow));
+        emit Escrow.FeeTaken(pid, 40_000, 3_960_000);
+        vm.expectEmit(true, false, false, true, address(escrow));
+        emit Escrow.SettlePartial(pid, 4e6, 4e6);
+        vm.prank(delegateA);
+        escrow.settlePartial(pid, 4e6);
+
+        assertEq(escrow.balances(seller), 3_960_000, "seller credited net");
+        assertEq(escrow.balances(treasury), 40_000, "treasury charged once");
+        assertEq(escrow.balances(delegateA), 0, "delegate credited nothing");
+        assertEq(escrow.capturedOf(pid), 4e6, "captured tracks GROSS");
+        assertTrue(_stateOf(pid) == Escrow.State.Locked, "still Locked");
+
+        // delegated close-out: top-up 6e6 at 100 bps -> fee 60_000
+        vm.expectEmit(true, false, false, true, address(escrow));
+        emit Escrow.FeeTaken(pid, 60_000, 5_940_000);
+        vm.prank(delegateA);
+        escrow.settle(pid, 10e6);
+
+        assertEq(escrow.balances(seller), 3_960_000 + 5_940_000, "seller credited net top-up");
+        assertEq(escrow.balances(treasury), 40_000 + 60_000, "both fees accrued");
+        assertEq(escrow.balances(buyer), 90e6, "buyer refund fee-free (zero here)");
+        assertEq(escrow.capturedOf(pid), 10e6, "captured terminal");
+        assertTrue(_stateOf(pid) == Escrow.State.Settled, "terminal Settled");
+    }
+
+    /// @dev An unapproved caller (never granted by anyone) fails on both
+    ///      settle and settlePartial with the exact NotSeller(caller, seller).
+    function test_RevertDelegate_UnapprovedCaller() public {
+        _deposit(buyer, 100e6);
+        uint256 pid = _lock(10e6);
+
+        assertTrue(escrow.settleDelegateOf(seller) == address(0), "no delegate approved");
+
+        vm.prank(delegateA);
+        vm.expectRevert(abi.encodeWithSelector(Escrow.NotSeller.selector, delegateA, seller));
+        escrow.settle(pid, 4e6);
+
+        vm.prank(delegateA);
+        vm.expectRevert(abi.encodeWithSelector(Escrow.NotSeller.selector, delegateA, seller));
+        escrow.settlePartial(pid, 4e6);
+
+        // nothing changed by the failed calls
+        assertEq(escrow.balances(seller), 0, "seller untouched");
+        assertEq(escrow.balances(delegateA), 0, "caller untouched");
+        assertTrue(_stateOf(pid) == Escrow.State.Locked, "payment untouched");
     }
 }

@@ -20,8 +20,10 @@ from tests.conftest import (
     BUYER_KEY,
     CHAIN_ID,
     ESCROW_ADDR,
+    OTHER_KEY,
     REGISTRY_ADDR,
     SELLER_KEY,
+    TEE_KEY,
     USDC_ADDR,
     addr_of,
     all_output,
@@ -42,6 +44,7 @@ from tokenshare_cli.relay_client import RelayResponse  # noqa: E402
 runner = CliRunner()
 
 SELLER = addr_of(SELLER_KEY)
+OTHER = addr_of(OTHER_KEY)
 
 
 def _set_full_env(monkeypatch) -> None:
@@ -1053,3 +1056,209 @@ def test_call_relay_localhost_no_warning(monkeypatch):
     result = runner.invoke(app, ["call", "hi", "--seller", SELLER, "--relay", "http://127.0.0.1:8787"])
     assert result.exit_code == 0, all_output(result)
     assert "warning: --relay" not in all_output(result)
+
+
+# ---------------------------------------------------------------------------
+# M15 shared mode: --expected-signer / EXPECTED_SIGNER receipt signer pin
+# ---------------------------------------------------------------------------
+
+TEE = addr_of(TEE_KEY)
+
+
+def _mock_stream_with_receipt(monkeypatch, receipt):
+    """Stream-mode transport mock carrying an X-Receipt header (mirrors
+    test_call_stream_flow)."""
+    headers = {"X-Settle-Status": "settled", "X-Receipt": receipt_header(receipt)}
+    closed = {"n": 0}
+
+    def fake_stream(endpoint, payment_id, signature, body_bytes, timeout=120.0):
+        lines = [
+            "data: " + json.dumps({"choices": [{"delta": {"content": "Hi"}}]}),
+            "",
+            "data: " + json.dumps({"choices": [], "usage": {"prompt_tokens": 3, "completion_tokens": 1}}),
+            "",
+            "data: [DONE]",
+        ]
+        from tokenshare_cli.relay_client import RelayStreamHandle
+
+        return RelayStreamHandle(
+            status_code=200, headers=headers, lines=iter(lines),
+            close=lambda: closed.__setitem__("n", closed["n"] + 1),
+        )
+
+    monkeypatch.setattr(app_mod, "open_chat_stream", fake_stream)
+    return closed
+
+
+def test_call_expected_signer_flag_tee_receipt_ok(monkeypatch, tmp_path):
+    """Shared mode via flag: TEE-signed receipt + pinned TEE signer -> OK."""
+    _set_full_env(monkeypatch)
+    FakeChain(monkeypatch)
+    receipt = make_receipt(TEE_KEY, 42, seller_addr=SELLER)
+    _mock_http(monkeypatch, receipt_header(receipt))
+    disputes = tmp_path / "disputes.json"
+
+    result = runner.invoke(
+        app,
+        ["--disputes-file", str(disputes), "call", "hi", "--seller", SELLER,
+         "--expected-signer", TEE],
+    )
+    assert result.exit_code == 0, all_output(result)
+    out = all_output(result)
+    assert "Receipt verification: OK" in out
+    assert f"recovered={TEE} == expected TEE signer" in out
+    assert f"seller/operator={SELLER}" in out
+    assert not disputes.exists()  # no dispute on success
+
+
+def test_call_expected_signer_env_tee_receipt_ok(monkeypatch, tmp_path):
+    """Shared mode via env EXPECTED_SIGNER -> OK (same as flag)."""
+    _set_full_env(monkeypatch)
+    FakeChain(monkeypatch)
+    receipt = make_receipt(TEE_KEY, 42, seller_addr=SELLER)
+    _mock_http(monkeypatch, receipt_header(receipt))
+    monkeypatch.setenv("EXPECTED_SIGNER", TEE)
+
+    result = runner.invoke(app, ["call", "hi", "--seller", SELLER])
+    assert result.exit_code == 0, all_output(result)
+    assert "Receipt verification: OK" in all_output(result)
+
+
+def test_call_expected_signer_flag_wins_over_wrong_env(monkeypatch):
+    """Explicit --expected-signer beats a WRONG env EXPECTED_SIGNER."""
+    _set_full_env(monkeypatch)
+    FakeChain(monkeypatch)
+    receipt = make_receipt(TEE_KEY, 42, seller_addr=SELLER)
+    _mock_http(monkeypatch, receipt_header(receipt))
+    monkeypatch.setenv("EXPECTED_SIGNER", OTHER)  # would fail if env won
+
+    result = runner.invoke(
+        app, ["call", "hi", "--seller", SELLER, "--expected-signer", TEE]
+    )
+    assert result.exit_code == 0, all_output(result)
+    assert "Receipt verification: OK" in all_output(result)
+
+
+def test_call_expected_signer_env_wrong_signer_records_dispute(monkeypatch, tmp_path):
+    """Pinned env signer != actual TEE signer -> FAILED + dispute."""
+    _set_full_env(monkeypatch)
+    FakeChain(monkeypatch)
+    receipt = make_receipt(TEE_KEY, 42, seller_addr=SELLER)
+    _mock_http(monkeypatch, receipt_header(receipt))
+    monkeypatch.setenv("EXPECTED_SIGNER", OTHER)
+    disputes = tmp_path / "disputes.json"
+
+    result = runner.invoke(
+        app, ["--disputes-file", str(disputes), "call", "hi", "--seller", SELLER]
+    )
+    assert result.exit_code == 0
+    out = all_output(result)
+    assert "verification FAILED" in out
+    assert f"expected_signer={OTHER}" in out
+    ledger = json.loads(disputes.read_text())
+    assert ledger["42"][0]["reason"] == "receipt-recover-mismatch"
+    assert ledger["42"][0]["expected_seller"] == SELLER
+    assert ledger["42"][0]["detail"] == f"expected_signer={OTHER}"
+
+
+def test_call_expected_signer_message_seller_mismatch_records_dispute(monkeypatch, tmp_path):
+    """TEE signer matches the pin but message.seller is NOT the listing
+    operator -> FAILED with receipt-seller-mismatch (economic seller is
+    never relaxed)."""
+    _set_full_env(monkeypatch)
+    FakeChain(monkeypatch)
+    receipt = make_receipt(TEE_KEY, 42, seller_addr=OTHER)
+    _mock_http(monkeypatch, receipt_header(receipt))
+    disputes = tmp_path / "disputes.json"
+
+    result = runner.invoke(
+        app,
+        ["--disputes-file", str(disputes), "call", "hi", "--seller", SELLER,
+         "--expected-signer", TEE],
+    )
+    assert result.exit_code == 0
+    out = all_output(result)
+    assert "verification FAILED" in out
+    assert "reason=seller-mismatch" in out
+    ledger = json.loads(disputes.read_text())
+    assert ledger["42"][0]["reason"] == "receipt-seller-mismatch"
+    assert ledger["42"][0]["expected_seller"] == SELLER
+
+
+def test_call_stream_expected_signer_ok(monkeypatch, tmp_path):
+    """--stream and non-stream paths enforce the pin identically."""
+    _set_full_env(monkeypatch)
+    FakeChain(monkeypatch)
+    receipt = make_receipt(TEE_KEY, 42, seller_addr=SELLER)
+    _mock_stream_with_receipt(monkeypatch, receipt)
+    monkeypatch.setenv("EXPECTED_SIGNER", TEE)
+
+    result = runner.invoke(app, ["call", "hi", "--seller", SELLER, "--stream"])
+    assert result.exit_code == 0, all_output(result)
+    out = all_output(result)
+    assert "Receipt verification: OK" in out
+    assert f"recovered={TEE} == expected TEE signer" in out
+
+
+def test_call_without_pin_tee_receipt_rejected(monkeypatch, tmp_path):
+    """No flag/env -> old single-tenant behavior: a TEE-signed receipt is
+    never auto-accepted (no TOFU, no relay-derived signer)."""
+    _set_full_env(monkeypatch)
+    FakeChain(monkeypatch)
+    receipt = make_receipt(TEE_KEY, 42, seller_addr=SELLER)
+    _mock_http(monkeypatch, receipt_header(receipt))
+    monkeypatch.delenv("EXPECTED_SIGNER", raising=False)
+    disputes = tmp_path / "disputes.json"
+
+    result = runner.invoke(
+        app, ["--disputes-file", str(disputes), "call", "hi", "--seller", SELLER]
+    )
+    assert result.exit_code == 0
+    out = all_output(result)
+    assert "verification FAILED" in out
+    assert "reason=recover-mismatch" in out
+    ledger = json.loads(disputes.read_text())
+    assert ledger["42"][0]["reason"] == "receipt-recover-mismatch"
+
+
+def test_call_expected_signer_env_empty_keeps_old_behavior(monkeypatch):
+    """Empty EXPECTED_SIGNER env is treated as unset (single-tenant flow)."""
+    _set_full_env(monkeypatch)
+    FakeChain(monkeypatch)
+    receipt = make_receipt(SELLER_KEY, 42, seller_addr=SELLER)
+    _mock_http(monkeypatch, receipt_header(receipt))
+    monkeypatch.setenv("EXPECTED_SIGNER", "   ")
+
+    result = runner.invoke(app, ["call", "hi", "--seller", SELLER])
+    assert result.exit_code == 0, all_output(result)
+    assert "recovered=" + SELLER + " == seller/operator" in all_output(result)
+
+
+def test_call_expected_signer_flag_invalid_address_fails_fast(monkeypatch):
+    """Bad --expected-signer address -> clean exit 2 BEFORE lock/HTTP."""
+    _set_full_env(monkeypatch)
+    fake = FakeChain(monkeypatch)
+    seen = _mock_http(monkeypatch, None)
+
+    result = runner.invoke(
+        app, ["call", "hi", "--seller", SELLER, "--expected-signer", "0x1234"]
+    )
+    assert result.exit_code == 2
+    out = all_output(result)
+    assert "--expected-signer" in out
+    assert "not a valid Ethereum address" in out
+    assert not any(c[0] == "lock" for c in fake.calls)  # no lock happened
+    assert "payment_id" not in seen  # relay never contacted
+
+
+def test_call_expected_signer_env_invalid_address_fails(monkeypatch):
+    """Bad EXPECTED_SIGNER env -> clean exit 2 with the env name in the message."""
+    _set_full_env(monkeypatch)
+    FakeChain(monkeypatch)
+    monkeypatch.setenv("EXPECTED_SIGNER", "0xzz-nope")
+
+    result = runner.invoke(app, ["call", "hi", "--seller", SELLER])
+    assert result.exit_code == 2
+    out = all_output(result)
+    assert "EXPECTED_SIGNER" in out
+    assert "not a valid Ethereum address" in out

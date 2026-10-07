@@ -121,7 +121,8 @@ Custom upstreams (`http://127.0.0.1:…` mocks, proxies) are **development and t
 
 | Contract | Address | Notes |
 |----------|---------|-------|
-| Escrow v3.1 | `0x157C551D145d3c4bBF8f3554c43Fb3C931D71aD5` | protocol fee `feeBps = 0` today — owner-adjustable via `setFee` (`FeeTaken` event on every seller credit) |
+| Escrow v3.2 (current) | `0xe4D5Eb0dBDB6DB8063C07ECF7EDFcCdDB9Ad514c` | deployed 2026-10-07 (tx `0xc7ca3ac798e16ace9f4554df51912aed235753f360d7f0a6417b7b0523afce4e`, block 68854360, gasUsed 1436119) — protocol fee `feeBps = 0` today — owner-adjustable via `setFee` (`FeeTaken` event on every seller credit); M15 `approveSettleDelegate` surface |
+| Escrow v3.1 (historical) | `0x157C551D145d3c4bBF8f3554c43Fb3C931D71aD5` | superseded by v3.2 on 2026-10-07 — kept for audit evidence; escrow balances do NOT carry over, buyers re-deposit against v3.2 |
 | Registry v4 | `0xeD347cDc1761750E20C024459b38dedFb1462254` | per-model three-tier prices + on-chain seller enumeration + `removeModel` |
 
 Both networks run the **same deployed bytecode** — only configuration (RPC, chain ID, USDC address) changes.
@@ -134,12 +135,15 @@ Both networks run the **same deployed bytecode** — only configuration (RPC, ch
 # 1. Install Python dependencies (relay + CLI)
 pip install -r relay/requirements.txt -r cli/requirements.txt
 
-# 2. Build & test contracts (forge: 118 tests green; cre settlement-audit: 10)
+# 2. Build & test contracts (forge: 130 tests green; cre settlement-audit: 10)
 cd contracts && forge test && cd ..
 
 # 3. Relay + CLI unit tests
-cd relay && pytest tests && cd ..     # 153 tests green
-cd cli && pytest tests && cd ..       # 132 tests green
+cd relay && pytest tests && cd ..     # 345 tests green
+cd cli && pytest tests && cd ..       # 151 tests green
+node scripts/check-custody-web.mjs    # 159 static checks green — see web/TESTING.md
+#    (separate: node scripts/smoke-web.mjs → 27 PASS / 3 WARN of 30 items;
+#     needs an HTTP static server: python3 -m http.server 8080 -d web)
 
 # 4. Configure (keys/addresses — never commit .env)
 cp .env.example .env
@@ -148,7 +152,7 @@ cp .env.example .env
 #    no API key needed (a deterministic mock OpenAI is started automatically);
 #    without keys the monad path skips with exit 0:
 python3 e2e/run.py --network base_sepolia
-# (e2e helper unit suite: pytest e2e/tests → 22 passed, 1 skipped)
+# (e2e helper unit suite: pytest e2e/tests → 30 passed, 1 skipped)
 ```
 
 Expected tail of a successful run:
@@ -296,20 +300,20 @@ python3 e2e/register_listing.py --network monad_testnet \
 
 ```
 tokenshare/
-├── contracts/               # Foundry: Escrow + Registry, 118 tests green (cre: 10)
+├── contracts/               # Foundry: Escrow + Registry, 130 tests green (cre: 10)
 │   ├── src/Escrow.sol       # v3.1: deposit/lock/settle/settlePartial/refund + protocol fee
 │   ├── src/Registry.sol     # v4: per-model prices, seller enumeration, removeModel
 │   └── script/Deploy.s.sol  # --sig run(string), writes deployed.json
 ├── relay/                   # FastAPI seller relay
 │   ├── app/                 # main / pricing / receipt / chain / config
-│   ├── tests/               # 153 tests green
+│   ├── tests/               # 345 tests green
 │   └── docker-compose.yml   # container run (Phala TDX oriented — see VPS section)
 ├── cli/                     # Typer buyer CLI
 │   ├── tokenshare_cli/      # signing / receipt / streaming / disputes / api keys
-│   └── tests/               # 132 tests green
+│   └── tests/               # 151 tests green
 ├── web/                     # static market page + console (zero framework)
 ├── e2e/                     # run.py --network base_sepolia|monad_testnet + mock_openai.py
-│   └── tests/               # 22 passed, 1 skipped (helper suite)
+│   └── tests/               # 30 passed, 1 skipped (helper suite)
 └── TokenShare-BUILD_SPEC.md # build spec
 ```
 

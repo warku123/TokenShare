@@ -38,9 +38,9 @@
  * Indices are 0-based per the CLI reference; official multi-trigger examples
  * use 1 only when the log handler is the second entry.
  *
- * Monad testnet facts (verified 2026-09-23):
+ * Monad testnet facts (verified 2026-10-07):
  *   chain id 10143, rpc https://testnet-rpc.monad.xyz (project.yaml)
- *   escrow   0x157C551D145d3c4bBF8f3554c43Fb3C931D71aD5
+ *   escrow   0xe4D5Eb0dBDB6DB8063C07ECF7EDFcCdDB9Ad514c (Escrow v3.2)
  *   registry 0xeD347cDc1761750E20C024459b38dedFb1462254 (Registry v4)
  * The authoritative source for these addresses is always
  * contracts/deployed.monad.json — refresh this header + both config.*.json

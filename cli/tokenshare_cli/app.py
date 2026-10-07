@@ -8,7 +8,10 @@ plus `disputes` for reviewing failed-receipt records, `listings` /
 Env (required, PIN): BUYER_PRIVATE_KEY / RPC_URL / CHAIN_ID / ESCROW_ADDR /
 REGISTRY_ADDR / USDC_ADDR. Optional: SELLER_ADDR (default seller for `call`),
 PROMPT_TOKEN_CAP / COMPLETION_TOKEN_CAP (default lock sizing, mirrors relay
-defaults 200000 / 32000), TX_TIMEOUT_S.
+defaults 200000 / 32000), TX_TIMEOUT_S, EXPECTED_SIGNER (M15 shared mode:
+explicit pin of the independent TEE address that must have signed the
+X-Receipt; `--expected-signer` overrides it — never auto-derived from
+relay-reported fields).
 
 The default relay endpoint comes from Registry getListing(seller).endpoint;
 `--relay` overrides it. Amount inputs are human USDC ("5" = 5 USDC =
@@ -28,8 +31,8 @@ from . import attestation as attestation_mod
 from . import chain as chain_mod
 from . import disputes as dispute_mod
 from . import signing
-from .config import load_config, load_seller_override
-from .errors import TokenshareError
+from .config import load_config, load_expected_signer_override, load_seller_override
+from .errors import ConfigError, TokenshareError
 from .receipt import Receipt, ReceiptDecodeError, decode_receipt, verify_receipt
 from .relay_client import get_usage, post_chat_json, open_chat_stream
 from .signing import RELAY_CHAT_PATH
@@ -45,7 +48,7 @@ _APP_HELP = """TokenShare buyer CLI — rent sellers' OpenAI API quota, paid in 
 
 Env vars required by every chain-touching command (no values are ever hardcoded): BUYER_PRIVATE_KEY (buyer EVM key, 0x-hex; never logged or echoed), RPC_URL (JSON-RPC endpoint), CHAIN_ID (must match RPC_URL), ESCROW_ADDR, REGISTRY_ADDR, USDC_ADDR (6-decimal USDC ERC-20).
 
-Optional env: SELLER_ADDR (default seller for call), PROMPT_TOKEN_CAP / COMPLETION_TOKEN_CAP (default lock sizing, mirrors relay defaults 200000 / 32000), TX_TIMEOUT_S (tx wait timeout).
+Optional env: SELLER_ADDR (default seller for call), PROMPT_TOKEN_CAP / COMPLETION_TOKEN_CAP (default lock sizing, mirrors relay defaults 200000 / 32000), TX_TIMEOUT_S (tx wait timeout), EXPECTED_SIGNER (M15 shared mode: pin the independent TEE address that must have signed the X-Receipt; --expected-signer overrides it — the pin is never auto-derived from relay-reported fields and there is no TOFU).
 
 Commands: deposit (approve + deposit USDC into Escrow); lock (lock(seller, maxAmount, ttl=600) -> prints paymentId); call (pick seller -> lock NEW paymentId, or reuse via --payment-id -> read Registry listing.endpoint -> POST /v1/chat/completions with EIP-191 X-Payment-Id + X-Signature -> prints reply, X-Settle-Status, and verifies the EIP-712 X-Receipt against the Registry listing operator); balance (wallet USDC + withdrawable Escrow); refund (withdraw an expired lock after its TTL); disputes (list locally recorded receipt-verification disputes); verify-attestation (best-effort off-chain parse of a TEE attestation quote + optional on-chain digest comparison); listings (compare ACTIVE Registry listings — per-model tiered prices + estimated per-call cost, cheapest first; sellers discovered via the Registry v3 on-chain enumeration sellerCount/getSellers); remove-model (OPERATOR-side: remove ONE model + its parallel price row from your own listing via Registry v4 removeModel, signed with the listing-operator key — --key-env, default BUYER_PRIVATE_KEY for the demo single-account setup); mint-key (M13: sign a stateless bearer API key tsk1.… bound to an existing Locked payment — agents call the relay with Authorization: Bearer, per-call capture keeps the payment Locked until TTL); usage (M13: cumulative captured/maxAmount/remaining view via GET /payment/{id}/usage).
 
@@ -847,6 +850,16 @@ def call_cmd(
     ttl: int = typer.Option(600, "--ttl", help="TTL for the auto-lock (seconds)."),
     relay: Optional[str] = typer.Option(None, "--relay", help="Override the relay endpoint (default: Registry listing endpoint)."),
     payment_id: Optional[int] = typer.Option(None, "--payment-id", help="Reuse an existing Locked payment instead of locking a new one (not PIN-defined; when absent a NEW paymentId is always locked)."),
+    expected_signer: Optional[str] = typer.Option(
+        None,
+        "--expected-signer",
+        help=(
+            "M15 shared mode: pin the independent TEE address that must have signed "
+            "the X-Receipt (recover == pin); the receipt's economic seller must still "
+            "be the on-chain listing operator. Explicit flag wins over env "
+            "EXPECTED_SIGNER; never auto-derived from relay-reported fields."
+        ),
+    ),
     stream: bool = typer.Option(False, "--stream", help="Pass stream=true and render SSE deltas (bonus feature)."),
     timeout: float = typer.Option(120.0, "--timeout", help="HTTP timeout seconds; also caps the receipt GET-poll deadline (max 30s)."),
 ) -> None:
@@ -870,6 +883,11 @@ def call_cmd(
         from eth_utils import to_checksum_address
 
         seller_addr = to_checksum_address(seller_addr)
+
+        # M15 shared mode: explicit --expected-signer wins over env
+        # EXPECTED_SIGNER; both are strictly validated. Resolved BEFORE any
+        # chain/HTTP work so a malformed pin fails fast.
+        signer_pin = _resolve_signer_pin(expected_signer)
 
         ctx = chain_mod.open_chain(cfg)
         listing = chain_mod.get_listing(ctx, seller_addr)
@@ -934,11 +952,33 @@ def call_cmd(
         signature = signing.sign_request(cfg.private_key, "POST", RELAY_CHAT_PATH, body_bytes, active_pid)
 
         if stream:
-            _run_stream(endpoint, active_pid, signature, body_bytes, expected_seller, timeout, cfg.chain_id)
+            _run_stream(endpoint, active_pid, signature, body_bytes, expected_seller, timeout, cfg.chain_id, signer_pin)
         else:
-            _run_json(endpoint, active_pid, signature, body_bytes, expected_seller, timeout, cfg.chain_id)
+            _run_json(endpoint, active_pid, signature, body_bytes, expected_seller, timeout, cfg.chain_id, signer_pin)
 
     _run(body)
+
+
+def _resolve_signer_pin(flag_value: str | None) -> str | None:
+    """M15: explicit --expected-signer wins over env EXPECTED_SIGNER.
+
+    Both sources are strictly validated as Ethereum addresses (bad values are
+    a clean exit-2 error, never a silent skip). When neither is provided the
+    CLI keeps the single-tenant behavior (recover is checked against the
+    Registry listing operator). The pin is NEVER taken from /info, relay
+    headers, or any self-reported field, and there is no TOFU.
+    """
+    from eth_utils import to_checksum_address
+
+    if flag_value is not None:
+        raw = flag_value.strip()
+        try:
+            return to_checksum_address(raw)
+        except Exception as exc:
+            raise ConfigError(
+                f"--expected-signer {raw!r} is not a valid Ethereum address"
+            ) from exc
+    return load_expected_signer_override()
 
 
 def _require_listing(listing: dict, relay_override: str | None) -> None:
@@ -980,7 +1020,7 @@ def _chat_body(prompt: str, model: str, stream: bool) -> bytes:
     return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
 
-def _run_json(endpoint: str, payment_id: int, signature: str, body_bytes: bytes, expected_seller: str, timeout: float, chain_id: int) -> None:
+def _run_json(endpoint: str, payment_id: int, signature: str, body_bytes: bytes, expected_seller: str, timeout: float, chain_id: int, expected_signer: str | None = None) -> None:
     typer.echo(f"POST {endpoint.rstrip('/')}{RELAY_CHAT_PATH}")
     response = post_chat_json(endpoint, payment_id, signature, body_bytes, timeout)
     typer.echo(f"HTTP status: {response.status_code}")
@@ -1006,10 +1046,10 @@ def _run_json(endpoint: str, payment_id: int, signature: str, body_bytes: bytes,
             f"completion={usage.get('completion_tokens')}"
         )
 
-    _verify_and_report(endpoint, payment_id, response.headers, expected_seller, timeout, chain_id)
+    _verify_and_report(endpoint, payment_id, response.headers, expected_seller, timeout, chain_id, expected_signer)
 
 
-def _run_stream(endpoint: str, payment_id: int, signature: str, body_bytes: bytes, expected_seller: str, timeout: float, chain_id: int) -> None:
+def _run_stream(endpoint: str, payment_id: int, signature: str, body_bytes: bytes, expected_seller: str, timeout: float, chain_id: int, expected_signer: str | None = None) -> None:
     handle = open_chat_stream(endpoint, payment_id, signature, body_bytes, timeout)
     typer.echo(f"HTTP status: {handle.status_code} (stream)")
     settle = _hdr(handle.headers, "X-Settle-Status")
@@ -1026,7 +1066,7 @@ def _run_stream(endpoint: str, payment_id: int, signature: str, body_bytes: byte
             f"completion={usage.get('completion_tokens')}"
         )
     typer.echo(f"Settle status: {settle or '(header missing)'}")
-    _verify_and_report(endpoint, payment_id, handle.headers, expected_seller, timeout, chain_id)
+    _verify_and_report(endpoint, payment_id, handle.headers, expected_seller, timeout, chain_id, expected_signer)
 
 
 def _close_stream(handle) -> None:
@@ -1050,11 +1090,17 @@ def _verify_and_report(
     expected_seller: str,
     timeout: float = 30.0,
     chain_id: int | None = None,
+    expected_signer: str | None = None,
 ) -> None:
     """Verify X-Receipt == Registry listing operator; warn + dispute on failure.
 
     The receipt EIP-712 domain is additionally asserted against the PIN
     {name:"TokenShare Relay", version:"1", chainId:<cfg.chain_id>} (m1).
+
+    M15 shared mode: when an independent TEE signer pin is given
+    (--expected-signer / env EXPECTED_SIGNER), the signature must recover to
+    THAT address while receipt.message.seller must still equal the on-chain
+    listing operator; domain/paymentId checks are unchanged.
     """
     disputes_path = dispute_mod.resolve_path(_disputes_path())
     raw = _hdr(headers, "X-Receipt")
@@ -1079,9 +1125,15 @@ def _verify_and_report(
         typer.echo(f"Dispute recorded: payment {payment_id} -> {disputes_path}")
         return
 
-    check = verify_receipt(receipt, expected_seller, payment_id, chain_id)
+    check = verify_receipt(receipt, expected_seller, payment_id, chain_id, expected_signer)
     if check.ok and check.reason is None:
-        typer.echo(f"Receipt verification: OK (recovered={check.recovered} == seller/operator)")
+        if expected_signer:
+            typer.echo(
+                f"Receipt verification: OK (recovered={check.recovered} == expected TEE signer; "
+                f"seller/operator={expected_seller})"
+            )
+        else:
+            typer.echo(f"Receipt verification: OK (recovered={check.recovered} == seller/operator)")
         typer.echo(
             f"Receipt: paymentId={receipt.payment_id} prompt={receipt.prompt_tokens} "
             f"cached={receipt.cached_tokens} completion={receipt.completion_tokens} "
@@ -1093,6 +1145,7 @@ def _verify_and_report(
     _echo_err(
         f"warning: receipt verification FAILED for payment {payment_id}: "
         f"reason={check.reason} recovered={check.recovered} expected_seller={expected_seller}"
+        + (f" expected_signer={expected_signer}" if expected_signer else "")
     )
     reason_map = {
         "recover-mismatch": dispute_mod.REASON_RECOVER_MISMATCH,
@@ -1104,6 +1157,7 @@ def _verify_and_report(
         disputes_path, payment_id,
         reason_map.get(check.reason or "", dispute_mod.REASON_DECODE_FAILED),
         expected_seller, check.recovered, receipt.seller,
+        detail=(f"expected_signer={expected_signer}" if expected_signer else None),
     )
     typer.echo(f"Dispute recorded: payment {payment_id} -> {disputes_path}")
 
