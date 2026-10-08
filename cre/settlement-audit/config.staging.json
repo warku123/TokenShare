@@ -2,8 +2,9 @@
   "chainSelectorName": "monad-testnet",
   "escrowAddress": "0xe4D5Eb0dBDB6DB8063C07ECF7EDFcCdDB9Ad514c",
   "registryAddress": "0xeD347cDc1761750E20C024459b38dedFb1462254",
-  "anchorAddress": "0xYOUR_RECEIPT_ANCHOR_CONTRACT_ADDRESS",
-  "relayBaseUrl": "http://127.0.0.1:8787",
+  "anchorAddress": "0xE2d468cdD917E73C9F02d4Ac629223Ac062D901D",
+  "relayBaseUrl": "https://c30652f4833465adda9bdc7ac557e8b45e8e66c6-8787.dstack-pha-prod5.phala.network",
   "maxPriceUsd6": "1000000000",
-  "workflowOwner": "0xYOUR_WORKFLOW_OWNER_ADDRESS"
+  "workflowOwner": "0x38c26E1782b7E6F656Aa35EbF473e2ff0D718Dd6",
+  "receiptSignerAddress": "0x49CA3eADB3b8F23623f735918A6F2b945F60fb2D"
 }

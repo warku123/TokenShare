@@ -1,0 +1,3 @@
+# CRE build artifacts (.temp wasm/js bundles; binary.wasm = CLI build output)
+.temp/
+binary.wasm

@@ -4,11 +4,13 @@
   "main": "dist/main.js",
   "private": true,
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test tests/"
   },
   "license": "UNLICENSED",
   "dependencies": {
     "@chainlink/cre-sdk": "^1.6.0",
+    "@noble/curves": "1.9.6",
     "viem": "2.34.0",
     "zod": "3.25.76"
   },

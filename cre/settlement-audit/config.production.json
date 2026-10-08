@@ -5,5 +5,6 @@
   "anchorAddress": "0xYOUR_RECEIPT_ANCHOR_CONTRACT_ADDRESS",
   "relayBaseUrl": "https://YOUR_PUBLIC_RELAY_ENDPOINT",
   "maxPriceUsd6": "1000000000",
-  "workflowOwner": "0xYOUR_WORKFLOW_OWNER_ADDRESS"
+  "workflowOwner": "0xYOUR_WORKFLOW_OWNER_ADDRESS",
+  "receiptSignerAddress": "0x49CA3eADB3b8F23623f735918A6F2b945F60fb2D"
 }
