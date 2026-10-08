@@ -1656,11 +1656,15 @@ window.TS = (() => {
 
   /* ── policy consent gate (web policy reading consent) ──────
      Paid seller/buyer actions require an in-session reading consent,
-     bound to BOTH the policy version and the connected wallet address.
+     bound to the policy version and recorded PER WALLET address.
      sessionStorage (per-tab): key "tokenshare.policyConsent.v1", value
-       {"version":"2026-10-08","wallet":"0x…","ts":<epoch ms>}
-     A wallet switch/disconnect, a different wallet, or a POLICY_VERSION
-     bump all invalidate the record → the gate re-arms (re-tick needed).
+       {"version":"2026-10-08","wallets":{"0x…":<epoch ms>, …}}
+     Lifecycle (user-ruled):
+       · DISCONNECT (button or in-wallet) REVOKES the outgoing wallet's
+         consent — reconnecting the same wallet requires a re-tick.
+       · ACCOUNT SWITCH PRESERVES consent — per-wallet isolation means
+         switching A→B→A keeps A's tick valid (B needs its own).
+       · a POLICY_VERSION bump wipes every record → re-tick for all.
      Deliberately NO wallet signature — this is a plain UI-level
      acknowledgement, nothing on-chain, nothing signed. */
   const POLICY_VERSION = "2026-10-08";
@@ -1673,6 +1677,7 @@ window.TS = (() => {
     const store = () => {
       try { return window.sessionStorage || null; } catch { return null; }
     };
+    const lower = (w) => String(w || "").toLowerCase();
     const read = () => {
       const s = store();
       if (!s) return null;
@@ -1681,16 +1686,39 @@ window.TS = (() => {
         return rec && typeof rec === "object" ? rec : null;
       } catch { return null; }
     };
+    const write = (rec) => {
+      const s = store();
+      if (!s) return;
+      try { s.setItem(POLICY_CONSENT_KEY, JSON.stringify(rec)); } catch { /* blocked storage */ }
+    };
+    /* normalize: current version + a real per-wallet map — anything else
+       (legacy single-wallet shape, stale version, corruption) starts fresh */
+    const current = () => {
+      const rec = read();
+      if (!rec || rec.version !== POLICY_VERSION || !rec.wallets || typeof rec.wallets !== "object") return null;
+      return rec;
+    };
     return {
       version: POLICY_VERSION,
       key: POLICY_CONSENT_KEY,
       get: read,
       set(wallet) {
-        const s = store();
-        if (!s || !wallet) return null;
-        const rec = { version: POLICY_VERSION, wallet: String(wallet), ts: Date.now() };
-        try { s.setItem(POLICY_CONSENT_KEY, JSON.stringify(rec)); } catch { /* blocked storage */ }
+        if (!wallet) return null;
+        const rec = current() || { version: POLICY_VERSION, wallets: {} };
+        rec.wallets[lower(wallet)] = Date.now();
+        write(rec);
         return rec;
+      },
+      /* revoke ONE wallet's consent (disconnect path) — other wallets'
+         records survive; the key is dropped once the map empties */
+      revoke(wallet) {
+        const s = store();
+        if (!s || !wallet) return;
+        const rec = current();
+        if (!rec) { /* legacy/stale shape is meaningless — drop it */ try { s.removeItem(POLICY_CONSENT_KEY); } catch { /* blocked */ } return; }
+        delete rec.wallets[lower(wallet)];
+        if (Object.keys(rec.wallets).length) write(rec);
+        else { try { s.removeItem(POLICY_CONSENT_KEY); } catch { /* blocked */ } }
       },
       clear() {
         const s = store();
@@ -1698,9 +1726,9 @@ window.TS = (() => {
       },
       /* valid ONLY for the current policy version AND this exact wallet */
       isValid(wallet) {
-        const rec = read();
-        if (!rec || rec.version !== POLICY_VERSION || !wallet) return false;
-        return String(rec.wallet || "").toLowerCase() === String(wallet).toLowerCase();
+        const rec = current();
+        if (!rec || !wallet) return false;
+        return Boolean(rec.wallets[lower(wallet)]);
       },
     };
   })();

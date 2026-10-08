@@ -776,6 +776,37 @@ console.log("\n== N. live shared-relay wiring ==");
     "N11 attestedAt is never a pin input (display metadata only — its absence skips nothing)");
 }
 
+/* ── P. policy consent lifecycle (real T.policyConsent module, stubbed
+   sessionStorage — store() is lazy so installing the stub HERE is safe
+   and cannot disturb the custody sections above). User-ruled semantics:
+   DISCONNECT revokes the outgoing wallet · account SWITCH preserves
+   per-wallet consent · a POLICY_VERSION bump wipes everything. ── */
+{
+  const sess = new Map();
+  globalThis.sessionStorage = {
+    getItem: (k) => (sess.has(k) ? sess.get(k) : null),
+    setItem: (k, v) => sess.set(k, String(v)),
+    removeItem: (k) => sess.delete(k),
+  };
+  const PC = T.policyConsent;
+  const A = "0x1111111111111111111111111111111111111111";
+  const B = "0x2222222222222222222222222222222222222222";
+  PC.clear();
+  ok(!PC.isValid(A), "P1 no record → not valid");
+  PC.set(A);
+  ok(PC.isValid(A) && !PC.isValid(B), "P2 consent binds to the exact wallet only");
+  PC.set(B); PC.revoke(A);
+  ok(!PC.isValid(A) && PC.isValid(B), "P3 revoke(A) keeps B — per-wallet isolation");
+  PC.revoke(B);
+  ok(!PC.isValid(B) && sess.size === 0, "P4 revoking the last wallet drops the storage key");
+  PC.set(A); PC.set(B); PC.revoke(B);
+  ok(PC.isValid(A), "P5 switch back A→B→A preserves A's consent");
+  sess.set(PC.key, JSON.stringify({ version: PC.version, wallet: A, ts: 1 })); /* legacy single-wallet shape */
+  ok(!PC.isValid(A), "P6 legacy {version,wallet,ts} record is invalid (migration → re-tick)");
+  PC.clear();
+  ok(sess.size === 0, "P7 clear() wipes every wallet's consent");
+}
+
 console.log(`\n== custody-web: ${pass + fail} checks · PASS ${pass} · FAIL ${fail}` +
   (pendings.length ? ` · PEND ${pendings.length} (interop dependency — NOT counted as pass)` : "") + " ==");
 if (pendings.length) { console.log("pending: " + pendings.join(" | ")); }

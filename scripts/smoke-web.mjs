@@ -147,7 +147,15 @@ try {
   c("policy-version-pinned", commonJs.includes(`POLICY_VERSION = "${VER}"`), `web/common.js POLICY_VERSION = ${VER}`);
   c("policy-page-version", policyHtml.includes(VER), `policy.html 页首/页脚标注 ${VER}`);
   c("session-storage-record", commonJs.includes('"tokenshare.policyConsent.v1"'),
-    'sessionStorage 键 tokenshare.policyConsent.v1 → {"version","wallet","ts"}');
+    'sessionStorage 键 tokenshare.policyConsent.v1 → {"version","wallets":{0x…:ts}}（per-wallet）');
+  c("consent-disconnect-revokes",
+    commonJs.includes("revoke(wallet)") && consoleJs.includes("clearConnState({ revokeConsent: true })") &&
+    consoleJs.includes("policyConsent.revoke(gone)"),
+    "DISCONNECT/钱包内断开 → revoke 出站钱包 consent（重连需重 tick）");
+  c("consent-switch-preserves",
+    consoleJs.includes("clearConnState({ revokeConsent: !(accs && accs.length) })") &&
+    commonJs.includes("rec.wallets[") && !consoleJs.includes("T.policyConsent.clear()"),
+    "账号切换不清 consent —— per-wallet 记录保留（A→B→A 仍有效）");
   c("guard-throws", consoleJs.includes("class PolicyConsentRequired") && consoleJs.includes("requirePolicyConsent()"),
     "paid handler 入口抛 PolicyConsentRequired");
   const gated = ["s-submit", "s-verify-btn", "sc-authorize", "b-dep-btn", "b-lock-btn", "c-send"];

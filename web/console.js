@@ -137,9 +137,16 @@
   }
 
   /* wipe every local trace of the connection — shared by DISCONNECT and
-     accountsChanged([]). Balance displays reset to placeholders; MY LISTING
-     returns to its connect-wallet empty state. */
-  function clearConnState() {
+     accountsChanged. Balance displays reset to placeholders; MY LISTING
+     returns to its connect-wallet empty state.
+     Policy consent is per-wallet (user-ruled lifecycle):
+       · revokeConsent:true (DISCONNECT button / in-wallet disconnect)
+         revokes the OUTGOING wallet's record — a later reconnect of the
+         same address must re-tick.
+       · revokeConsent:false (account switch A→B) preserves it — the
+         per-wallet record survives, so switching back to A stays valid. */
+  function clearConnState({ revokeConsent = true } = {}) {
+    const gone = state.address;
     state.signer = null;
     state.address = null;
     state.walletName = "";
@@ -149,9 +156,7 @@
     if (mirror) mirror.textContent = "see wallet bar ↑";
     $("b-escrow-bal").textContent = "—";
     $("wallet-faucets").hidden = true;
-    /* policy consent is wallet-bound — disconnect / account-switch
-       invalidates it (record dropped, re-tick required) */
-    T.policyConsent.clear();
+    if (revokeConsent && gone) T.policyConsent.revoke(gone);
     syncPolicyGate(); /* consent checkbox back to its disconnected (disabled) face */
     renderWallet();
     resetCustodySession(); /* M15: account context wiped with the connection */
@@ -278,10 +283,11 @@
      provider whenever the pick changes */
   T.wallet.onChange({
     accounts: (accs) => {
-      clearConnState();
-      /* non-empty = account switch inside the same wallet → silent re-sync,
-         no picker, no popup; empty = disconnected (the layer already forgot
-         rdns and cleared its own state — no logout marker is written) */
+      /* non-empty = account switch inside the same wallet → consent
+         PRESERVED (per-wallet records) + silent re-sync, no picker, no
+         popup; empty = disconnected → consent REVOKED (the layer already
+         forgot rdns and cleared its own state — no logout marker) */
+      clearConnState({ revokeConsent: !(accs && accs.length) });
       if (accs && accs.length) finishConnect(false).catch((e) => console.error("account switch failed:", e));
     },
     chain: () => window.location.reload(),
@@ -315,7 +321,7 @@
      token contract and need their own revoke. */
   disconnBtn.addEventListener("click", () => guard(disconnBtn, async () => {
     const r = await T.wallet.logout();
-    clearConnState();
+    clearConnState({ revokeConsent: true }); /* disconnect = consent revoked, re-tick on reconnect */
     const head = r && r.manual
       ? `logged out locally — <b>also disconnect this site inside your wallet</b> (it ignores programmatic revoke).`
       : `logged out — site permission revoked in the wallet.`;
@@ -339,10 +345,11 @@
 
   /* ═══ policy consent gate (web policy reading consent) ═════
      Paid seller/buyer actions require the reading consent bound to the
-     policy version + connected wallet. Storage + validity live in
-     common.js T.policyConsent (sessionStorage "tokenshare.policyConsent.v1"
-     = {"version","wallet","ts"}; a version bump / account switch /
-     disconnect invalidates it → re-tick required). Two layers: gated
+     policy version + the connected wallet (per-wallet records). Storage
+     + validity live in common.js T.policyConsent (sessionStorage
+     "tokenshare.policyConsent.v1" = {"version","wallets":{0x…:ts}};
+     a version bump wipes everything, DISCONNECT revokes the outgoing
+     wallet's record, an account SWITCH preserves it). Two layers: gated
      buttons render disabled with a hint, AND every paid handler
      re-checks at entry — a devtools re-enable throws
      PolicyConsentRequired and never reaches a tx / signature popup.
@@ -429,7 +436,7 @@
     const cb = policyBox();
     if (!state.address) { cb.checked = false; return; } /* cb is disabled then — belt */
     if (cb.checked) T.policyConsent.set(state.address);
-    else T.policyConsent.clear();
+    else T.policyConsent.revoke(state.address); /* un-tick revokes THIS wallet only */
     syncPolicyGate();
   });
 
