@@ -131,6 +131,28 @@ try {
 } catch (e) {
   rec("nav-structure", "FAIL", `读取失败: ${e.message}`);
 }
+
+/* ── 3c. 浅色模式接线：prefers-color-scheme 系统跟随 + 暗色硬编码已 token 化 ── */
+try {
+  const css = readFileSync(join(WEB, "styles.css"), "utf8");
+  rec("light-scheme block",
+    /@media \(prefers-color-scheme: light\)/.test(css) && css.includes("color-scheme: light") && css.includes("color-scheme: dark") ? "PASS" : "FAIL",
+    "prefers-color-scheme: light 媒体查询 + color-scheme 双值（原生控件/滚动条跟随）");
+  /* 暗色字面值只允许出现在 token 定义行（--xxx: …），不得散落于规则体 */
+  const litNames = ["#05070a", "#8fb8ff", "rgba(7, 9, 13", "rgba(4, 6, 9", "rgba(120, 150, 190"];
+  const stray = [];
+  css.split("\n").forEach((line, i) => {
+    if (/^\s*--[\w-]+\s*:/.test(line)) return; // token 定义行豁免
+    for (const s of litNames) if (line.includes(s)) stray.push(`L${i + 1}: ${s}`);
+  });
+  rec("dark hardcodes token-ized", stray.length === 0 ? "PASS" : "FAIL",
+    stray.length ? `散落: ${stray.slice(0, 4).join("; ")}` : "term/topbar/overlay/grid/scanline/t-s 仅存活于 token 定义");
+  rec("svg re-ink rules",
+    css.includes("#smachine .edge path") && css.includes("#smachine marker path") ? "PASS" : "FAIL",
+    "状态机边/箭头 CSS 覆盖（压过 index.html 内联表现属性）");
+} catch (e) {
+  rec("light-scheme static", "FAIL", `读取失败: ${e.message}`);
+}
 if (pages.size === 0) {
   console.log(`\n8080 服务不可达（先跑: python3 -m http.server 8080 -d web）→ exit 2`);
   process.exit(2);

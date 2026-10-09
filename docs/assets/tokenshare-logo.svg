@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="TokenShare icon: three seller streams converge into a terminal-prompt relay hub.">
+  <!-- opaque terminal-dark background -->
+  <rect width="1024" height="1024" fill="#0b0f15"/>
+
+  <!-- three seller streams converging into the hub (tips tucked under the panel) -->
+  <g fill="none" stroke-width="28" stroke-linecap="round">
+    <path d="M88 384 L292 512" stroke="#3ddc97"/>
+    <path d="M88 512 L292 512" stroke="#9d8cff"/>
+    <path d="M88 640 L292 512" stroke="#e8b44a"/>
+  </g>
+
+  <!-- terminal relay hub -->
+  <rect x="272" y="352" width="480" height="320" rx="56" fill="#111a26" stroke="#3ddc97" stroke-width="20"/>
+
+  <!-- prompt glyph &gt;_ : verify, then forward -->
+  <path d="M397 440 L497 512 L397 584" fill="none" stroke="#3ddc97" stroke-width="46" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="561" y="442" width="66" height="140" rx="12" fill="#3ddc97"/>
+</svg>

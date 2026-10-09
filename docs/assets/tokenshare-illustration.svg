@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="TokenShare logo: three seller token streams converge into a dashed TEE trust boundary, a terminal-prompt relay hub verifies them, and a single green beam exits to the official API.">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="43%" r="55%">
+      <stop offset="0%" stop-color="#3ddc97" stop-opacity="0.10"/>
+      <stop offset="55%" stop-color="#3ddc97" stop-opacity="0.03"/>
+      <stop offset="100%" stop-color="#3ddc97" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="64" height="64" patternUnits="userSpaceOnUse">
+      <path d="M64 0H0V64" fill="none" stroke="#1b2431" stroke-width="1" stroke-opacity="0.5"/>
+    </pattern>
+  </defs>
+
+  <!-- opaque terminal-dark background + faint grid + soft glow -->
+  <rect width="1024" height="1024" fill="#0b0f15"/>
+  <rect width="1024" height="1024" fill="url(#grid)" opacity="0.55"/>
+  <rect width="1024" height="1024" fill="url(#glow)"/>
+
+  <!-- corner bracket ticks, terminal framing -->
+  <g fill="none" stroke="#2c3a4c" stroke-width="3">
+    <path d="M56 96V56H96"/>
+    <path d="M928 56H968V96"/>
+    <path d="M56 928V968H96"/>
+    <path d="M968 968H928V928"/>
+  </g>
+
+  <!-- TEE trust boundary: dashed enclave, single gap on the right where the verified beam exits -->
+  <path d="M772 468 L772 556 Q772 580 748 580 L276 580 Q252 580 252 556 L252 324 Q252 300 276 300 L748 300 Q772 300 772 324 L772 412"
+        fill="none" stroke="#46586c" stroke-width="3" stroke-dasharray="16 12"/>
+  <text x="512" y="346" text-anchor="middle" font-family="Menlo, 'SF Mono', monospace" font-size="19" letter-spacing="8" fill="#4b5765">TEE RELAY &#183; KEYS SEALED</text>
+
+  <!-- three seller token streams entering the enclave -->
+  <g fill="none" stroke-width="10" stroke-linecap="round">
+    <path d="M168 358 C300 358 350 424 448 434" stroke="#3ddc97"/>
+    <path d="M168 440 L444 440" stroke="#9d8cff"/>
+    <path d="M168 522 C300 522 350 456 448 446" stroke="#e8b44a"/>
+  </g>
+  <!-- token blocks: enrolled seller keys -->
+  <g>
+    <rect x="135" y="343" width="30" height="30" rx="6" fill="#3ddc97"/>
+    <rect x="135" y="425" width="30" height="30" rx="6" fill="#9d8cff"/>
+    <rect x="135" y="507" width="30" height="30" rx="6" fill="#e8b44a"/>
+  </g>
+  <text x="150" y="318" text-anchor="middle" font-family="Menlo, 'SF Mono', monospace" font-size="16" letter-spacing="4" fill="#4b5765">SELLERS</text>
+
+  <!-- relay hub: terminal prompt &gt;_ = verify, then forward -->
+  <rect x="446" y="374" width="132" height="132" rx="16" fill="#3ddc97" opacity="0.10"/>
+  <rect x="452" y="380" width="120" height="120" rx="16" fill="#111a26" stroke="#3ddc97" stroke-width="3"/>
+  <path d="M480 412 L512 440 L480 468" fill="none" stroke="#3ddc97" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="524" y="414" width="22" height="52" fill="#3ddc97"/>
+
+  <!-- verified egress beam through the single gap -->
+  <path d="M572 440 L856 440" fill="none" stroke="#3ddc97" stroke-width="14" stroke-linecap="round"/>
+  <polygon points="850,416 894,440 850,464" fill="#3ddc97"/>
+  <text x="894" y="490" text-anchor="end" font-family="Menlo, 'SF Mono', monospace" font-size="16" letter-spacing="4" fill="#4b5765">OFFICIAL API</text>
+
+  <!-- wordmark -->
+  <text x="512" y="700" text-anchor="middle" font-family="Menlo, 'SF Mono', monospace" font-size="64" font-weight="700" letter-spacing="14" fill="#d5dde6">TOKENSHARE</text>
+  <text x="512" y="752" text-anchor="middle" font-family="Menlo, 'SF Mono', monospace" font-size="22" letter-spacing="6" fill="#7c8896">SHARED LLM QUOTA &#183; MONAD TESTNET</text>
+</svg>
