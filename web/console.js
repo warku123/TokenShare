@@ -76,8 +76,9 @@
   tabBtns.seller.addEventListener("click", () => selectTab("seller"));
   tabBtns.buyer.addEventListener("click", () => selectTab("buyer"));
   /* default landing = BUYER (the judge's happy path; the seller flow needs
-     a running relay). #seller stays explicit; card anchors (#card-deposit …)
-     land on buyer and re-scroll once the panel is unhidden */
+     a running relay). #seller stays explicit; card anchors (#card-account …)
+     land on buyer and re-scroll once the panel is unhidden — the shared
+     account panel itself is outside the tabs, always visible */
   const bootHash = location.hash;
   selectTab(bootHash === "#seller" ? "seller" : "buyer", false);
   if (/^#card-/.test(bootHash)) {
@@ -2782,8 +2783,10 @@
   updatePreview();
   loadListingsIntoSelects();
 
-  /* staggered card reveal on load */
-  document.querySelectorAll(".panel .rv").forEach((el, i) => {
+  /* staggered card reveal on load — the shared ACCOUNT FUNDS card sits
+     outside the tab .panel sections, so it is named explicitly (DOM order
+     puts it first in the stagger) */
+  document.querySelectorAll("#card-account, .panel .rv").forEach((el, i) => {
     el.style.setProperty("--d", `${i * 0.05}s`);
     requestAnimationFrame(() => el.classList.add("in"));
   });

@@ -42,6 +42,7 @@ const REQUIRED_IDS = {
   ],
   "/console.html": [
     "wallet-connect", "wallet-info", "wallet-addr", "net-badge", "wallet-usdc",
+    "card-account", "b-escrow-bal", "b-dep-amt", "b-dep-btn", "b-withdraw-amt", "b-withdraw-btn",
     "tab-seller", "tab-buyer", "panel-seller", "panel-buyer",
     "s-endpoint", "s-submit", "b-seller", "b-lock-bal", "b-max",
   ],
@@ -231,6 +232,23 @@ try {
     "refund/withdraw/custody revokes 仍为普通 guard（退出路径不拦）");
 } catch (e) {
   rec("consent static-wiring", "FAIL", `读取失败: ${e.message}`);
+}
+
+/* ── 5b. 共享 ACCOUNT 面板结构：在 .tabs 之前（两角色可见），buyer 面板不再携带资金入口 ── */
+{
+  const con = pages.get("/console.html");
+  if (con) {
+    const iAcct = con.indexOf('id="card-account"');
+    const iTabs = con.indexOf('class="tabs"');
+    const iBuyer = con.indexOf('id="panel-buyer"');
+    rec("console shared account panel",
+      iAcct > -1 && iTabs > -1 && iAcct < iTabs && iTabs < iBuyer ? "PASS" : "FAIL",
+      "card-account 位于 .tabs 之前 · panel-buyer 之外");
+    const buyer = iBuyer > -1 ? con.slice(iBuyer) : "";
+    const dup = ['id="b-dep-btn"', 'id="b-withdraw-btn"', 'id="b-escrow-bal"'].filter((s) => buyer.includes(s));
+    rec("console buyer funds removed", dup.length === 0 ? "PASS" : "FAIL",
+      dup.length ? `panel-buyer 仍含: ${dup.join(", ")}` : "buyer 面板无重复 deposit/withdraw/balance 入口");
+  }
 }
 
 /* ── 6. 零外链资源扫描（出站 <a> 白名单豁免）── */

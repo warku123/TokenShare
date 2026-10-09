@@ -69,6 +69,35 @@
     <button class="btn btn-sm" id="net-switch" type="button">[ SWITCH / ADD NETWORK ]</button>
   </div>
 
+  <!-- ══ ACCOUNT — one escrow pot per connected wallet, shared by both roles ══ -->
+  <article class="card rv" id="card-account">
+    <h2 class="card-title">ACCOUNT FUNDS<span class="card-tag">USDC · Escrow · seller + buyer share one pot</span></h2>
+    <div class="card-body">
+      <p class="step-hint">Every connected wallet has one escrow pot. AVAILABLE is the free balance only — locked payments
+        are not included, and this is not seller revenue (a seller's earnings land here too). DEPOSIT tops the pot up —
+        buyer locks draw from it and leftovers return here; the contract holds the funds, never a seller.
+        WITHDRAW moves available USDC back to your wallet.</p>
+      <div class="acct-grid">
+        <div class="acct-bal">
+          <div class="bal-row"><span>WALLET</span><b class="mono" id="b-wallet-note"><span id="b-wallet-usdc-mirror">see wallet bar ↑</span></b></div>
+          <div class="bal-row"><span>ESCROW available <i class="acct-i">excl. locked</i></span><b class="mono" id="b-escrow-bal">—</b></div>
+        </div>
+        <div class="acct-act">
+          <label class="fld"><span class="fld-lbl">DEPOSIT <i>USDC — approve → deposit</i></span>
+            <input type="text" inputmode="decimal" id="b-dep-amt" placeholder="0.50"></label>
+          <button class="btn btn-wide" id="b-dep-btn" type="button">[ APPROVE + DEPOSIT ]</button>
+        </div>
+        <div class="acct-act">
+          <label class="fld"><span class="fld-lbl">WITHDRAW <i>USDC — available only</i></span>
+            <input type="text" inputmode="decimal" id="b-withdraw-amt" placeholder="0.10"></label>
+          <button class="btn btn-wide btn-ghost" id="b-withdraw-btn" type="button">[ WITHDRAW ]</button>
+        </div>
+      </div>
+      <div class="txbox" id="b-dep-tx"></div>
+      <div class="txbox" id="b-bal-tx"></div>
+    </div>
+  </article>
+
   <!-- ══ TABS ══ -->
   <div class="tabs" role="tablist" aria-label="Console role">
     <button class="tab-btn active" id="tab-seller" role="tab" aria-selected="true" aria-controls="panel-seller" type="button">SELLER</button>
@@ -175,7 +204,7 @@
     <!-- the flow — one glance, five steps, each jumps to its card -->
     <p class="flow-line rv" aria-label="buyer flow">
       <span class="flow-lbl">FLOW</span>
-      <a class="flow-step" href="#card-deposit"><b>1</b>DEPOSIT</a><span class="flow-arr">→</span>
+      <a class="flow-step" href="#card-account"><b>1</b>DEPOSIT</a><span class="flow-arr">→</span>
       <a class="flow-step" href="#card-lock"><b>2</b>LOCK</a><span class="flow-arr">→</span>
       <a class="flow-step" href="#card-locks"><b>3</b>MINT KEY</a><span class="flow-arr">→</span>
       <a class="flow-step" href="#card-call"><b>4</b>CALL / USAGE</a><span class="flow-arr">→</span>
@@ -209,7 +238,7 @@
           </div>
           <p class="fld-hint" id="b-lock-hint">≥ the seller's priciest-model estimate (in×200k + out×32k caps) — see per-model tiers on the market page</p>
           <p class="fld-hint err" id="b-lock-bal-note" hidden></p>
-          <a class="btn btn-sm btn-dep" id="b-dep-first" href="#card-deposit" hidden>[ DEPOSIT FIRST ↓ ]</a>
+          <a class="btn btn-sm btn-dep" id="b-dep-first" href="#card-account" hidden>[ DEPOSIT FIRST ↑ ]</a>
           <button class="btn btn-wide" id="b-lock-btn" type="button">[ LOCK ]</button>
           <div class="txbox" id="b-lock-tx"></div>
           <div class="pid-box" id="b-payment-id"></div>
@@ -266,36 +295,9 @@
       </div>
     </article>
 
-    <!-- funds — light maintenance group -->
-    <div class="grid-3">
-      <!-- balances -->
-      <article class="card rv" id="card-balances">
-        <h2 class="card-title">BALANCES<span class="card-tag">USDC · Escrow</span></h2>
-        <div class="card-body">
-          <p class="step-hint">Wallet USDC vs the escrow pot. WITHDRAW moves escrow balance back to your wallet.</p>
-          <div class="bal-row"><span>WALLET</span><b class="mono" id="b-wallet-note"><span id="b-wallet-usdc-mirror">see wallet bar ↑</span></b></div>
-          <div class="bal-row"><span>ESCROW balances(me)</span><b class="mono" id="b-escrow-bal">—</b></div>
-          <div class="fld-row" style="margin-top:14px">
-            <label class="fld"><span class="fld-lbl">WITHDRAW <i>USDC</i></span>
-              <input type="text" inputmode="decimal" id="b-withdraw-amt" placeholder="0.10"></label>
-            <button class="btn btn-sm btn-ghost btn-end" id="b-withdraw-btn" type="button">[ WITHDRAW ]</button>
-          </div>
-          <div class="txbox" id="b-bal-tx"></div>
-        </div>
-      </article>
-
-      <!-- deposit -->
-      <article class="card rv" id="card-deposit">
-        <h2 class="card-title">DEPOSIT<span class="card-tag">approve → deposit</span></h2>
-        <div class="card-body">
-          <p class="step-hint">Step 1 · move USDC into the escrow contract. Locks draw from this pot and leftovers return here — the contract holds the money, never the seller.</p>
-          <label class="fld"><span class="fld-lbl">AMOUNT <i>USDC — one deposit backs many calls</i></span>
-            <input type="text" inputmode="decimal" id="b-dep-amt" placeholder="0.50"></label>
-          <button class="btn btn-wide" id="b-dep-btn" type="button">[ APPROVE + DEPOSIT ]</button>
-          <div class="txbox" id="b-dep-tx"></div>
-        </div>
-      </article>
-
+    <!-- lock aftermath — refund + local dispute ledger (funds live in the
+         shared ACCOUNT FUNDS panel above the tabs) -->
+    <div class="grid-2">
       <!-- refund -->
       <article class="card rv" id="card-refund">
         <h2 class="card-title">REFUND<span class="card-tag">Escrow.refund — after ttl</span></h2>
@@ -308,16 +310,16 @@
           <div class="txbox" id="r-tx"></div>
         </div>
       </article>
-    </div>
 
-    <!-- disputes -->
-    <article class="card rv">
-      <h2 class="card-title">DISPUTES<span class="card-tag">localStorage ledger</span></h2>
-      <div class="card-body">
-        <div class="disp-list" id="d-list"></div>
-        <button class="btn btn-sm btn-ghost" id="d-clear" type="button" hidden>[ CLEAR ]</button>
-      </div>
-    </article>
+      <!-- disputes -->
+      <article class="card rv">
+        <h2 class="card-title">DISPUTES<span class="card-tag">localStorage ledger</span></h2>
+        <div class="card-body">
+          <div class="disp-list" id="d-list"></div>
+          <button class="btn btn-sm btn-ghost" id="d-clear" type="button" hidden>[ CLEAR ]</button>
+        </div>
+      </article>
+    </div>
   </section>
 
 </main>

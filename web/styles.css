@@ -785,6 +785,11 @@ h1 {
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; align-items: start; }
 .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; align-items: start; }
 .grid-2 > .card, .grid-3 > .card { min-width: 0; }
+/* shared ACCOUNT FUNDS panel (above the role tabs): balance | deposit | withdraw */
+.acct-grid { display: grid; grid-template-columns: 1.15fr 1fr 1fr; gap: 18px; align-items: start; margin-top: 6px; }
+.acct-bal { border: 1px dashed var(--line); padding: 10px 14px; }
+.acct-i { font-style: normal; color: var(--faint); letter-spacing: 0.04em; text-transform: none; }
+.acct-act .btn { margin-top: 8px; }
 
 .card-title {
   font-family: var(--mono); font-size: 12px; font-weight: 700; letter-spacing: 0.2em;
@@ -1177,13 +1182,15 @@ a.flow-step:hover b { color: var(--green); }
 /* ═══ CONSOLE RESPONSIVE ═══ */
 @media (max-width: 1020px) {
   .grid-3 { grid-template-columns: 1fr 1fr; }
+  .acct-grid { grid-template-columns: 1fr 1fr; }
+  .acct-bal { grid-column: 1 / -1; }
   .call-grid { grid-template-columns: 1fr 1fr; }
   .rcpt-grid { grid-template-columns: repeat(2, 1fr); }
   .lock-grid { grid-template-columns: 1fr; }
   .lock-main { border-left: none; padding-left: 0; border-top: 1px dashed var(--line); padding-top: 18px; }
 }
 @media (max-width: 700px) {
-  .grid-2, .grid-3, .call-grid { grid-template-columns: 1fr; }
+  .grid-2, .grid-3, .call-grid, .acct-grid { grid-template-columns: 1fr; }
   .con-head { flex-direction: column; align-items: stretch; }
   .wallet-box { align-items: flex-start; }
   .wallet-info { justify-content: flex-start; }
