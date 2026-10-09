@@ -91,6 +91,46 @@ for (const path of ["/index.html", "/market.html", "/console.html"]) {
   rec(`policy-link ${path}`, html.includes('href="policy.html"') ? "PASS" : "FAIL",
     'href="policy.html"');
 }
+
+/* ── 3b. 两级导航回归：四页全局导航一致（顺序 OVERVIEW→FULL MARKET→CONSOLE→POLICY，
+        每页恰好一个 aria-current="page" 且指向本页）；章节条仅 index 持有，
+        app.js scrollspy 只标章节链接（aria-current="location"）── */
+try {
+  const GLOBAL_ORDER = ["index.html", "market.html", "console.html", "policy.html"];
+  for (const path of PAGES) {
+    const html = pages.get(path);
+    if (!html) continue;
+    const m = html.match(/<nav class="topnav" id="topnav"[^>]*>([\s\S]*?)<\/nav>/);
+    if (!m) { rec(`nav-global ${path}`, "FAIL", "#topnav nav block missing"); continue; }
+    const tags = [...m[1].matchAll(/<a ([^>]*)>/g)].map((x) => x[1]);
+    const hrefs = tags.map((t) => (t.match(/href="([^"]*)"/) || [])[1]);
+    const orderOk = GLOBAL_ORDER.every((h, i) => hrefs[i] === h);
+    const curTags = tags.filter((t) => /aria-current="page"/.test(t));
+    const curHref = curTags.length === 1 ? (curTags[0].match(/href="([^"]*)"/) || [])[1] : null;
+    rec(`nav-global ${path}`, orderOk && curHref === path.slice(1) ? "PASS" : "FAIL",
+      `order=${orderOk ? "ok" : hrefs.join("→")} · current=${curHref ?? `${curTags.length} markers`}`);
+  }
+  const idx = pages.get("/index.html");
+  if (idx) {
+    const ch = idx.match(/<nav class="chapternav"[^>]*>([\s\S]*?)<\/nav>/);
+    const anchors = ch ? [...ch[1].matchAll(/href="#([a-z]+)"/g)].map((x) => x[1]) : [];
+    rec("nav-chapters /index.html",
+      !!ch && ["market", "mechanism", "state", "features"].every((a, i) => anchors[i] === a) ? "PASS" : "FAIL",
+      ch ? `anchors: ${anchors.join(", ")}` : "chapter strip missing");
+  }
+  for (const path of ["/market.html", "/console.html", "/policy.html"]) {
+    const html = pages.get(path);
+    if (!html) continue;
+    rec(`nav-chapters ${path} absent`, !html.includes('class="chapternav"') ? "PASS" : "FAIL",
+      "chapter strip is landing-only");
+  }
+  const appJs = readFileSync(join(WEB, "app.js"), "utf8");
+  rec("nav-scrollspy hook",
+    appJs.includes('querySelector(".chapternav")') && appJs.includes('"location"') ? "PASS" : "FAIL",
+    "app.js scrollspy sets aria-current=location on chapter links only");
+} catch (e) {
+  rec("nav-structure", "FAIL", `读取失败: ${e.message}`);
+}
 if (pages.size === 0) {
   console.log(`\n8080 服务不可达（先跑: python3 -m http.server 8080 -d web）→ exit 2`);
   process.exit(2);

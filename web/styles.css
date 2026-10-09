@@ -95,6 +95,38 @@ html.js .rv.in { opacity: 1; transform: none; }
 }
 .topnav a:hover { color: var(--green); border-bottom-color: var(--green); }
 
+/* current-page marker — exactly one boxed [ X ] per page, paired with
+   aria-current="page" (green; POLICY keeps its amber risk identity) */
+.topnav a.nav-current {
+  color: var(--green); border: 1px solid var(--green-dim); padding: 4px 10px;
+}
+.topnav a.nav-current:hover { background: rgba(61,220,151,0.08); box-shadow: 0 0 14px rgba(61,220,151,0.15); border-bottom-color: var(--green-dim); }
+.topnav a.nav-policy.nav-current { color: var(--amber); border-color: rgba(232,180,74,0.4); font-size: 11px; }
+.topnav a.nav-policy.nav-current:hover { color: var(--amber); border-color: var(--amber); background: rgba(232,180,74,0.06); box-shadow: 0 0 14px rgba(232,180,74,0.12); }
+
+/* ═══ CHAPTER STRIP — landing-only second header row (index.html) ═══
+   numbered like the sections (01–04); the scrollspy in app.js marks the
+   visible chapter with aria-current="location" on these links only —
+   the global nav above is never touched */
+.chapternav { border-top: 1px solid var(--line); }
+.chapternav-in {
+  display: flex; gap: 26px; align-items: baseline;
+  overflow-x: auto; scrollbar-width: none;
+  padding-top: 2px; padding-bottom: 2px; /* room for the focus ring (overflow clips it) */
+}
+.chapternav-in::-webkit-scrollbar { display: none; }
+.chapternav a {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em;
+  color: var(--dim); white-space: nowrap; flex: none;
+  padding: 8px 0 7px; border-bottom: 1px solid transparent;
+  transition: color .2s, border-color .2s;
+}
+.chapternav a:hover { color: var(--green); }
+.chapternav a:focus-visible { outline-offset: 2px; }
+.chapternav a .ch-num { color: var(--faint); margin-right: 7px; transition: color .2s; }
+.chapternav a[aria-current="location"] { color: var(--green); border-bottom-color: var(--green); }
+.chapternav a[aria-current="location"] .ch-num { color: var(--green); }
+
 /* ═══ HERO ═══ */
 .hero { padding: 96px 0 88px; border-bottom: 1px solid var(--line); }
 .hero-grid { display: grid; grid-template-columns: 1.15fr 1fr; gap: 56px; align-items: start; }
@@ -181,7 +213,9 @@ h1 {
 .t-s { color: #8fb8ff; }
 
 /* ═══ SECTIONS ═══ */
-.section { padding: 88px 0; border-bottom: 1px solid var(--line); scroll-margin-top: 68px; }
+/* two-row header on the landing page (52px global + ~38px chapter strip)
+   → section anchors must clear ~91px plus breathing room */
+.section { padding: 88px 0; border-bottom: 1px solid var(--line); scroll-margin-top: 100px; }
 
 .sec-head { margin-bottom: 44px; position: relative; }
 .sec-head h2 {
@@ -506,13 +540,17 @@ h1 {
 @media (max-width: 560px) {
   .nav-toggle { display: block; }
   .topnav {
-    display: none; position: absolute; top: 52px; left: 0; right: 0;
+    display: none; position: absolute; top: 100%; left: 0; right: 0;
     flex-direction: column; gap: 0; padding: 6px 24px 10px;
     background: var(--bg-2); border-bottom: 1px solid var(--line-hi);
   }
   .topnav.open { display: flex; }
   .topnav a { font-size: 12px; padding: 11px 0; border-bottom: 1px solid var(--line); }
   .topnav a:last-child { border-bottom: none; }
+  /* boxed current page stays a chip inside the dropdown column */
+  .topnav a.nav-current { align-self: flex-start; padding: 8px 12px; margin: 6px 0 2px; border-bottom: 1px solid var(--green-dim); }
+  .topnav a.nav-policy.nav-current { border-bottom-color: rgba(232,180,74,0.4); }
+  .chapternav-in { gap: 18px; }
 }
 
 /* ═══ MARKET LIVE BAR ═══ */
@@ -544,8 +582,6 @@ h1 {
 .hdot.off { background: var(--faint); }
 .chip-kimi { color: var(--green); border-color: var(--green-dim); background: rgba(61,220,151,0.07); margin-left: 10px; vertical-align: middle; }
 .hero-net { font-size: 14px !important; line-height: 1.4; }
-.nav-console { color: var(--green) !important; border: 1px solid var(--green-dim); padding: 4px 10px !important; }
-.nav-console:hover { background: rgba(61,220,151,0.08); box-shadow: 0 0 14px rgba(61,220,151,0.15); }
 #mkt-refresh { cursor: pointer; }
 
 /* TEE badge (M7) — violet, distinct from ACTIVE green */

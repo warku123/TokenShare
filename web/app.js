@@ -40,6 +40,56 @@
     topnav.addEventListener("click", (e) => { if (e.target.closest("a")) setNav(false); });
   }
 
+  /* ── chapter scrollspy (landing only) ──────────────────────
+     marks the visible chapter on the second-row strip with
+     aria-current="location". chapter anchors only — the global
+     nav (FULL MARKET & co.) is never scrollspy'd. */
+  const chapternav = document.querySelector(".chapternav");
+  if (chapternav) {
+    const strip = chapternav.querySelector(".chapternav-in") || chapternav;
+    const links = [...chapternav.querySelectorAll('a[href^="#"]')];
+    const secs = links
+      .map((a) => document.getElementById(a.getAttribute("href").slice(1)))
+      .filter(Boolean);
+    const topbar = document.querySelector(".topbar");
+    const setActive = (id) => {
+      for (const a of links) {
+        const on = a.getAttribute("href") === `#${id}`;
+        if (on) a.setAttribute("aria-current", "location");
+        else a.removeAttribute("aria-current");
+        /* keep the active chip in view inside the horizontally
+           scrollable strip (mobile) — horizontal only, the page
+           scroll position is never touched */
+        if (on && strip.scrollWidth > strip.clientWidth) {
+          const d = a.getBoundingClientRect().left - strip.getBoundingClientRect().left;
+          if (d < 24) strip.scrollLeft += d - 24;
+          else if (d + a.offsetWidth > strip.clientWidth - 24)
+            strip.scrollLeft += d + a.offsetWidth - strip.clientWidth + 24;
+        }
+      }
+    };
+    let ticking = false;
+    const update = () => {
+      ticking = false;
+      const line = (topbar ? topbar.offsetHeight : 0) + 24;
+      let current = null;
+      for (const s of secs) {
+        if (s.getBoundingClientRect().top <= line) current = s.id;
+      }
+      /* the tail of the page belongs to the last chapter */
+      if (secs.length && window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 4) {
+        current = secs[secs.length - 1].id;
+      }
+      setActive(current);
+    };
+    const onScroll = () => {
+      if (!ticking) { ticking = true; requestAnimationFrame(update); }
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", onScroll);
+    update();
+  }
+
   /* ── state machine hover tracing ─────────────────────────── */
   const sm = document.getElementById("smachine");
   if (sm) {
