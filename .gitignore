@@ -36,3 +36,6 @@ node_modules/
 .DS_Store
 *.log
 contracts/deployed.json
+
+# video script maintained locally, not for the public repo
+docs/VIDEO_SCRIPT.md

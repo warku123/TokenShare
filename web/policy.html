@@ -88,9 +88,13 @@
         <p><b>Shared mode (live):</b> a platform-operated shared relay inside a Trusted
           Execution Environment (TEE) — a Phala TDX CVM — receives seller API keys —
           encrypted at the application layer before transmission — processes them inside
-          the enclave, and persists them encrypted at rest. The live keystore currently
-          holds two seller keys (Kimi and Qwen), and both active listings point their
-          endpoints at this TEE relay. This is <b>not</b> a zero-custody design and we
+          the enclave, and persists them encrypted at rest. The keystore holds the
+          seller keys enrolled to date (Kimi and Qwen), and their listings point
+          their endpoints at this TEE relay. Listings are owner-controlled and can
+          change at any time — this page and the market always read the Registry
+          live: the currently active listing is Kimi; a Qwen listing existed and
+          was deactivated by its owner on 2026-10-09. This is <b>not</b> a
+          zero-custody design and we
           do not claim the platform or any provider is fully trustless: trust shifts
           onto the TEE deployment, its operators, and its governance — the enclave
           runs under Phala Cloud KMS.</p>
@@ -118,7 +122,7 @@
           escrow version that adds this opt-in delegate function is deployed on Monad testnet
           (chain ID 10143) at
           <a href="https://testnet.monadvision.com/address/0xe4D5Eb0dBDB6DB8063C07ECF7EDFcCdDB9Ad514c" target="_blank" rel="noopener">0xe4D5…514c ↗</a>.
-          <b>Both sellers in the live shared deployment (Kimi and Qwen) have authorized the
+          <b>Both sellers enrolled in the shared deployment to date (Kimi and Qwen) have authorized the
           settle delegate</b> — the TEE relay's signer 0x49CA…fb2D — and the flow is exercised
           for real: verified buyer calls and delegate settlements are on-chain and
           explorer-verifiable. Under this design the delegate could settle existing locks —

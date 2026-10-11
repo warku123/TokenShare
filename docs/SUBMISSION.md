@@ -37,13 +37,15 @@ TokenShare is an open protocol plus a working reference implementation, deployed
 4. Signer-authenticated billing receipts. Every call produces an EIP-712 signed receipt (paymentId, token tiers, actual amount, upstream host, model). These are signer-authenticated billing assertions about the seller-side record — not independent token-count proof; the chain-side catalog is what a buyer cross-checks them against.
 5. Delegation instead of payouts. The seller-approved settle delegate settles on the seller's payment and credits the seller's ledger balance; protocol fees are governed by the Escrow. Revoking a buyer's scoped credential is an explicit, distinct action — disconnecting a session clears local policy consent only and does NOT revoke an issued API key.
 
+WHY MONAD: per-call billing is practical at this scale on an EVM environment designed for low-cost, high-throughput, fast-confirmation transactions — one demo receipt (payment 5) settled for an actual 0.000918 USDC. On Monad testnet, that low-fee design helps keep settlement overhead practical at this payment scale. This is a design-fit statement, not a measured result: upstream model usage and chain gas are two separate real costs, and the project has not published a benchmark of chain-gas share per request.
+
 Usefulness: a buyer gets OpenAI-compatible credentials that cannot spend beyond the locked budget, with a receipt trail they can reconcile against on-chain prices; a seller converts idle plan capacity without sharing raw keys or running their own gateway; both sides see the same numbers.
 
 Demo status (Monad testnet, no real-money claims): real Kimi calls (k3-256k, kimi-for-coding) and a Qwen call (qwen3.8-max) plus partial settlements are recorded. In ONE completed Chainlink CRE settlement-audit run (local simulation), the LATEST receipt of the demo payment (payment 5) was compared against the exact settle-block Registry prices and the MATCH verdict was anchored on-chain through a permissionless testnet mock forwarder — a workflow-simulation result, NOT a production Chainlink DON deployment; it says nothing about other or future receipts, cumulative usage, lock-time quotes, or independently-proved token usage.
 
 Compliance: upstream sellers remain responsible for complying with their provider's terms; resale authorization is not established by this project.
 
-Links: repo https://github.com/warku123/TokenShare — live demo https://tokenshare-web.vercel.app/ — logo assets/tokenshare-logo.png — video script docs/VIDEO_SCRIPT.md (≤3 minutes, submission requirement).
+Links: repo https://github.com/warku123/TokenShare — live demo https://tokenshare-web.vercel.app/ — logo assets/tokenshare-logo.png — video script maintained locally (not tracked in the repo; ≤3 minutes, submission requirement).
 ```
 
 ## Go-to-market / user acquisition strategy — paste field
@@ -62,14 +64,38 @@ What we would track, in order: activation (first successful paid call per buyer)
 Proposed production-readiness considerations: provider permissions verified per seller/model, and security readiness (third-party audit of the relay custody path and the escrow/registry contracts). Upstream authorization is not established by this project — any production onboarding would be its own separately gated effort.
 ```
 
+## Judge access instructions — optional paste field (private: team / judges / organizers)
+
+```text
+TokenShare judge access — no login, no password, no shared account exist. Use YOUR OWN testnet wallet; never connect real mainnet funds — this deployment is Monad testnet only.
+
+Product: https://tokenshare-web.vercel.app/
+
+WITHOUT a wallet: open the market page (https://tokenshare-web.vercel.app/market.html). It is browseable anonymously and shows live on-chain seller listings, per-model three-tier prices read from the Registry contract, and relay health; explorer links on the page open the referenced on-chain state.
+
+WITH a wallet (Monad testnet, chain 10143, RPC https://testnet-rpc.monad.xyz):
+1. Connect via the wallet picker (EIP-6963 — picks up installed wallets). The wallet may show its own security prompt during connect; that is a wallet-side prompt, not ours.
+2. Tick the Policy & Risks consent box at the top of the console (required before paid actions).
+3. Get testnet MON from the faucet — the console wallet bar links it when your gas runs low (https://faucet.monad.xyz); test USDC is optional via https://faucet.circle.com (pick Monad testnet).
+4. Buyer flow: DEPOSIT USDC into Escrow → LOCK against an active listing → CALL DEMO (SIGN + CALL) returns a real model reply with official usage plus an EIP-712 signed receipt; the console verifies the receipt, and the settle transaction is viewable on the explorer.
+5. Pacing: payment locks carry a TTL, and the shared relay's upstream (Kimi) is rate-limited to 3 requests/min — wait ~20 seconds between demo calls.
+
+Seller flow (optional): enrolling a listing requires an upstream API key, which judges typically do not have — the demo video shows the seller path.
+
+Contracts for reference (chain 10143): Escrow 0xe4D5Eb0dBDB6DB8063C07ECF7EDFcCdDB9Ad514c · Registry 0xeD347cDc1761750E20C024459b38dedFb1462254 · USDC 0x534b2f3A21130d7a60830c2Df862319e593943A3. The relay runs in a Phala TDX TEE; its /sellers/{seller_address}/status endpoint shows each seller's custody-verified catalog match.
+
+Honest scope: the shared relay currently serves Kimi models (k3-256k, kimi-for-coding). Testnet only — no real funds.
+```
+
 ## Measured character counts (paste fields above, measured after final edit)
 
 | Field | Limit | Measured |
 | --- | --- | --- |
 | Project name | ≤120 | 10 |
 | One-line description | ≤200 | 198 |
-| Description | ≤8000 | 3933 |
+| Description | ≤8000 | 4449 |
 | GTM strategy | none displayed (kept ~200–300 words) | 1941 chars / 279 words |
+| Judge access instructions (optional) | ≤8000 | 2082 chars / 298 words |
 | 中文摘要（optional） | — | 265 chars |
 
 ## 中文摘要（可选，仅说明用途；非表单必填字段）
@@ -83,4 +109,4 @@ TokenShare 把官方 LLM 套餐的闲置额度变成可计费服务：买家用 
 - Logo: `docs/assets/tokenshare-logo.png` (see also `docs/LOGO.md`)
 - Public repo: https://github.com/warku123/TokenShare
 - Live demo: https://tokenshare-web.vercel.app/
-- Video script: `docs/VIDEO_SCRIPT.md`
+- Video script: maintained locally, not tracked in the repo

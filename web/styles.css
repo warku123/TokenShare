@@ -542,6 +542,7 @@ h1 {
 /* ═══ FEATURES ═══ */
 .features { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
 .feat { padding: 26px 24px; }
+.feat-wide { grid-column: 1 / -1; } /* full-width capstone row (no-op in the 1-col mobile grid) */
 .fico { width: 26px; height: 26px; color: var(--green); margin-bottom: 18px; }
 .feat h3 { font-family: var(--mono); font-size: 13.5px; letter-spacing: 0.2em; margin-bottom: 12px; }
 .feat p { font-size: 14px; color: var(--dim); line-height: 1.65; }
