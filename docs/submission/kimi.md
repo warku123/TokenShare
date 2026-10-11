@@ -1,106 +1,106 @@
-# Kimi：TokenShare 的第一个真实上游（现役状态）
+# Kimi: TokenShare's First Real Upstream (Active)
 
-> 本文是 TokenShare（Monad 黑客松项目）面向 Kimi / Moonshot AI 团队及相关读者的介绍文章，与 [qwen.md](./qwen.md) 配对阅读。文中严格区分三类内容：**有工程与链上证据的事实**、**只有项目负责人亲历的「用户陈述」**、以及**明确的边界**。所有链上哈希都可以粘贴到任意 Monad 测试网浏览器核对；仓库内证据均给出相对路径。本文不含任何密钥或凭证值。
+> This article introduces TokenShare (a Monad hackathon project) to the Kimi / Moonshot AI team and related readers, and is meant to be read alongside [qwen.md](./qwen.md). It strictly separates three categories of content: **facts backed by engineering and on-chain evidence**, **"user statements" known only to the project owner**, and **explicit boundaries**. Every on-chain hash can be pasted into any Monad testnet explorer for verification; in-repo evidence is given as relative paths. This article contains no keys or credential values. Chinese version: [kimi_ch.md](./kimi_ch.md).
 
-## 摘要：Kimi 在 TokenShare 里的两个角色
+## Summary: Kimi's Two Roles in TokenShare
 
-1. **开发工具**（用户陈述）：据项目负责人确认，Kimi 系列模型作为交互式编程助手参与了本项目从智能合约、中继服务到前端页面的日常开发。
-2. **平台第一个真实上游**（有工程与链上证据）：TokenShare 是一个把官方 LLM 套餐额度变成「按 token 计量、链上托管结算」服务的开放协议。Kimi（Moonshot AI，OpenAI 兼容接口）是第一个完成**真实注册、真实调用、真实链上结算**闭环的上游；最新一笔演示（payment 5，`k3-256k`）的调用、按量结算与退款金额均有公开交易可查，并完成了一次链上锚定的结算对账演示（§四）。
+1. **Development tool** (user statement): Per the project owner's confirmation, Kimi-series models served as the interactive coding assistant throughout the project's daily development, from smart contracts to the relay service to the frontend pages.
+2. **The platform's first real upstream** (facts with engineering and on-chain evidence): TokenShare is an open protocol that turns official LLM plan quotas into a "token-metered, on-chain escrow-settled" service. Kimi (Moonshot AI, OpenAI-compatible API) was the first upstream to complete the full loop of **real registration, real calls, and real on-chain settlement**; the latest demo (payment 5, `k3-256k`) has a publicly verifiable transaction covering the call, the metered settlement, and the refund, plus an on-chain-anchored settlement reconciliation demo (§4).
 
-## 一、现状速览（截至提交材料记录，2026-10）
+## 1. Current Status at a Glance (as recorded in submission materials, 2026-10)
 
-- **链上**：Monad 测试网（chain 10143），Escrow v3.2 `0xe4D5…514c` + Registry v4 `0xeD34…2254`，官方 Circle USDC（6 位小数）做托管与按量结算（[contracts/deployed.monad.json](../../contracts/deployed.monad.json)）。
-- **中继**：共享多卖家中继已部署在 Phala TDX 可信执行环境（Phala Cloud CVM）中，并处于生产站配置的活跃状态；**卖家不需要自建任何 TEE**，通过应用层加密托管 upstream key 即可（自建单卖家模式仍作为可选项保留）。市场页实时读取 Registry：**当前活跃的 listing 为 Kimi**（`k3-256k` 与 `kimi-for-coding-highspeed`）；Qwen 的 listing 曾存在，已于 2026-10-09 在其演示完成后由卖家下架（listing 由卖家自主控制、随时可变）（[web/config.js](../../web/config.js)；录制当时的双卖家口径见本地维护的视频脚本，不在仓库）。
-- **Kimi 侧**：`k3-256k` 与 `kimi-for-coding` 两个模型都有记录在案的真实调用；最新一笔完整闭环见 §三。
-- 说明：以上「已部署/活跃」是提交材料所记录的部署事实（含配置与验证记录），本文不对线上服务做实时可用性检查。
+- **On-chain**: Monad testnet (chain 10143), Escrow v3.2 `0xe4D5…514c` + Registry v4 `0xeD34…2254`, with official Circle USDC (6 decimals) for escrow and per-usage settlement ([contracts/deployed.monad.json](../../contracts/deployed.monad.json)).
+- **Relay**: The shared multi-seller relay is deployed in a Phala TDX trusted execution environment (Phala Cloud CVM) and is active in the production-site configuration; **sellers do not need to run any TEE of their own** — application-layer encrypted escrow of the upstream key is enough (the self-hosted single-seller mode remains an option). The market page reads the Registry live: **the currently active listings are Kimi's** (`k3-256k` and `kimi-for-coding-highspeed`); a Qwen listing once existed and was delisted by its seller on 2026-10-09 after its demo was completed (listings are seller-controlled and can change at any time) ([web/config.js](../../web/config.js); the dual-seller wording at recording time is in the locally maintained video script, not in the repo).
+- **Kimi side**: Both `k3-256k` and `kimi-for-coding` have recorded, on-file real calls; the latest complete loop is in §3.
+- Note: The "deployed/active" statements above are deployment facts as recorded in the submission materials (including configuration and verification records); this article performs no real-time availability checks on live services.
 
-**为什么是 Monad**：TokenShare 的按调用记账依赖一个面向低成本、高吞吐、快确认交易的 EVM 环境——一次模型调用的实收可以低到 0.000918 USDC（§三 payment 5 的实际扣费），Monad 测试网的低费用设计有助于让这种支付规模下的结算开销保持在实际可行的范围。这是设计适配性的定位陈述，**不是实测结论**：上游模型用量与链上 gas 是两类互相独立的真实成本，本项目未发布过任何「gas 占单笔比例」的基准测量；低费用是链环境特性带来的帮助，不构成对成本或收益的证明，也不代表任何厂商授权。
+**Why Monad**: TokenShare's per-call accounting depends on an EVM environment oriented toward low-cost, high-throughput, fast-confirmation transactions — the actual receipt for a single model call can be as low as 0.000918 USDC (the actual charge of payment 5 in §3), and the Monad testnet's low-fee design helps keep settlement overhead at this payment scale practically viable. This is a design-fit positioning statement, **not a measured conclusion**: upstream model usage and on-chain gas are two independent kinds of real cost, and this project has published no benchmark measuring "gas share of a single call"; low fees are a helpful property of the chain environment — they do not constitute proof of cost or revenue, and they do not imply any vendor endorsement.
 
-## 二、架构里 Kimi 处在哪一环
+## 2. Where Kimi Sits in the Architecture
 
-TokenShare 的产品形态是「官方套餐额度的链上按量租赁市场」，一条请求的完整链路是：
+TokenShare's product form is an "on-chain, pay-per-usage rental market for official plan quotas". The full path of a single request is:
 
-- **卖家动线**：钱包身份核验 → upstream key 应用层加密托管（可先于上架）→ VERIFY catalog（真实拉取模型列表交叉核验）→ 选模型、发布每模型三档价（缓存输入/输入/输出，每百万 token）→ 显式授权结算委托。
-- **买家动线**：钱包签名锁定一笔 USDC 预算 → mint 出标准 OpenAI 兼容 API key → 按 token 计量扣款；一次锁定可多次调用，锁定到期（TTL）后只有未消费余额可退。
-- **请求路由**：中继只允许请求官方端点（host 白名单 + 模型前缀→厂商映射 + 请求级一致性校验，见 [relay/app/config.py](../../relay/app/config.py)）；请求按 payment 上登记的 seller 路由到**对应卖家的 key**，绝不发往任意钱包。
-- **计价与账单**：链上 `getPrice` 按模型取卖家发布的三档价，账单公式为 `(缓存×cachedIn + (prompt−缓存)×input + completion×output)//1e6`。注意这是**卖家自报价目**，不等于上游官方价目，也不构成对真实成本的独立证明。
-- **结算**：卖家授权的结算委托代表卖家落链结算，资金进入卖家的链上账本余额；协议是否收取手续费由 Escrow 治理。
+- **Seller flow**: wallet identity verification → application-layer encrypted escrow of the upstream key (can precede listing) → VERIFY catalog (real fetch of the model list for cross-checking) → select models and publish three-tier per-model prices (cached input / input / output, per million tokens) → explicitly authorize a settlement delegate.
+- **Buyer flow**: a wallet signature locks a USDC budget → a standard OpenAI-compatible API key is minted → deductions are metered per token; one lock supports multiple calls, and after the lock expires (TTL) only the unconsumed balance is refundable.
+- **Request routing**: the relay only allows requests to official endpoints (host whitelist + model-prefix→vendor mapping + per-request consistency check, see [relay/app/config.py](../../relay/app/config.py)); requests are routed by the seller registered on the payment to **that seller's key**, never to arbitrary wallets.
+- **Pricing and billing**: the on-chain `getPrice` fetches the seller-published three-tier price per model; the billing formula is `(cached×cachedIn + (prompt−cached)×input + completion×output)//1e6`. Note that these are **seller-self-published prices** — they are not the upstream official price list, and they are not independent proof of real cost.
+- **Settlement**: a seller-authorized settlement delegate posts settlement on-chain on the seller's behalf; funds enter the seller's on-chain ledger balance; whether the protocol charges a fee is governed by Escrow.
 
-Kimi 侧的接入是第一套完整走通这套动线的：API 端点覆盖 `api.moonshot.cn`（国内）/ `api.moonshot.ai`（国际）/ `api.kimi.com`（Coding 套餐），均为 OpenAI 兼容 Bearer 鉴权（端点记录见 [.env.example](../../.env.example)）。
+The Kimi integration was the first to walk through this entire flow end to end: the API endpoints cover `api.moonshot.cn` (China) / `api.moonshot.ai` (international) / `api.kimi.com` (Coding plans), all with OpenAI-compatible Bearer authentication (endpoint records in [.env.example](../../.env.example)).
 
-对接真实上游时逐条暴露、逐条写进代码的行为差异，保留如下：
+Upstream behavior differences that surfaced one by one during real integration and were written into the code are preserved below:
 
-| Kimi 上游行为 | 我们的处理 |
+| Kimi upstream behavior | Our handling |
 | --- | --- |
-| 对 `temperature`/`top_p`/`n`/`penalties` 传任何值（含 0）一律 400 | 中继零注入：不替买家补默认采样参数，如实透传 |
-| 流式响应的 usage 出现在 `[DONE]` 前的某个 chunk，可能在空 choices 里 | 取最后一个非 null usage，并对非标准顶层 `usage.cached_tokens` 做兜底 |
-| 低档套餐限速严格（并发 1 / RPM 3） | 演示动线按该节奏设计；产品侧用「累计 + 阈值批量落链」减少上链次数 |
-| 缓存命中输入有独立单价 | 平台计价直接采用每模型三档价，链上按模型取价 |
-| 国内/国际/Coding 三站 key 不互通 | host 归一化 + 白名单同时收录三个官方 host |
+| Any value for `temperature`/`top_p`/`n`/`penalties` (including 0) returns 400 | Relay zero-injection: no default sampling parameters are added on the buyer's behalf; requests are passed through as-is |
+| In streaming responses, usage appears in some chunk before `[DONE]`, possibly inside empty `choices` | Take the last non-null usage, with a fallback for the non-standard top-level `usage.cached_tokens` |
+| Low-tier plans are strictly rate-limited (concurrency 1 / RPM 3) | The demo flow is paced accordingly; on the product side, "accumulate + threshold-based batch on-chain writes" reduce the number of on-chain transactions |
+| Cached-input tokens have a separate unit price | Platform pricing directly uses the per-model three-tier prices, fetched on-chain per model |
+| China / international / Coding keys are not interchangeable | Host normalization + the whitelist includes all three official hosts |
 
-## 三、真实调用与链上结算证据（payment 5，k3-256k）
+## 3. Real Call and On-Chain Settlement Evidence (payment 5, k3-256k)
 
-这是现役 Escrow v3.2 代际上一笔可公开核对的完整闭环（细节见 [docs/CRE_DEMO_EVIDENCE.md](../CRE_DEMO_EVIDENCE.md)）：
+This is a publicly verifiable, complete loop on the currently active Escrow v3.2 generation (details in [docs/CRE_DEMO_EVIDENCE.md](../CRE_DEMO_EVIDENCE.md)):
 
-| 项目 | 数值 |
+| Item | Value |
 | --- | --- |
-| 上游 / 模型 | `api.kimi.com` / `k3-256k` |
-| Token 用量 | prompt 93 · cached 0 · completion 40 |
-| 实际扣费 | 918（= 93×6 + 40×9，测试网 USDC 6 位小数，即 0.000918） |
-| 预算上限 / 退款 | 1,500,000 / 退款 1,499,082 |
-| 结算交易 | [`0x04249c26…c07d1785`](https://testnet.monadvision.com/tx/0x04249c263cdc64661141bc3a0911ddec2b2c05e57f79d21b5fd0f682c07d1785)（block 69225090） |
+| Upstream / model | `api.kimi.com` / `k3-256k` |
+| Token usage | prompt 93 · cached 0 · completion 40 |
+| Actual charge | 918 (= 93×6 + 40×9, testnet USDC 6 decimals, i.e. 0.000918) |
+| Budget cap / refund | 1,500,000 / refund 1,499,082 |
+| Settlement tx | [`0x04249c26…c07d1785`](https://testnet.monadvision.com/tx/0x04249c263cdc64661141bc3a0911ddec2b2c05e57f79d21b5fd0f682c07d1785) (block 69225090) |
 
-按 Registry 当块三档价（cachedIn 3 / input 6 / output 9，每百万 token）逐 token 重算，与结算金额、退款金额三方一致。更早的 2026-09 记录（当时部署代际下的首跑与按量多次调用闭环）属于**历史部署阶段**，其合约版本与快照细节不在本文复述，以免与现役证据混淆；现役证据以本节为准。
+Recomputing token by token from the Registry's at-block three-tier prices (cachedIn 3 / input 6 / output 9, per million tokens), the result matches the settlement amount and the refund amount — all three sides agree. The earlier 2026-09 records (the first run and the multi-call metered loop under the then-deployed generation) belong to a **historical deployment phase**; their contract versions and snapshot details are not repeated in this article, to avoid confusion with the current-generation evidence; for current-generation evidence, this section prevails.
 
-## 四、结算对账演示：证明了什么、没证明什么
+## 4. Settlement Reconciliation Demo: What It Proves and What It Doesn't
 
-2026-10-08，我们用 Chainlink CRE 工作流对这笔 payment 做了一次结算对账并把结果锚定上链：
+On 2026-10-08, we used a Chainlink CRE workflow to run a settlement reconciliation on this payment and anchored the result on-chain:
 
-- **做了什么**：本地 CRE 模拟运行两次（一次 dry-run、一次 broadcast），在结算块高度重算账单公式、取回中继签名的 EIP-712 收据并验证签名，比对结果为 Match（918 = 918），报告经**免许可的测试网 mock forwarder** 锚定到演示实例的 ReceiptAnchor 合约，锚定交易 [`0x9125c198…53ea97330`](https://testnet.monadvision.com/tx/0x9125c1983a1f50402f883521bcfd6b1f848051560a6f98c69fe13ce53ea97330)（block 69239836）。
-- **它证明了**：这笔收据的金额与链上价目、链上结算额在结算块高度一致，且锚定动作本身留有公开交易。
-- **它没有证明**：这不是生产 Chainlink DON 部署（mock forwarder 不做任何验证），也不构成对单笔调用真实来源、累计用量或「真实 token 消耗」的独立证明。签名收据认证的是**中继的账单陈述**，而非 token 真相——买家能用它做的是「与链上价目对账」，而不是「证明上游真的产生了这些 token」。
+- **What was done**: the local CRE simulation ran twice (one dry-run, one broadcast), recomputing the billing formula at the settlement block height, retrieving the relay-signed EIP-712 receipt and verifying its signature; the comparison result was Match (918 = 918), and the report was anchored through a **permissionless testnet mock forwarder** to the ReceiptAnchor contract of the demo instance, in anchor tx [`0x9125c198…53ea97330`](https://testnet.monadvision.com/tx/0x9125c1983a1f50402f883521bcfd6b1f848051560a6f98c69fe13ce53ea97330) (block 69239836).
+- **What it proves**: the receipt's amount is consistent with the on-chain prices and the on-chain settled amount at the settlement block height, and the anchoring action itself left a public transaction.
+- **What it does not prove**: this is not a production Chainlink DON deployment (the mock forwarder performs no verification), nor does it constitute independent proof of the true origin of a single call, cumulative usage, or "real token consumption". The signed receipt certifies **the relay's billing statement**, not token truth — what a buyer can do with it is "reconcile against on-chain prices", not "prove the upstream actually produced these tokens".
 
-## 五、开发工具角色（用户陈述）
+## 5. Development-Tool Role (User Statement)
 
-项目负责人确认：合约（Solidity/Foundry）、中继（Python/FastAPI）、前端（原生 JS）与 CLI 的日常开发中，Kimi 系列模型作为对话式编程工具被持续使用——设计讨论、代码草稿、排错与文案。
+The project owner confirms: during the daily development of the contracts (Solidity/Foundry), the relay (Python/FastAPI), the frontend (vanilla JS), and the CLI, Kimi-series models were used continuously as conversational coding tools — for design discussions, code drafts, debugging, and copywriting.
 
-**本文不做任何归因**：不指明具体任务由哪个模型版本完成，不统计调用次数，不宣称节省工时，也不把测试与审计结果归因成模型能力——仓库的最终质量属于工程流程（接口逐字对齐、双端签名互证、独立审查）的结果，与模型性能无关。
+**This article makes no attribution**: it does not identify which model version completed which task, does not count calls, does not claim saved engineering hours, and does not attribute test or audit results to model capability — the repo's final quality is the result of the engineering process (verbatim interface alignment, two-sided signature cross-verification, independent review), not of model performance.
 
-## 六、新定位：官方也可以使用的计量售卖渠道（潜力，非现状）
+## 6. New Positioning: A Metered Sales Channel That Official Vendors Could Also Use (Potential, Not Current)
 
-今天 TokenShare 的卖家是「有闲置额度的个人/团队」。但协议本身的能力边界更宽，项目负责人的一句话定位是：
+Today TokenShare's sellers are "individuals/teams with idle quota". But the protocol's capability boundary is wider, and the project owner's one-line positioning is:
 
-> **“他们也可以承接官方的API的售卖，多一个相应的售卖渠道。”**
+> **"They could also take on selling the official APIs — one more sales channel."**
 
-也就是说，同一套基础设施不仅适合盘活个人闲置订阅，也同样**在技术上支持官方厂商自身、或获得正式授权的分销商/供应商**把它作为一条按量售卖渠道使用：每模型价目直接发布在链上 Registry，买家预算由托管合约硬性约束，每次调用产生可验证签名的计费收据，共享 TEE 网关替渠道方承担密钥托管与路由——开发者与 agent 生态可以按 token 直接接入，而渠道方无需自建任何计量与结算设施。
+That is: the same infrastructure not only suits putting idle personal subscriptions to work; it also, **technically**, supports the official vendors themselves — or formally authorized distributors/suppliers — using it as a pay-per-usage sales channel: per-model prices are published directly on the on-chain Registry, buyer budgets are hard-constrained by the escrow contract, every call produces a verifiable signed billing receipt, and the shared TEE gateway handles key escrow and routing for the channel party — developers and the agent ecosystem can integrate per token directly, while the channel party need not build any metering or settlement infrastructure.
 
-**必须划清的边界**：这是技术能力与定位描述，**不是**任何实际存在的厂商合作、授权、签约或收入。本文不声称 Kimi/Moonshot 是 TokenShare 的官方伙伴，也没有任何来自厂商的书面授权或商业安排。
+**A boundary that must be drawn clearly**: this is a description of technical capability and positioning, **not** any actually existing vendor cooperation, authorization, contract, or revenue. This article does not claim Kimi/Moonshot is an official partner of TokenShare, and there is no written vendor authorization or commercial arrangement of any kind.
 
-## 七、边界与如实声明
+## 7. Boundaries and Honest Disclaimers
 
-- **收据 ≠ token 真相**：收据由中继签发，是账单陈述的签名认证，不是服务质量的证明，也不是真实 token 消耗的独立证据。
-- **价目 ≠ 官方价**：链上三档价是卖家自报的，不必然等于上游官方价目。
-- **TEE 降低而非消除风险**：共享 TEE 中继把密钥约束进 enclave，但平台运营方与治理仍是信任面，这不是零托管、也不是 trustless。
-- **测试网代币没有价值**：testnet USDC/MON 无真实价值；但上游套餐额度与云基础设施仍是**真实成本**。
-- **退款受合约约束**：退款受支付状态、结算与 TTL 规则限制，不是随时即时可取；卖家授权的结算委托在 TTL 后仍可结算既有锁定（资金只会进入卖家账本）。
-- **吊销是显式动作**：吊销买家的 API key 是一项显式操作，断开钱包连接不等于吊销已发出的 key。
-- **合规责任在卖家**：上游卖家自行对其账号遵守厂商条款负责；本项目不构成分销授权，免责声明不能替代授权。
+- **Receipt ≠ token truth**: receipts are issued by the relay; they are a signed certification of a billing statement — not proof of service quality, and not independent evidence of real token consumption.
+- **Prices ≠ official prices**: the on-chain three-tier prices are seller-self-reported and are not necessarily equal to the upstream official price list.
+- **TEE reduces risk; it does not eliminate it**: the shared TEE relay confines keys inside an enclave, but the platform operator and governance remain trust surfaces; this is not zero-custody, and it is not trustless.
+- **Testnet tokens have no value**: testnet USDC/MON have no real value; but upstream plan quotas and cloud infrastructure are still **real costs**.
+- **Refunds are contract-constrained**: refunds are limited by payment state, settlement, and TTL rules — they are not instantly withdrawable at any time; a seller-authorized settlement delegate can still settle existing locks after TTL (funds only ever enter the seller's ledger).
+- **Revocation is an explicit action**: revoking a buyer's API key is an explicit operation; disconnecting the wallet does not revoke keys that have already been issued.
+- **Compliance responsibility lies with the seller**: upstream sellers are themselves responsible for their accounts' compliance with vendor terms; this project does not constitute distribution authorization, and a disclaimer cannot substitute for authorization.
 
-## 八、核对路径
+## 8. Verification Paths
 
-- 现役部署事实：地址、部署时间与网络见 [`contracts/deployed.monad.json`](../../contracts/deployed.monad.json)（该文件不含版本号与部署 tx）；Escrow v3.2 `0xe4D5…514c`（2026-10-07 部署）及 tx [`0xc7ca3ac7…523afce4e`](https://testnet.monadvision.com/tx/0xc7ca3ac798e16ace9f4554df51912aed235753f360d7f0a6417b7b0523afce4e) 见根目录 [README.md](../../README.md)「Networks」段；Registry v4 与官方 USDC 地址见同 JSON 文件。
-- payment 5 全量证据：[`docs/CRE_DEMO_EVIDENCE.md`](../CRE_DEMO_EVIDENCE.md)（结算 tx、CRE 模拟与锚定 tx、链上 `records(5)` 读回）。
-- 提交状态与演示范围：[`docs/SUBMISSION.md`](../SUBMISSION.md)；演示动线：[`docs/DEMO_RUNBOOK.md`](../DEMO_RUNBOOK.md)；视频脚本：本地维护、不在仓库。
-- 中继白名单与前缀映射：[`relay/app/config.py`](../../relay/app/config.py)；部署与镜像：[`relay/README-docker.md`](../../relay/README-docker.md)。
-- 密钥托管与政策：[`web/policy.html`](../../web/policy.html)、市场页配置：[`web/config.js`](../../web/config.js)。
-- Kimi 官方端点记录：[`.env.example`](../../.env.example)（`api.moonshot.cn` / `api.moonshot.ai` / `api.kimi.com/coding`）。
-- 索引：[README.md](./README.md)（仅作目录导航；个别状态描述可能滞后于本文，以本文引用的一手证据为准）。
+- Current deployment facts: addresses, deployment times, and network are in [`contracts/deployed.monad.json`](../../contracts/deployed.monad.json) (that file contains no version numbers or deployment txs); Escrow v3.2 `0xe4D5…514c` (deployed 2026-10-07) and tx [`0xc7ca3ac7…523afce4e`](https://testnet.monadvision.com/tx/0xc7ca3ac798e16ace9f4554df51912aed235753f360d7f0a6417b7b0523afce4e) are in the root [README.md](../../README.md) "Networks" section; Registry v4 and the official USDC address are in the same JSON file.
+- Full payment 5 evidence: [`docs/CRE_DEMO_EVIDENCE.md`](../CRE_DEMO_EVIDENCE.md) (settlement tx, CRE simulation and anchor tx, on-chain `records(5)` readback).
+- Submission status and demo scope: [`docs/SUBMISSION.md`](../SUBMISSION.md); demo runbook: [`docs/DEMO_RUNBOOK.md`](../DEMO_RUNBOOK.md); video script: maintained locally, not in the repo.
+- Relay whitelist and prefix mapping: [`relay/app/config.py`](../../relay/app/config.py); deployment and images: [`relay/README-docker.md`](../../relay/README-docker.md).
+- Key escrow and policy: [`web/policy.html`](../../web/policy.html); market page configuration: [`web/config.js`](../../web/config.js).
+- Kimi official endpoint records: [`.env.example`](../../.env.example) (`api.moonshot.cn` / `api.moonshot.ai` / `api.kimi.com/coding`).
+- Index: [README.md](./README.md) (directory navigation only; individual status descriptions may lag this article — the primary evidence cited herein prevails).
 
-## 事实分层
+## Fact Layering
 
-| 层级 | 内容 |
+| Layer | Content |
 | --- | --- |
-| 工程/链上证据 | §三 payment 5 真实调用与结算、§四 CRE 对账演示、§二 架构与适配表、Escrow v3.2 部署 |
-| 用户陈述 | §五 开发过程中使用 Kimi 的亲历描述 |
-| 潜力（非事实） | §六 官方/授权渠道作为售卖渠道的技术支持，不代表任何合作或授权 |
-| 边界 | §七 全部条目；§一「为什么是 Monad」的定位边界（非实测、不构成成本/收益证明、不代表厂商授权） |
+| Engineering / on-chain evidence | §3 payment 5 real call and settlement, §4 CRE reconciliation demo, §2 architecture and fit table, Escrow v3.2 deployment |
+| User statement | §5 first-person description of using Kimi during development |
+| Potential (not fact) | §6 technical support for official/authorized channels as a sales channel; does not represent any cooperation or authorization |
+| Boundaries | All items in §7; the positioning boundaries of §1 "Why Monad" (not measured, no proof of cost/revenue, no vendor endorsement) |

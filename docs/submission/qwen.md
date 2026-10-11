@@ -1,90 +1,90 @@
-# Qwen（通义千问）：TokenShare 的第二位真实卖家（历史集成；listing 已于 2026-10-09 下架）
+# Qwen (Tongyi Qianwen): TokenShare's Second Real Seller (Historical Integration; Listing Delisted 2026-10-09)
 
-> 本文是 TokenShare（Monad 黑客松项目）面向 Qwen / 阿里云团队及相关读者的介绍文章，与 [kimi.md](./kimi.md) 配对阅读。文中严格区分三类内容：**有证据的事实（含其证据边界）**、**只有项目负责人亲历的「用户陈述」**、以及**明确的边界**。本文不含任何密钥或凭证值，也不做任何未经记录支撑的断言。
+> This article introduces TokenShare (a Monad hackathon project) to the Qwen / Alibaba Cloud team and related readers, and is meant to be read alongside [kimi.md](./kimi.md). It strictly separates three categories of content: **facts backed by evidence (together with their evidence boundaries)**, **"user statements" known only to the project owner**, and **explicit boundaries**. This article contains no keys or credential values, and makes no assertions unsupported by records. Chinese version: [qwen_ch.md](./qwen_ch.md).
 
-## 摘要：Qwen 在 TokenShare 里的两个角色
+## Summary: Qwen's Two Roles in TokenShare
 
-1. **开发工具**（用户陈述）：据项目负责人确认，Qwen 系列模型作为交互式编程助手参与了本项目的日常开发。
-2. **平台第二位真实卖家**（有记录证据，证据边界见 §三）：Qwen 已完成接入——`qwen3.8-max` 有记录在案的真实 API 调用与部分链上结算，Qwen 卖家的 key 托管在共享 TEE 中继、listing 曾上架市场页、并已授权结算委托。演示完成后，该 listing 已于 **2026-10-09 由卖家主动下架**（Registry.deactivate，见 §一），目的是停止上游额度消耗；当前市场活跃 listing 仅剩 Kimi。本文记录的是这次**历史集成**。同时如实说明：追踪仓库内**没有** Qwen 专属的逐笔交易哈希 / payment ID / 调用次数 / 具体金额清单，本文不引用、不编造任何这类数字，也不借用 Kimi 的交易来充数。
+1. **Development tool** (user statement): Per the project owner's confirmation, Qwen-series models served as the interactive coding assistant in this project's daily development.
+2. **The platform's second real seller** (recorded evidence; evidence boundary in §3): The Qwen integration was completed — `qwen3.8-max` has recorded, on-file real API calls and partial on-chain settlement, the Qwen seller's key was escrowed in the shared TEE relay, the listing was once live on the market page, and a settlement delegate was authorized. After the demo was completed, the listing was **voluntarily delisted by the seller on 2026-10-09** (Registry.deactivate, see §1), in order to stop upstream quota consumption; the only currently active listing on the market is Kimi's. This article records that **historical integration**. To state it honestly as well: the tracking repo contains **no** Qwen-specific per-transaction hashes / payment IDs / call counts / itemized amounts; this article neither cites nor invents any such numbers, and does not borrow Kimi's transactions to fill the gap.
 
-## 一、状态速览（历史集成 + 2026-10-09 下架记录）
+## 1. Status at a Glance (Historical Integration + 2026-10-09 Delisting Record)
 
-- **链上**：Monad 测试网（chain 10143），Escrow v3.2 + Registry v4 + 官方 Circle USDC（6 位小数），与 Kimi 篇同一套现役部署（[contracts/deployed.monad.json](../../contracts/deployed.monad.json)）。
-- **中继**：共享多卖家中继运行在 Phala TDX 可信执行环境（Phala Cloud CVM）中，处于生产站配置的活跃状态；**卖家不需要自建任何 TEE**。
-- **Qwen 侧（历史状态 + 下架记录）**：演示期间市场页曾展示「一个卖 Qwen 3.8 Max」的真实卖家卡片（录制当时的视频脚本——本地维护、不在仓库，当时与 Kimi 并列）；keystore 中持有两把卖家 key（Kimi 与 Qwen），两个 listing 的端点都指向这台 TEE 中继，且两位卖家都曾授权结算委托（[web/policy.html](../../web/policy.html)）。**下架记录**：应卖家要求停止上游额度消耗，该 listing 已于 **2026-10-09** 通过 Registry.deactivate 下架（tx [`0x6a91bb20…d7131f1b`](https://testnet.monadvision.com/tx/0x6a91bb203751aad1f29003b046dfb56965d901e08d372a4b5070fa9bd7131f1b)，block 69498784，Monad 测试网 10143）；市场页实时读取 Registry，**当前活跃 listing 仅剩 Kimi**。listing 由卖家自主控制、随时可变。
-- 说明：以上「已部署/曾活跃/已下架」是提交材料所记录的部署事实；Qwen listing 的当前状态以 Registry 实时数据为准，本文不对线上服务做实时可用性检查。
+- **On-chain**: Monad testnet (chain 10143), Escrow v3.2 + Registry v4 + official Circle USDC (6 decimals) — the same currently active deployment as the Kimi article ([contracts/deployed.monad.json](../../contracts/deployed.monad.json)).
+- **Relay**: The shared multi-seller relay runs in a Phala TDX trusted execution environment (Phala Cloud CVM), active in the production-site configuration; **sellers do not need to run any TEE of their own**.
+- **Qwen side (historical status + delisting record)**: During the demo, the market page showed a real seller card of "one seller offering Qwen 3.8 Max" (the video script at recording time — maintained locally, not in the repo; then alongside Kimi); the keystore held two seller keys (Kimi and Qwen), both listings' endpoints pointed to this TEE relay, and both sellers had authorized settlement delegates ([web/policy.html](../../web/policy.html)). **Delisting record**: at the seller's request to stop upstream quota consumption, the listing was delisted via Registry.deactivate on **2026-10-09** (tx [`0x6a91bb20…d7131f1b`](https://testnet.monadvision.com/tx/0x6a91bb203751aad1f29003b046dfb56965d901e08d372a4b5070fa9bd7131f1b), block 69498784, Monad testnet 10143); the market page reads the Registry live — **the only currently active listing is Kimi's**. Listings are seller-controlled and can change at any time.
+- Note: The "deployed / once active / delisted" statements above are deployment facts as recorded in the submission materials; the Qwen listing's current status is governed by live Registry data, and this article performs no real-time availability checks on live services.
 
-**为什么是 Monad**：TokenShare 的按调用记账依赖一个面向低成本、高吞吐、快确认交易的 EVM 环境；Monad 测试网的低费用设计有助于让单次调用级别的结算开销保持在实际可行的范围。这是设计适配性的定位陈述，**不是实测结论**：上游模型用量与链上 gas 是两类互相独立的真实成本，本项目未发布过任何「gas 占单笔比例」的基准测量；Qwen 专属的逐笔金额尚未归档（见 §三），本文因此不引用任何具体实收数字。低费用是链环境特性带来的帮助，不构成对成本或收益的证明，也不代表任何厂商授权。
+**Why Monad**: TokenShare's per-call accounting depends on an EVM environment oriented toward low-cost, high-throughput, fast-confirmation transactions; the Monad testnet's low-fee design helps keep settlement overhead at the single-call level practically viable. This is a design-fit positioning statement, **not a measured conclusion**: upstream model usage and on-chain gas are two independent kinds of real cost, and this project has published no benchmark measuring "gas share of a single call"; Qwen-specific per-transaction amounts have not been archived (see §3), so this article cites no specific receipt figures. Low fees are a helpful property of the chain environment — they do not constitute proof of cost or revenue, and they do not imply any vendor endorsement.
 
-## 二、架构里 Qwen 处在哪一环
+## 2. Where Qwen Sits in the Architecture
 
-TokenShare 的中继从第一天起按「多厂商可插拔」设计，Qwen 的接入复用了与 Kimi 完全相同的动线：
+TokenShare's relay was designed as "multi-vendor pluggable" from day one, and the Qwen integration reused exactly the same flow as Kimi's:
 
-- **核心流程一致**：upstream key 应用层加密托管（可先于上架）→ VERIFY catalog（真实拉取模型列表交叉核验）→ 选模型、发布每模型三档价（缓存输入/输入/输出，每百万 token）→ 显式授权结算委托 → 买家按 token 计量扣款。
-- **OpenAI 兼容面匹配**：阿里云百炼提供 OpenAI 兼容模式（base URL 说明见[官方文档](https://help.aliyun.com/zh/model-studio/base-url)），平台的每模型三档价、链上取价与 USDC 6 位小数按量结算管线对 OpenAI 兼容上游成立。
-- **路由与隔离**：请求按 payment 上登记的 seller 路由到对应卖家的 key，绝不发往任意钱包；host 白名单与模型前缀→厂商映射是代码内策略（[relay/app/config.py](../../relay/app/config.py)）。
+- **Identical core flow**: application-layer encrypted escrow of the upstream key (can precede listing) → VERIFY catalog (real fetch of the model list for cross-checking) → select models and publish three-tier per-model prices (cached input / input / output, per million tokens) → explicitly authorize a settlement delegate → buyers are deducted per token.
+- **Matching OpenAI-compatible surface**: Alibaba Cloud Model Studio offers an OpenAI-compatible mode (base URL per the [official documentation](https://help.aliyun.com/zh/model-studio/base-url)); the platform's per-model three-tier prices, on-chain price lookup, and USDC 6-decimal per-usage settlement pipeline hold for OpenAI-compatible upstreams.
+- **Routing and isolation**: requests are routed by the seller registered on the payment to that seller's key, never to arbitrary wallets; the host whitelist and the model-prefix→vendor mapping are in-code policy ([relay/app/config.py](../../relay/app/config.py)).
 
-## 三、证据现状：能证明什么，还缺什么
+## 3. Evidence Status: What Can Be Shown, What Is Missing
 
-**有记录支撑的（提交材料明确记录）**：
+**Backed by records (explicitly recorded in the submission materials)**:
 
-- `qwen3.8-max` 的**真实 API 调用**与**部分链上结算**已被记录为演示事实（[docs/SUBMISSION.md](../SUBMISSION.md)「Demo status」段）。
-- Qwen 卖家的 key 在共享 TEE 中继的加密 keystore 中，listing 曾在市场页上线，结算委托已授权（[web/policy.html](../../web/policy.html)）；该 listing 后于 2026-10-09 下架（见 §一），此处的演示记录作为历史事实保持不变。
+- Real API calls of `qwen3.8-max` and **partial on-chain settlement** are recorded as demo facts ([docs/SUBMISSION.md](../SUBMISSION.md), "Demo status" section).
+- The Qwen seller's key was in the shared TEE relay's encrypted keystore, the listing was once live on the market page, and the settlement delegate was authorized ([web/policy.html](../../web/policy.html)); the listing was subsequently delisted on 2026-10-09 (see §1), and the demo records here remain unchanged as historical fact.
 
-**诚实声明的证据缺口**：
+**Honestly declared evidence gaps**:
 
-- 追踪仓库内目前没有 Qwen 专属的交易哈希、payment ID、调用次数或金额明细可供逐笔核对。因此本文**不给出**任何 Qwen 专属链上哈希或数字；市场页两个卖家地址与「Kimi / Qwen」的对应关系来自平台侧记录与浏览器上的推断，本文也不指认具体地址。
-- 换句话说：**代码与文档层面的 Qwen 接入是完整的、调用是真实发生过的**；但「逐笔、可独立点开验证的 Qwen explorer 证据」尚未整理归档。这是后续补齐的工作项，不是本文用别家数据填补的空缺。
+- The tracking repo currently contains no Qwen-specific transaction hashes, payment IDs, call counts, or amount details that could be verified item by item. Therefore this article **gives** no Qwen-specific on-chain hashes or numbers; the correspondence between the market page's two seller addresses and "Kimi / Qwen" comes from platform-side records and on-explorer inference, and this article does not identify specific addresses either.
+- In other words: **the Qwen integration at the code and documentation level is complete, and the calls really happened**; but "per-transaction, independently clickable Qwen explorer evidence" has not yet been organized and archived. This is a follow-up work item — not a gap this article fills with someone else's data.
 
-## 四、条款边界（2026-10-07 的历史研究，非重新核实）
+## 4. Terms Boundaries (Historical Research from 2026-10-07, Not Re-Verified)
 
-2026-10-07，我们对 Qwen Token Plan 条款做过一次只读研究，结论作为**历史研究记录**保留（本文不对其做实时复核）：
+On 2026-10-07, we did a read-only study of the Qwen Token Plan terms; its conclusions are kept as a **historical research record** (this article does not re-verify them in real time):
 
-- Token Plan 个人版/团队版端点按当时查阅的官方说明**仅限交互式工具/智能体场景**，官方文档写明不适用于应用后端、自动脚本及共享（[个人版说明](https://platform.qianwenai.com/docs/token-plan/personal/token-plan-personal-overview)、[团队版说明](https://platform.qianwenai.com/docs/token-plan/team/token-plan-team-overview)）。
-- 平台服务条款对未经许可的转售/分许可有明确限制（[服务条款](https://terms.alicdn.com/legal-agreement/terms/common_platform_service/20260423145804812/20260423145804812.html) §7.1.12 及 §1.4）。
+- Per the official documentation as consulted at the time, Token Plan personal/team endpoints are **limited to interactive tool/agent scenarios**, and the official docs state they do not apply to application backends, automated scripts, or sharing ([personal plan notes](https://platform.qianwenai.com/docs/token-plan/personal/token-plan-personal-overview), [team plan notes](https://platform.qianwenai.com/docs/token-plan/team/token-plan-team-overview)).
+- The platform terms of service clearly restrict unauthorized resale/sublicensing ([terms of service](https://terms.alicdn.com/legal-agreement/terms/common_platform_service/20260423145804812/20260423145804812.html) §7.1.12 and §1.4).
 
-**必须区分清楚的三件事**：
+**Three things that must be clearly distinguished**:
 
-1. **演示事实**：仓库记录了真实发生过的 qwen3.8-max 调用与部分结算。这是演示层面的既成事实记录。
-2. **它不等于许可**：演示中发生过调用，**不意味着**演示使用获得了供应商许可；项目负责人的风险知悉与自担也**不构成、不能替代**厂商授权。
-3. **生产/商用门槛更高**：上述条款关注点在「生产或商用分销」层面依然成立——把 Qwen 额度通过 TokenShare 面向第三方做规模化售卖，前提是取得适合后端按量计费的 key 与供应商侧的明确许可。
+1. **Demo fact**: the repo records qwen3.8-max calls and partial settlement that really happened. This is a record of accomplished facts at the demo level.
+2. **It is not permission**: that calls happened in the demo **does not mean** the demo use was vendor-permitted; the project owner's risk awareness and self-assumption of risk **does not constitute, and cannot substitute for**, vendor authorization.
+3. **The production/commercial bar is higher**: the term concerns above still stand at the "production or commercial distribution" level — selling Qwen quota at scale to third parties through TokenShare presupposes obtaining keys suited to backend per-usage billing and explicit vendor-side permission.
 
-## 五、新定位：官方也可以使用的计量售卖渠道（潜力，非现状）
+## 5. New Positioning: A Metered Sales Channel That Official Vendors Could Also Use (Potential, Not Current)
 
-今天 TokenShare 的卖家是「有闲置额度的个人/团队」。但协议本身的能力边界更宽，项目负责人的一句话定位是：
+Today TokenShare's sellers are "individuals/teams with idle quota". But the protocol's capability boundary is wider, and the project owner's one-line positioning is:
 
-> **“他们也可以承接官方的API的售卖，多一个相应的售卖渠道。”**
+> **"They could also take on selling the official APIs — one more sales channel."**
 
-也就是说，同一套基础设施不仅适合盘活个人闲置订阅，也同样**在技术上支持官方厂商自身、或获得正式授权的分销商/供应商**把它作为一条按量售卖渠道使用：每模型价目直接发布在链上 Registry，买家预算由托管合约硬性约束，每次调用产生可验证签名的计费收据，共享 TEE 网关替渠道方承担密钥托管与路由——开发者与 agent 生态可以按 token 直接接入，而渠道方无需自建任何计量与结算设施。
+That is: the same infrastructure not only suits putting idle personal subscriptions to work; it also, **technically**, supports the official vendors themselves — or formally authorized distributors/suppliers — using it as a pay-per-usage sales channel: per-model prices are published directly on the on-chain Registry, buyer budgets are hard-constrained by the escrow contract, every call produces a verifiable signed billing receipt, and the shared TEE gateway handles key escrow and routing for the channel party — developers and the agent ecosystem can integrate per token directly, while the channel party need not build any metering or settlement infrastructure.
 
-**必须划清的边界**：这是技术能力与定位描述，**不是**任何实际存在的厂商合作、授权、签约或收入。本文不声称 Qwen/阿里云是 TokenShare 的官方伙伴，也没有任何来自厂商的书面授权或商业安排。
+**A boundary that must be drawn clearly**: this is a description of technical capability and positioning, **not** any actually existing vendor cooperation, authorization, contract, or revenue. This article does not claim Qwen/Alibaba Cloud is an official partner of TokenShare, and there is no written vendor authorization or commercial arrangement of any kind.
 
-## 六、边界与如实声明
+## 6. Boundaries and Honest Disclaimers
 
-- **收据 ≠ token 真相**：收据由中继签发，是账单陈述的签名认证，不是服务质量的证明，也不是真实 token 消耗的独立证据。
-- **价目 ≠ 官方价**：链上三档价是卖家自报的，不必然等于上游官方价目；Qwen 模型的 usage 字段兼容性在接入时已按实际调用验证，但发布价与官方价的比对未做。
-- **TEE 降低而非消除风险**：共享 TEE 中继把密钥约束进 enclave，但平台运营方与治理仍是信任面，这不是零托管、也不是 trustless。
-- **测试网代币没有价值**：testnet USDC/MON 无真实价值；但上游套餐额度与云基础设施仍是**真实成本**。
-- **退款受合约约束**：退款受支付状态、结算与 TTL 规则限制，不是随时即时可取；卖家授权的结算委托在 TTL 后仍可结算既有锁定（资金只会进入卖家账本）。
-- **吊销是显式动作**：吊销买家的 API key 是一项显式操作，断开钱包连接不等于吊销已发出的 key。
-- **合规责任在卖家**：上游卖家自行对其账号遵守厂商条款负责；本项目不构成分销授权，免责声明不能替代授权。
+- **Receipt ≠ token truth**: receipts are issued by the relay; they are a signed certification of a billing statement — not proof of service quality, and not independent evidence of real token consumption.
+- **Prices ≠ official prices**: the on-chain three-tier prices are seller-self-reported and are not necessarily equal to the upstream official price list; the Qwen models' usage-field compatibility was verified against real calls during integration, but a comparison of published prices against official prices was not done.
+- **TEE reduces risk; it does not eliminate it**: the shared TEE relay confines keys inside an enclave, but the platform operator and governance remain trust surfaces; this is not zero-custody, and it is not trustless.
+- **Testnet tokens have no value**: testnet USDC/MON have no real value; but upstream plan quotas and cloud infrastructure are still **real costs**.
+- **Refunds are contract-constrained**: refunds are limited by payment state, settlement, and TTL rules — they are not instantly withdrawable at any time; a seller-authorized settlement delegate can still settle existing locks after TTL (funds only ever enter the seller's ledger).
+- **Revocation is an explicit action**: revoking a buyer's API key is an explicit operation; disconnecting the wallet does not revoke keys that have already been issued.
+- **Compliance responsibility lies with the seller**: upstream sellers are themselves responsible for their accounts' compliance with vendor terms; this project does not constitute distribution authorization, and a disclaimer cannot substitute for authorization.
 
-## 七、核对路径
+## 7. Verification Paths
 
-- 链上部署事实（与 Kimi 篇共享）：地址、部署时间与网络见 [`contracts/deployed.monad.json`](../../contracts/deployed.monad.json)（该文件不含版本号与部署 tx）；Escrow v3.2 部署 tx [`0xc7ca3ac7…523afce4e`](https://testnet.monadvision.com/tx/0xc7ca3ac798e16ace9f4554df51912aed235753f360d7f0a6417b7b0523afce4e) 见根目录 [README.md](../../README.md)「Networks」段。
-- Qwen 演示记录（真实调用与部分结算）：[`docs/SUBMISSION.md`](../SUBMISSION.md)「Demo status」段。
-- 历史双卖家展示（录制当时口径；现活跃 listing 仅 Kimi）：视频脚本（本地维护、不在仓库）、[`web/index.html`](../../web/index.html)；密钥托管与委托授权记录：[`web/policy.html`](../../web/policy.html)、[`web/config.js`](../../web/config.js)。
-- 中继可插拔架构与白名单：[`relay/app/config.py`](../../relay/app/config.py)、部署与镜像：[`relay/README-docker.md`](../../relay/README-docker.md)。
-- Qwen 官方来源（2026-10-07 研究时的链接）：[Token Plan 个人版](https://platform.qianwenai.com/docs/token-plan/personal/token-plan-personal-overview) · [Token Plan 团队版](https://platform.qianwenai.com/docs/token-plan/team/token-plan-team-overview) · [百炼 base URL](https://help.aliyun.com/zh/model-studio/base-url) · [服务条款](https://terms.alicdn.com/legal-agreement/terms/common_platform_service/20260423145804812/20260423145804812.html)。
-- 索引：[README.md](./README.md)（仅作目录导航；个别状态描述可能滞后于本文，以本文引用的一手证据为准）。
+- On-chain deployment facts (shared with the Kimi article): addresses, deployment times, and network are in [`contracts/deployed.monad.json`](../../contracts/deployed.monad.json) (that file contains no version numbers or deployment txs); the Escrow v3.2 deployment tx [`0xc7ca3ac7…523afce4e`](https://testnet.monadvision.com/tx/0xc7ca3ac798e16ace9f4554df51912aed235753f360d7f0a6417b7b0523afce4e) is in the root [README.md](../../README.md) "Networks" section.
+- Qwen demo record (real calls and partial settlement): [`docs/SUBMISSION.md`](../SUBMISSION.md), "Demo status" section.
+- Historical dual-seller display (recording-time wording; the only currently active listing is Kimi's): video script (maintained locally, not in the repo), [`web/index.html`](../../web/index.html); key escrow and delegate authorization records: [`web/policy.html`](../../web/policy.html), [`web/config.js`](../../web/config.js).
+- Relay pluggable architecture and whitelist: [`relay/app/config.py`](../../relay/app/config.py); deployment and images: [`relay/README-docker.md`](../../relay/README-docker.md).
+- Qwen official sources (links as of the 2026-10-07 research): [Token Plan personal](https://platform.qianwenai.com/docs/token-plan/personal/token-plan-personal-overview) · [Token Plan team](https://platform.qianwenai.com/docs/token-plan/team/token-plan-team-overview) · [Model Studio base URL](https://help.aliyun.com/zh/model-studio/base-url) · [Terms of service](https://terms.alicdn.com/legal-agreement/terms/common_platform_service/20260423145804812/20260423145804812.html).
+- Index: [README.md](./README.md) (directory navigation only; individual status descriptions may lag this article — the primary evidence cited herein prevails).
 
-## 事实分层
+## Fact Layering
 
-| 层级 | 内容 |
+| Layer | Content |
 | --- | --- |
-| 记录证据 | §三 Qwen3.8-max 真实调用与部分结算的文档记录、key 托管/委托授权、历史双卖家展示；§一 2026-10-09 listing 下架（Registry.deactivate，block 69498784） |
-| 证据缺口 | §三 Qwen 专属逐笔 tx/payment ID/金额清单未归档，本文不引用任何此类数字 |
-| 历史研究 | §四 2026-10-07 条款只读研究（未重新核实，引用保留） |
-| 用户陈述 | §摘要/§一 开发过程中使用 Qwen 的亲历描述 |
-| 潜力（非事实） | §五 官方/授权渠道作为售卖渠道的技术支持，不代表任何合作或授权 |
-| 边界 | §六 全部条目；§一「为什么是 Monad」的定位边界（非实测、不构成成本/收益证明、不代表厂商授权） |
+| Recorded evidence | §3 documented record of qwen3.8-max real calls and partial settlement, key escrow/delegate authorization, historical dual-seller display; §1 2026-10-09 listing delisting (Registry.deactivate, block 69498784) |
+| Evidence gap | §3 Qwen-specific per-tx / payment ID / amount lists not archived; this article cites no such numbers |
+| Historical research | §4 2026-10-07 read-only terms study (not re-verified; citations kept) |
+| User statement | §Summary / §1 first-person description of using Qwen during development |
+| Potential (not fact) | §5 technical support for official/authorized channels as a sales channel; does not represent any cooperation or authorization |
+| Boundaries | All items in §6; the positioning boundaries of §1 "Why Monad" (not measured, no proof of cost/revenue, no vendor endorsement) |
