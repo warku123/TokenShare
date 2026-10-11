@@ -362,6 +362,8 @@ window.TS = (() => {
       return priceCell("CACHED IN", p.cachedIn) + priceCell("INPUT", p.input) + priceCell("OUTPUT", p.output);
     }
     function cardHTML(l) {
+      /* DEFENSIVE: fetchMarketListings filters active !== true upstream —
+         this branch should be unreachable (kept for stale-data safety) */
       const badge = l.active
         ? `<span class="badge">ACTIVE</span>`
         : `<span class="badge off">INACTIVE</span>`;
@@ -493,7 +495,10 @@ window.TS = (() => {
   /* enumerated sellers → enriched listings (_enumIndex = enumeration
      position, drives the NEWEST-first default sort). Falls back to the
      config.js sellers array when the enumeration calls are unavailable
-     (pre-v3 Registry / RPC hiccup) — never throws. */
+     (pre-v3 Registry / RPC hiccup) — never throws.
+     BOTH paths drop active !== true listings: deactivated = 下架, hidden
+     from visitors (board, selects, counts). On-chain rows stay intact
+     for audit — we only stop rendering them. */
   async function fetchMarketListings(provider) {
     let addrs;
     try {
@@ -502,7 +507,8 @@ window.TS = (() => {
       const degraded = (e && (e.shortMessage || e.message)) || "unknown";
       let fallback = [];
       try {
-        fallback = (await fetchListings(provider)).filter((l) => l.registered && !l.error);
+        fallback = (await fetchListings(provider))
+          .filter((l) => l.registered && !l.error && l.active === true);
       } catch { /* dead RPC — empty market */ }
       return { listings: fallback, source: "config", degraded };
     }
@@ -512,7 +518,7 @@ window.TS = (() => {
     const enriched = await Promise.all(addrs.map(async (addr, i) => {
       try {
         const l = await withTimeout(fetchListing(provider, addr), "getListing");
-        if (l.registered) { l._enumIndex = i; return l; }
+        if (l.registered && l.active === true) { l._enumIndex = i; return l; }
       } catch { /* unreadable seller — skip */ }
       return null;
     }));

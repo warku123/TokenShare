@@ -525,7 +525,7 @@
         `<div class="kv"><span>MODELS</span><b>${l.models.map((m) => `<span class="mtag">${T.esc(m)}</span>`).join(" ") || "—"}</b></div>` +
         `<div class="kv"><span>PRICES /1M</span><b class="${l.active ? "" : "weak"}">${priceRows || "—"}</b></div>` +
         (l.active ? "" :
-          `<p class="empty-hint deact-note">inactive — the market turns this listing INACTIVE gray and buyers can no longer lock; in-flight (Locked) payments still settle normally. ` +
+          `<p class="empty-hint deact-note">inactive — the market hides this listing from buyers entirely (no card, not in the seller selects); in-flight (Locked) payments still settle normally. ` +
           `Re-check LISTING ACTIVE in the form and submit <code class="inl">register</code> to restore it.</p>`);
       deactBtn.hidden = !l.active;
       /* M7 touchpoint: TEE / upstream-policy rows via GET /info — silent degrade */
@@ -1191,7 +1191,7 @@
     ariaLabel: "confirm deactivate",
     title: "confirm — registry.deactivate()",
     copy:
-      "Delisting turns the whole listing off: the ACTIVE market presence is pulled immediately (card turns INACTIVE gray, " +
+      "Delisting turns the whole listing off: the ACTIVE market presence is pulled immediately (the card disappears from the market board and seller selects, " +
       "buyers can no longer lock); in-flight (Locked) payments still settle normally; " +
       "re-register from the form at any time to restore ACTIVE.",
     det: "deactivate() → active=false · enumeration entry kept (append-only, auditable on-chain) · 1 tx · wallet signature",
@@ -1223,9 +1223,9 @@
     try {
       const rcpt = await T.runTx(T.txLine(myTx, "deactivate()"), T.registry(state.signer).deactivate());
       if (rcpt) {
-        /* optimistic flip, then chain-truth refresh: card → INACTIVE 徽章 +
-           价格区弱化, buyer selects → this seller disabled; market pages read
-           getListing live and annotate INACTIVE on their next render */
+        /* optimistic flip, then chain-truth refresh: card → INACTIVE state,
+           buyer selects → this seller dropped; market pages read
+           getListing live and hide the listing on their next refresh */
         state.myListing.active = false;
         await Promise.all([loadMyListing(), loadListingsIntoSelects()]);
       } else {
