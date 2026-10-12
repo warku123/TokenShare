@@ -90,8 +90,8 @@ Kimi 侧的接入是第一套完整走通这套动线的：API 端点覆盖 `api
 
 - 现役部署事实：地址、部署时间与网络见 [`contracts/deployed.monad.json`](../../contracts/deployed.monad.json)（该文件不含版本号与部署 tx）；Escrow v3.2 `0xe4D5…514c`（2026-10-07 部署）及 tx [`0xc7ca3ac7…523afce4e`](https://testnet.monadvision.com/tx/0xc7ca3ac798e16ace9f4554df51912aed235753f360d7f0a6417b7b0523afce4e) 见根目录 [README.md](../../README.md)「Networks」段；Registry v4 与官方 USDC 地址见同 JSON 文件。
 - payment 5 全量证据：[`docs/CRE_DEMO_EVIDENCE.md`](../CRE_DEMO_EVIDENCE.md)（结算 tx、CRE 模拟与锚定 tx、链上 `records(5)` 读回）。
-- 提交状态与演示范围：[`docs/SUBMISSION.md`](../SUBMISSION.md)；演示动线：[`docs/DEMO_RUNBOOK.md`](../DEMO_RUNBOOK.md)；视频脚本：本地维护、不在仓库。
-- 中继白名单与前缀映射：[`relay/app/config.py`](../../relay/app/config.py)；部署与镜像：[`relay/README-docker.md`](../../relay/README-docker.md)。
+- 提交状态与演示范围：[`docs/SUBMISSION.md`](../SUBMISSION.md)；演示动线与视频脚本：本地维护、不在仓库。
+- 中继白名单与前缀映射：[`relay/app/config.py`](../../relay/app/config.py)；部署与镜像：本地维护、不在仓库。
 - 密钥托管与政策：[`web/policy.html`](../../web/policy.html)、市场页配置：[`web/config.js`](../../web/config.js)。
 - Kimi 官方端点记录：[`.env.example`](../../.env.example)（`api.moonshot.cn` / `api.moonshot.ai` / `api.kimi.com/coding`）。
 - 索引：[README.md](./README.md)（仅作目录导航；个别状态描述可能滞后于本文，以本文引用的一手证据为准）。

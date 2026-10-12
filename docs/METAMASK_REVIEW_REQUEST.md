@@ -246,7 +246,7 @@ endpoint before considering the issue resolved.
 
 - [docs/SUBMISSION.md](./SUBMISSION.md) — 提交口径与公开链接
 - [docs/CRE_DEMO_EVIDENCE.md](./CRE_DEMO_EVIDENCE.md) — CRE 结算证据
-- [docs/DEMO_RUNBOOK.md](./DEMO_RUNBOOK.md) — 演示手册
+- 演示手册 — 本地维护、不在仓库
 - 视频脚本 — 本地维护、不在仓库
 - [docs/video/TECHNICAL_DEMO_DRAFT.md](./video/TECHNICAL_DEMO_DRAFT.md) — 演示安全门（硬停线）
 - [docs/submission/README.md](./submission/README.md) — 提交文章索引与事实状态总表

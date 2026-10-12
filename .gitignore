@@ -39,3 +39,7 @@ contracts/deployed.json
 
 # video script maintained locally, not for the public repo
 docs/VIDEO_SCRIPT.md
+
+# deployment/runbook docs maintained locally, demo is already live
+relay/README-docker.md
+docs/DEMO_RUNBOOK.md

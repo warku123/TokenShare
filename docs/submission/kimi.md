@@ -90,8 +90,8 @@ That is: the same infrastructure not only suits putting idle personal subscripti
 
 - Current deployment facts: addresses, deployment times, and network are in [`contracts/deployed.monad.json`](../../contracts/deployed.monad.json) (that file contains no version numbers or deployment txs); Escrow v3.2 `0xe4D5…514c` (deployed 2026-10-07) and tx [`0xc7ca3ac7…523afce4e`](https://testnet.monadvision.com/tx/0xc7ca3ac798e16ace9f4554df51912aed235753f360d7f0a6417b7b0523afce4e) are in the root [README.md](../../README.md) "Networks" section; Registry v4 and the official USDC address are in the same JSON file.
 - Full payment 5 evidence: [`docs/CRE_DEMO_EVIDENCE.md`](../CRE_DEMO_EVIDENCE.md) (settlement tx, CRE simulation and anchor tx, on-chain `records(5)` readback).
-- Submission status and demo scope: [`docs/SUBMISSION.md`](../SUBMISSION.md); demo runbook: [`docs/DEMO_RUNBOOK.md`](../DEMO_RUNBOOK.md); video script: maintained locally, not in the repo.
-- Relay whitelist and prefix mapping: [`relay/app/config.py`](../../relay/app/config.py); deployment and images: [`relay/README-docker.md`](../../relay/README-docker.md).
+- Submission status and demo scope: [`docs/SUBMISSION.md`](../SUBMISSION.md); demo runbook and video script: maintained locally, not in the repo.
+- Relay whitelist and prefix mapping: [`relay/app/config.py`](../../relay/app/config.py); deployment and images: maintained locally, not in the repo.
 - Key escrow and policy: [`web/policy.html`](../../web/policy.html); market page configuration: [`web/config.js`](../../web/config.js).
 - Kimi official endpoint records: [`.env.example`](../../.env.example) (`api.moonshot.cn` / `api.moonshot.ai` / `api.kimi.com/coding`).
 - Index: [README.md](./README.md) (directory navigation only; individual status descriptions may lag this article — the primary evidence cited herein prevails).

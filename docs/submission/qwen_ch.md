@@ -75,7 +75,7 @@ TokenShare 的中继从第一天起按「多厂商可插拔」设计，Qwen 的�
 - 链上部署事实（与 Kimi 篇共享）：地址、部署时间与网络见 [`contracts/deployed.monad.json`](../../contracts/deployed.monad.json)（该文件不含版本号与部署 tx）；Escrow v3.2 部署 tx [`0xc7ca3ac7…523afce4e`](https://testnet.monadvision.com/tx/0xc7ca3ac798e16ace9f4554df51912aed235753f360d7f0a6417b7b0523afce4e) 见根目录 [README.md](../../README.md)「Networks」段。
 - Qwen 演示记录（真实调用与部分结算）：[`docs/SUBMISSION.md`](../SUBMISSION.md)「Demo status」段。
 - 历史双卖家展示（录制当时口径；市场现展示两个活跃 listing——Kimi 与重新上架的 Qwen）：视频脚本（本地维护、不在仓库）、[`web/index.html`](../../web/index.html)；密钥托管与委托授权记录：[`web/policy.html`](../../web/policy.html)、[`web/config.js`](../../web/config.js)。
-- 中继可插拔架构与白名单：[`relay/app/config.py`](../../relay/app/config.py)、部署与镜像：[`relay/README-docker.md`](../../relay/README-docker.md)。
+- 中继可插拔架构与白名单：[`relay/app/config.py`](../../relay/app/config.py)、部署与镜像：本地维护、不在仓库。
 - Qwen 官方来源（2026-10-07 研究时的链接）：[Token Plan 个人版](https://platform.qianwenai.com/docs/token-plan/personal/token-plan-personal-overview) · [Token Plan 团队版](https://platform.qianwenai.com/docs/token-plan/team/token-plan-team-overview) · [百炼 base URL](https://help.aliyun.com/zh/model-studio/base-url) · [服务条款](https://terms.alicdn.com/legal-agreement/terms/common_platform_service/20260423145804812/20260423145804812.html)。
 - 索引：[README.md](./README.md)（仅作目录导航；个别状态描述可能滞后于本文，以本文引用的一手证据为准）。
 

@@ -168,133 +168,7 @@ The runner drives the whole stack itself: it starts an anvil fork of Base Sepoli
 
 For a paid call against a **real official-platform key** instead of the mock: set `OPENAI_API_KEY` and `OPENAI_BASE_URL` (test default: `https://api.moonshot.cn`, Kimi — see `.env.example`) in `.env` and start the relay yourself (`uvicorn relay.app.main:app --port 8787`, run from the repo root with `.env` exported). The host must be in the official allowlist above.
 
-### Manual step-by-step (what `run.py` automates)
-
-With `.env` filled (see `.env.example` for every variable) and contracts deployed:
-
-```bash
-# 1) Deploy (writes contracts/deployed.json — relay/CLI read it for the addresses):
-cd contracts
-USDC_ADDR=0x036CbD53842c5426634e7929541eC2318f3dCF7e \
-  forge script script/Deploy.s.sol --sig run(string) base_sepolia \
-  --rpc-url https://sepolia.base.org --broadcast \
-  --private-key $PRIVATE_KEY --sender $DEPLOYER_ADDR     # unset USDC_ADDR → MockUSDC
-cd ..
-
-# 2) Seller starts the relay (uses RELAY_SELLER_KEY + the 12 relay env names, see .env.example):
-python3 -m uvicorn relay.app.main:app --host 127.0.0.1 --port 8787   # from repo root
-
-# 3) Verify BEFORE registering — prove the key really serves the models you
-#    plan to list (key_valid=true + your models under accessible_models):
-curl -s http://127.0.0.1:8787/verify-upstream | python3 -m json.tool
-#    register_listing.py runs this same check automatically before sending
-#    the register tx; skip it only with --skip-verify.
-
-# 4) Seller registers a listing (direct web3; the relay endpoint goes on-chain).
-#    --model must be an official-plan model matching the relay's upstream:
-#    Kimi (api.moonshot.cn) → kimi-k2.6; OpenAI → gpt-4o-mini, etc.
-python3 e2e/register_listing.py --network base_sepolia \
-  --endpoint http://127.0.0.1:8787 \
-  --model kimi-k2.6 \
-  --price-cached-in 1000 --price-input 2000 --price-output 3000   # per-1M-token USDC native
-
-# 5) Buyer (from cli/ with .env exported); --model defaults to the first model
-#    of the Registry listing (here kimi-k2.6):
-cd cli
-python3 -m tokenshare_cli deposit --amount 500
-python3 -m tokenshare_cli call "Explain EIP-712 in one sentence" --seller $SELLER_ADDR --max 5
-python3 -m tokenshare_cli balance
-cd ..
-```
-
-`deployed.json` holds `{network, chainId, escrow, registry, usdc, usdcIsMock, deployer, deployedAt}`; copy those addresses into `.env` (`ESCROW_ADDR` / `REGISTRY_ADDR` / `USDC_ADDR`).
-
-⚠️ Lock sizing: every lock/call `--max` (maxAmount) must be **≥ the relay's per-request minimum estimate** `(priceInput×PROMPT_TOKEN_CAP + priceOutput×COMPLETION_TOKEN_CAP)/1e6` (USDC native), otherwise the relay rejects with **HTTP 402** — on a 402, either raise `--max` or lower the caps env on both relay and CLI.
-
-### Monad testnet (real chain — M5b)
-
-Same code path, configuration-only switch. Prerequisites (executed in M5b, with user-provided funded test accounts):
-
-1. Fund two test accounts: `https://faucet.monad.xyz` (MON gas) + `https://faucet.circle.com` (USDC), put `SELLER_PRIVATE_KEY` / `BUYER_PRIVATE_KEY` in `.env`.
-2. Deploy once (official Circle USDC, no mock):
-
-   ```bash
-   cd contracts
-   USDC_ADDR=0x534b2f3A21130d7a60830c2Df862319e593943A3 \
-     forge script script/Deploy.s.sol --sig run(string) monad_testnet \
-     --rpc-url https://testnet-rpc.monad.xyz --broadcast --private-key <SELLER key>
-   cd ..
-   ```
-
-3. Run the same e2e against the real chain (reads `contracts/deployed.json` + env keys):
-
-   ```bash
-   python3 e2e/run.py --network monad_testnet
-   ```
-
-   Without keys in `.env` the monad path prints `E2E SKIPPED` and **exits 0** (config-ready, not chain-proven) — **CI green ≠ real-chain green**: the monad deliverable must be demonstrated on an actual funded run.
-
-4. For buyer-facing demos the relay must be reachable over the internet: expose it (e.g. a tunnel), then `export RELAY_PUBLIC_ENDPOINT=https://…` before the run so the Registry listing carries the public URL. Transactions are viewable at `https://testnet.monadscan.com`.
-
-### Running a persistent relay on a VPS
-
-For an always-on relay (demo judges should be able to call it any time), run it on any small VPS and expose it through a tunnel.
-
-**Option A — Docker Compose** (repo file: [`relay/docker-compose.yml`](relay/docker-compose.yml)):
-
-```bash
-cd relay
-cp ../.env .env            # relay env (RELAY_SELLER_KEY, RPC_URL, OPENAI_* …)
-docker compose up -d --build
-curl -s http://127.0.0.1:8787/health
-```
-
-> The shipped compose file is written for **Phala Cloud TDX CVMs** (M7): on a plain VPS comment out the `/var/run/dstack.sock` volume (TEE key derivation) and set `RELAY_SELLER_KEY` in `relay/.env` instead; `platform: linux/amd64` can stay or be dropped on an x86_64 host.
-
-**Option B — systemd** (no Docker; from a repo checkout with Python 3.11+):
-
-```ini
-# /etc/systemd/system/tokenshare-relay.service
-[Unit]
-Description=TokenShare seller relay
-After=network-online.target
-
-[Service]
-User=relay
-WorkingDirectory=/opt/tokenshare
-EnvironmentFile=/opt/tokenshare/.env
-ExecStart=/opt/tokenshare/.venv/bin/python -m uvicorn relay.app.main:app --host 127.0.0.1 --port 8787
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl daemon-reload && sudo systemctl enable --now tokenshare-relay
-```
-
-**Public exposure — cloudflared tunnel** (no open ports, TLS included):
-
-```bash
-cloudflared tunnel create tokenshare
-cloudflared tunnel route dns tokenshare relay.yourdomain.dev
-cloudflared tunnel run --url http://127.0.0.1:8787 tokenshare   # run as a service for keeps
-```
-
-**Re-register the public endpoint** — the Registry listing must carry the public URL, so after the relay is reachable, re-register with `RELAY_PUBLIC_ENDPOINT` semantics (`--endpoint`):
-
-```bash
-python3 e2e/register_listing.py --network monad_testnet \
-  --endpoint https://relay.yourdomain.dev \
-  --model kimi-k2.6 \
-  --price-cached-in 1000 --price-input 2000 --price-output 3000
-# re-registration is idempotent for an existing seller (deactivate→re-register
-# is handled for you); infra-lane helper scripts under scripts/ will wrap this step
-```
-
-**CORS** — the relay's browser-facing CORS defaults to `*`; on a public relay pin it to your front-end origin(s) via `RELAY_CORS_ORIGINS` (comma-separated) in the relay env, and keep `OPENAI_BASE_URL` / `OPENAI_API_KEY` private to the server.
+Self-hosting / deployment notes are maintained locally, not in the repo. The demo is live — see the Demo section below.
 
 ## Repo layout
 
@@ -307,7 +181,7 @@ tokenshare/
 ├── relay/                   # FastAPI seller relay
 │   ├── app/                 # main / pricing / receipt / chain / config
 │   ├── tests/               # 345 tests green
-│   └── docker-compose.yml   # container run (Phala TDX oriented — see VPS section)
+│   └── docker-compose.yml   # container run (Phala TDX oriented)
 ├── cli/                     # Typer buyer CLI
 │   ├── tokenshare_cli/      # signing / receipt / streaming / disputes / api keys
 │   └── tests/               # 151 tests green
@@ -335,20 +209,15 @@ This project is open source under the **MIT License** (see [LICENSE](./LICENSE))
 
 ## Demo
 
-One-click local demo: `scripts/demo.sh` (starts relay + static web server, prints URLs).
-Public deployment: point Vercel at the `web/` directory — no build step, zero runtime external references (ethers is vendored).
+The demo is live — no local setup needed:
 
-
-- **One-command bring-up (infra lane):** `scripts/demo.sh` — starts the full local stack (fork + deploy + relay + web) end to end. The script is landing shortly (infra lane in progress); until then use the manual quick path below.
-- **Local quick path:** `python3 -m http.server 8080 -d web` → open http://localhost:8080 — the market page reads live Registry listings via `web/config.js`; the console lives at `/console.html`.
-- Live demo link and Monad testnet screenshots will be added here after the deployment refresh.
+- **Web frontend:** https://tokenshare-web.vercel.app/ (deployed on Vercel; no build step, zero runtime external references — ethers is vendored).
+- **Relay:** shared multi-seller relay on Phala TEE (Phala Cloud): https://c30652f4833465adda9bdc7ac557e8b45e8e66c6-8787.dstack-pha-prod5.phala.network
 
 ### Web frontend (`web/`)
 
 Zero-framework static pages — market (live Registry listings + relay health) and a Seller/Buyer console (register, deposit, lock, signed call, receipt verify, refund).
 
-- **Local:** `python3 -m http.server 8080 -d web` → open http://localhost:8080 (console at `/console.html`). Any free port works.
-- **Deploy:** point Vercel at the `web/` directory — no build step, zero runtime external references (ethers is vendored).
 - **Config:** `web/config.js` is the only chain-facts surface — fill `escrowAddr` / `registryAddr` / `sellers` from `contracts/deployed.monad.json` after a redeploy.
 - **Demo:** MetaMask required for the console; the page guides adding Monad testnet (chainId 10143) via `wallet_addEthereumChain`.
 
