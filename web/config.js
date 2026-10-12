@@ -49,8 +49,8 @@ window.TS_CONFIG = {
     uploadPubkeySha256: "b2d216f2037b78b15976cfdb6ae5ea02c4babf7fd0030c2772291cd824314e5d",
     attestEvidence: {
       verifier: "https://cloud-api.phala.com/api/v1/attestations/verify",
-      verifiedAt: "2026-10-08",
-      digest: "9d262b9036f3fb7a9ff5b2b15dcd6c1089a9558df22bc3af85e53b2c2a191905",
+      verifiedAt: "2026-10-12",
+      digest: "ce36139c54f2cf3a75ea748c973e9646986aed8c45c63ccb73077646c6607c56",
     },
   },
   //
@@ -66,8 +66,15 @@ window.TS_CONFIG = {
   // identity survived the image swap (re-verified via /info).
   //
   // attestEvidence records the OFFLINE verification: Phala cloud
-  // verifier, 2026-10-08, full quote digest 9d262b90…905 (from the
-  // deployment audit record). A TDX boot rotates the quoteDigest —
-  // after any image/boot change, re-verify the quote offline and
-  // refresh verifiedAt + digest from the new verification record.
+  // verifier, 2026-10-12 — full quote re-verified online (success:true,
+  // quote.body.reportdata === /attestation reportData; quoteDigest =
+  // keccak256 of the raw quote bytes, checked locally). 2026-10-12
+  // re-verify record: dstack rotates the quoteDigest on EVERY call/boot
+  // (per-call timestamp in the quote), so this digest is the snapshot of
+  // the pinned verification run — the live /attestation will almost
+  // always differ (the console attestation panel flags that as a soft
+  // warning, never a failure). The digest stays BARE 64-hex (no 0x) —
+  // scripts/check-custody-web.mjs B9g enforces that format. Previous
+  // record: 2026-10-08 · 9d262b90…905. After any image/boot change,
+  // re-verify the quote offline and refresh verifiedAt + digest.
 };

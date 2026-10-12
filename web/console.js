@@ -1384,6 +1384,185 @@
       `the quote is self-reported by the relay; this page re-checks the live binding above and does not re-run DCAP proof verification.</p>`;
   }
 
+  /* ═══ live TEE attestation panel — deterministic, browser-only ═════════
+     [ VERIFY ATTESTATION LIVE ] re-fetches /attestation (+ /info for the
+     upload pubkey) from the PINNED origin and re-derives every binding
+     locally with the vendored ethers:
+       app-id           /attestation appId === the pinned cloud app id
+       derived-address  /attestation derivedAddress === the pinned signer
+       report-data      64 B = signer(20) ‖ zeros(12) ‖ keccak256(uploadPub65)(32)
+                        — the keccak segment is RECOMPUTED, never trusted
+       upload-key       sha256(/info uploadPubkey) === the pinned hash
+       quote-header     TDX v4 (u16 LE version) · length floor 4372 B
+       quote-digest     displayed + compared against the pinned offline
+                        evidence — dstack embeds a per-call timestamp, so a
+                        DIFFERENT digest is the expected live state (yellow
+                        note, never a failure)
+     The full DCAP proof is deliberately NOT fetched in-browser: the Phala
+     cloud verifier sends no CORS headers, so a page-direct POST is blocked.
+     [ COPY VERIFY CURL ] hands the operator the exact terminal command
+     (pinned verifier URL + the live quote) — expect success:true and
+     quote.body.reportdata equal to the panel reportData. Any hard-check
+     failure renders red; the custody gate itself stays owned by the pin
+     matrix (pinsOk), this panel is evidence, not a new authority. */
+  const attestState = { quote: null };
+  const setAttestNote = (text, cls) => {
+    const n = $("sc-attest-note");
+    if (!n) return;
+    n.className = "model-verify-note" + (cls ? " " + cls : "");
+    n.textContent = text;
+  };
+  /* pinned twice on purpose: config.js attestEvidence.verifier is the
+     identity pin; this literal feeds the offline copy template (and the
+     static smoke check greps it). Keep the two in sync. */
+  const ATTEST_VERIFY_URL = "https://cloud-api.phala.com/api/v1/attestations/verify";
+
+  function attestRowHtml(r) {
+    const cls = r.soft ? (r.warn ? "warn" : "dim") : r.ok ? "ok" : "bad";
+    const mark = r.soft ? (r.warn ? "⚠ " : "· ") : r.ok ? "✓ " : "✗ ";
+    return `<div class="kv"><span>${T.esc(r.key.toUpperCase())}</span>` +
+      `<b class="${cls}"${r.warn ? ` style="color:var(--amber)"` : ""}>${mark}${T.esc(r.detail)}</b></div>`;
+  }
+
+  async function runAttestVerify() {
+    const panel = $("sc-attest-panel");
+    if (!panel || !shared) return;
+    setAttestNote("fetching /attestation + /info from the pinned origin …", "");
+    try {
+      const [attR, infoR] = await Promise.all([
+        T.fetchJson(T.joinUrl(shared.relayOrigin, "/attestation"), {}, 12000),
+        T.fetchJson(T.joinUrl(shared.relayOrigin, "/info"), {}, 12000),
+      ]);
+      if (attR.corsOrNetwork) throw new Error(`relay unreachable (${attR.error === "timeout" ? "timeout" : "network/CORS"})`);
+      if (!attR.ok || !attR.body || typeof attR.body !== "object") throw new Error(`/attestation HTTP ${attR.status}`);
+      const att = attR.body;
+      const sh = infoR.ok && infoR.body && typeof infoR.body === "object" ? infoR.body.shared : null;
+      const rows = [];
+      const row = (key, ok, detail, opt = {}) => rows.push({ key, ok: !!ok, detail: String(detail), soft: !!opt.soft, warn: !!opt.warn });
+      const hexOf = (bytes) => [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+
+      /* 1 — appId: /attestation quote top level vs the pinned cloud app id */
+      const appId = String(att.appId || "").toLowerCase().replace(/^0x/, "");
+      row("app-id", appId === shared.appId,
+        appId === shared.appId ? "quote appId matches the pinned cloud app id"
+          : `relay reports ${att.appId || "—"} · pinned ${shared.appId}`);
+
+      /* 2 — derivedAddress vs the pinned TEE signer (lower-hex compare) */
+      const addr = String(att.derivedAddress || "").toLowerCase();
+      row("derived-address", addr === shared.expectedSigner,
+        addr === shared.expectedSigner ? `${att.derivedAddress} matches the pinned signer`
+          : `relay derives ${att.derivedAddress || "—"} · pinned ${shared.expectedSigner}`);
+
+      /* 3+4 — reportData = signer(20 B) ‖ zeros(12 B) ‖ keccak256(uploadPub65)(32 B) */
+      let rd = null;
+      try {
+        const hx = String(att.reportData || "");
+        if (/^0x[0-9a-fA-F]{128}$/.test(hx)) {
+          rd = new Uint8Array(64);
+          for (let i = 0; i < 64; i++) rd[i] = parseInt(hx.slice(2 + i * 2, 4 + i * 2), 16);
+        }
+      } catch { rd = null; }
+      const signerOk = !!rd &&
+        hexOf(rd.slice(0, 20)) === shared.expectedSigner.replace(/^0x/, "") &&
+        rd.slice(20, 32).every((b) => b === 0);
+      row("report-data · signer", signerOk,
+        signerOk ? "bytes 0..19 = pinned signer · bytes 20..31 zero"
+          : "prefix mismatch — need 0x + 128 hex laid out signer(20) ‖ zeros(12)");
+      const seg = rd ? hexOf(rd.slice(32)) : "";
+      let pubNote = "";
+      if (sh && typeof sh.uploadPubkey === "string") {
+        try {
+          const b64 = sh.uploadPubkey.replace(/-/g, "+").replace(/_/g, "/");
+          const pub = Uint8Array.from(atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4)), (c) => c.charCodeAt(0));
+          if (pub.length === 65 && pub[0] === 4) {
+            const keccakSeg = hashers.keccak256Hex(pub);
+            const shaHex = (await hashers.sha256Hex(pub)).toLowerCase();
+            const bindOk = !!seg && keccakSeg === seg;
+            row("report-data · upload bind", bindOk,
+              bindOk ? "keccak256(uploadPub) = reportData[32..] — recomputed, matches"
+                : `keccak segment mismatch — reportData[32..] ${seg ? seg.slice(0, 16) + "…" : "—"} ≠ keccak256(/info uploadPub) ${keccakSeg.slice(0, 16)}…`);
+            row("upload-key", shaHex === shared.uploadPubkeySha256,
+              shaHex === shared.uploadPubkeySha256 ? "sha256(/info uploadPubkey) matches the pinned hash"
+                : "sha256(/info uploadPubkey) ≠ pinned uploadPubkeySha256");
+          } else {
+            pubNote = "/info uploadPubkey is not a 65-byte uncompressed point";
+          }
+        } catch (e) { pubNote = `/info uploadPubkey unreadable — ${e.message}`; }
+      } else {
+        pubNote = "/info.shared.uploadPubkey unavailable";
+      }
+      if (pubNote) {
+        /* degraded, not failed: the binding segment stays displayed but is
+           not recomputed — only /info loss can land here (attestation came
+           back OK or we would have thrown above) */
+        row("report-data · upload bind", false, `${pubNote} — binding segment displayed, not recomputed · reportData[32..] = ${seg ? seg.slice(0, 16) + "…" : "—"}`, { soft: true });
+        row("upload-key", false, `${pubNote} — pinned-hash cross-check skipped`, { soft: true });
+      }
+
+      /* 5 — quote header: TDX v4 (u16 little-endian version) + size floor */
+      let q = null;
+      try {
+        const qh = String(att.quote || "");
+        if (/^0x[0-9a-fA-F]+$/.test(qh) && qh.length % 2 === 0) {
+          q = new Uint8Array((qh.length - 2) / 2);
+          for (let i = 0; i < q.length; i++) q[i] = parseInt(qh.slice(2 + i * 2, 4 + i * 2), 16);
+        }
+      } catch { q = null; }
+      const version = q && q.length >= 2 ? q[0] | (q[1] << 8) : -1;
+      const quoteOk = version === 4 && !!q && q.length >= 4372;
+      row("quote-header", quoteOk,
+        quoteOk ? `TDX v4 · ${q.length} bytes`
+          : `not a TDX v4 quote of the minimum size (version ${version} · ${q ? q.length : 0} B < 4372 B)`);
+
+      /* 6 — quoteDigest: display + offline-evidence comparison (soft —
+         dstack rotates the digest on every call/boot; a live match with an
+         old offline record would be coincidence, not a requirement) */
+      const dg = String(att.quoteDigest || "").toLowerCase().replace(/^0x/, "");
+      const rotated = dg !== shared.evidence.digest;
+      row("quote-digest", true,
+        rotated
+          ? `${att.quoteDigest} — differs from the pinned offline record (${shared.evidence.verifiedAt} · ${shared.evidence.digest.slice(0, 16)}…); expected — every call/boot rotates the digest; re-anchor it offline via the curl below`
+          : `${att.quoteDigest} — matches the pinned offline record (${shared.evidence.verifiedAt})`,
+        { soft: true, warn: rotated });
+
+      const hard = rows.filter((r) => !r.soft);
+      const allOk = hard.length > 0 && hard.every((r) => r.ok);
+      const anyWarn = rows.some((r) => r.warn);
+      attestState.quote = String(att.quote || "");
+      panel.innerHTML =
+        `<div class="kv"><span>LIVE ATTESTATION</span><b>${allOk
+          ? `<span class="ok">✓ every local binding check passed</span>${anyWarn ? ` <span class="dim">· ⚠ quote digest rotated — finish the offline cloud verify below</span>` : ""}`
+          : `<span class="bad">✗ ATTESTATION MISMATCH — do not seal keys to this relay</span>`}</b></div>` +
+        rows.map(attestRowHtml).join("") +
+        `<p class="fld-hint">the full DCAP proof is verified OUTSIDE the browser: ${T.esc(ATTEST_VERIFY_URL)} sends no CORS headers, so a page-direct POST is blocked. Run the copied command in a terminal and expect <code class="inl">"success":true</code> with <code class="inl">quote.body.reportdata</code> equal to the reportData above.</p>` +
+        `<div class="model-verify"><button class="btn btn-sm btn-ghost" id="sc-attest-curl" type="button">[ COPY VERIFY CURL ]</button>` +
+        `<span class="model-verify-note" id="sc-attest-curl-note"></span></div>`;
+      $("sc-attest-curl").addEventListener("click", copyAttestCurl);
+      setAttestNote(allOk
+        ? `attestation re-checked ${new Date().toLocaleTimeString()} — ${hard.filter((r) => r.ok).length}/${hard.length} hard checks passed${rotated ? " · digest rotated (soft)" : ""}`
+        : "attestation mismatch — see the panel rows", allOk ? "ok" : "err");
+    } catch (e) {
+      if (panel) panel.innerHTML =
+        `<div class="kv"><span>LIVE ATTESTATION</span><b class="bad">✗ check failed — ${T.esc(e.shortMessage || e.message || "unknown error")}</b></div>` +
+        `<p class="fld-hint">the pinned relay origin is unreachable from this page or answered with an error; nothing was verified and no gate moved — retry, or inspect the relay.</p>`;
+      setAttestNote("attestation check failed — see the panel", "err");
+      console.error("attestation panel:", e);
+    }
+  }
+
+  async function copyAttestCurl() {
+    const n = $("sc-attest-curl-note");
+    const say = (text, cls) => { if (n) { n.className = "model-verify-note" + (cls ? " " + cls : ""); n.textContent = text; } };
+    if (!attestState.quote) { say("run VERIFY ATTESTATION LIVE first — no quote on hand", "warn"); return; }
+    const cmd = `curl -sS -X POST ${ATTEST_VERIFY_URL} -H 'Content-Type: application/json' -d '{"hex":"${attestState.quote}"}'`;
+    try {
+      await navigator.clipboard.writeText(cmd);
+      say("verify curl copied — run it locally; expect success:true and quote.body.reportdata == the panel reportData", "ok");
+    } catch {
+      say("clipboard blocked by the browser — the command could not be copied", "warn");
+    }
+  }
+
   /* custody status cluster — chain truth for the delegate row, public
      relay /status for the rest (display only; pins above are the
      identity authority) */
@@ -1849,6 +2028,7 @@
     $("s-upstream-url").addEventListener("input", markCustodyEdited);
     $("s-upstream-key").addEventListener("input", markCustodyEdited);
     $("s-verify-btn").addEventListener("click", () => guardPaid($("s-verify-btn"), runSharedVerify));
+    $("sc-attest-btn").addEventListener("click", () => guard($("sc-attest-btn"), runAttestVerify));
     $("sc-authorize").addEventListener("click", () => guardPaid($("sc-authorize"), authorizeDelegateFlow));
     $("sc-revoke-delegate").addEventListener("click", () => guard($("sc-revoke-delegate"), revokeDelegateFlow));
     $("sc-revoke-key").addEventListener("click", () => guard($("sc-revoke-key"), revokeKeyFlow));

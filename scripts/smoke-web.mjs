@@ -234,6 +234,23 @@ try {
   rec("consent static-wiring", "FAIL", `读取失败: ${e.message}`);
 }
 
+/* ── 5c. TEE attestation 实时校验面板 静态接线（按钮 id · /attestation 抓取 +
+   keccak 复算 · cloud-api curl 模板 + clipboard 复制）── */
+{
+  const consoleJs = readFileSync(join(WEB, "console.js"), "utf8");
+  const consoleHtml = pages.get("/console.html") || "";
+  rec("attest-panel",
+    consoleHtml.includes('id="sc-attest-btn"') && consoleHtml.includes('id="sc-attest-panel"') &&
+    consoleJs.includes('joinUrl(shared.relayOrigin, "/attestation")') && consoleJs.includes("keccak256")
+      ? "PASS" : "FAIL",
+    'console.html #sc-attest-btn + #sc-attest-panel · console.js 拉取 /attestation 并以 ethers keccak256 本地复算 reportData');
+  rec("attest-curl-copy",
+    consoleJs.includes("cloud-api.phala.com") && consoleJs.includes("curl -sS -X POST") &&
+    consoleJs.includes("navigator.clipboard.writeText")
+      ? "PASS" : "FAIL",
+    "console.js 内嵌 cloud-api.phala.com 验证 curl 模板（CORS 拦直连 → 终端离线终验）+ clipboard 复制");
+}
+
 /* ── 5b. 共享 ACCOUNT 面板结构：在 .tabs 之前（两角色可见），buyer 面板不再携带资金入口 ── */
 {
   const con = pages.get("/console.html");
