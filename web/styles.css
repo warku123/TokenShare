@@ -1158,6 +1158,8 @@ a.flow-step:hover b { color: var(--green); }
 .proof-gif-play { font-size: 26px; color: var(--faint); }
 .proof-gif-lbl { font-family: var(--mono); font-size: 12px; letter-spacing: 0.16em; color: var(--dim); }
 .proof-gif-sub { font-family: var(--mono); font-size: 10.5px; color: var(--faint); }
+/* demo loop: video fills the box under its labels; contain keeps 16:9, letterbox in the box bg */
+.proof-gif video { flex: 1 1 auto; min-height: 0; min-width: 0; width: 100%; object-fit: contain; background: var(--bg-2); }
 @media (max-width: 860px) { .proof-grid { grid-template-columns: 1fr; } }
 
 /* ═══ buyer flow guide + per-card one-liners (UX 补件) ═══

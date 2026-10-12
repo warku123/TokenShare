@@ -291,6 +291,20 @@ for (const [path, html] of pages) {
                : `0 外部资源（${anchors} 个出站 <a> 已豁免）`);
 }
 
+/* ── 5b. demo 视频循环资产：index 引用与文件双存在（防资产被移/引用悬空）── */
+{
+  const idx = pages.get("/index.html");
+  const vid = "assets/demo-loop.mp4";
+  const poster = "assets/demo-loop-poster.jpg";
+  const ref = idx && idx.includes(`<video src="${vid}" poster="${poster}"`);
+  const vPath = join(WEB, vid), pPath = join(WEB, poster);
+  const vOk = ref && statSync(vPath).size > 0;
+  const pOk = ref && statSync(pPath).size > 0;
+  rec("demo-loop asset", vOk && pOk ? "PASS" : "FAIL",
+    vOk && pOk ? `${vid} + ${poster} 存在且被 index 引用` :
+    `ref=${!!ref} mp4=${vOk} poster=${pOk}`);
+}
+
 /* ── 6. CJK 用户串扫描（告警级；TESTING.md 不在扫描面，注释命中可接受）── */
 const CJK = /[一-鿿]/;
 for (const f of jsFiles.concat(PAGES.map((p) => join(WEB, p.slice(1))))) {
