@@ -1,20 +1,20 @@
-# Qwen（通义千问）：TokenShare 的第二位真实卖家（历史集成；listing 已于 2026-10-09 下架）
+# Qwen（通义千问）：TokenShare 的第二位真实卖家（新钱包重新上架；两笔买家支付已在链上结算）
 
 > 本文是 TokenShare（Monad 黑客松项目）面向 Qwen / 阿里云团队及相关读者的介绍文章，与 [kimi.md](./kimi.md) 配对阅读。文中严格区分三类内容：**有证据的事实（含其证据边界）**、**只有项目负责人亲历的「用户陈述」**、以及**明确的边界**。本文不含任何密钥或凭证值，也不做任何未经记录支撑的断言。
 
 ## 摘要：Qwen 在 TokenShare 里的两个角色
 
 1. **开发工具**（用户陈述）：据项目负责人确认，Qwen 系列模型作为交互式编程助手参与了本项目的日常开发。
-2. **平台第二位真实卖家**（有记录证据，证据边界见 §三）：Qwen 已完成接入——`qwen3.8-max` 有记录在案的真实 API 调用与部分链上结算，Qwen 卖家的 key 托管在共享 TEE 中继、listing 曾上架市场页、并已授权结算委托。演示完成后，该 listing 已于 **2026-10-09 由卖家主动下架**（Registry.deactivate，见 §一），目的是停止上游额度消耗；当前市场活跃 listing 仅剩 Kimi。本文记录的是这次**历史集成**。同时如实说明：追踪仓库内**没有** Qwen 专属的逐笔交易哈希 / payment ID / 调用次数 / 具体金额清单，本文不引用、不编造任何这类数字，也不借用 Kimi 的交易来充数。
+2. **平台第二位真实卖家**（有记录证据，证据边界见 §三）：Qwen 已完成接入——`qwen3.8-max` 有记录在案的真实 API 调用与部分链上结算，Qwen 卖家的 key 托管在共享 TEE 中继、listing 曾上架市场页、并已授权结算委托。原 listing 已于 **2026-10-09 由卖家主动下架**（Registry.deactivate，作为历史记录保留在 §一），目的是停止上游额度消耗；此后该 listing 已由**新卖家钱包重新创建**（Registry active=True），Qwen 并已产生**真实买家支付与链上结算**：两笔 payment 各 Settled、captured 10.000000 USDC，另有一笔已退款，2026-10-12 按 payment ID 从 Escrow v3.2 实时读证（见 §一/§三）。重上架的逐笔交易哈希未在追踪仓库归档——本文按 payment ID 与链上实时状态引用，不编造任何数字，也不借用 Kimi 的交易来充数。
 
-## 一、状态速览（历史集成 + 2026-10-09 下架记录）
+## 一、状态速览（2026-10-09 旧钱包下架 + 新钱包重新上架）
 
 - **链上**：Monad 测试网（chain 10143），Escrow v3.2 + Registry v4 + 官方 Circle USDC（6 位小数），与 Kimi 篇同一套现役部署（[contracts/deployed.monad.json](../../contracts/deployed.monad.json)）。
 - **中继**：共享多卖家中继运行在 Phala TDX 可信执行环境（Phala Cloud CVM）中，处于生产站配置的活跃状态；**卖家不需要自建任何 TEE**。
-- **Qwen 侧（历史状态 + 下架记录）**：演示期间市场页曾展示「一个卖 Qwen 3.8 Max」的真实卖家卡片（录制当时的视频脚本——本地维护、不在仓库，当时与 Kimi 并列）；keystore 中持有两把卖家 key（Kimi 与 Qwen），两个 listing 的端点都指向这台 TEE 中继，且两位卖家都曾授权结算委托（[web/policy.html](../../web/policy.html)）。**下架记录**：应卖家要求停止上游额度消耗，该 listing 已于 **2026-10-09** 通过 Registry.deactivate 下架（tx [`0x6a91bb20…d7131f1b`](https://testnet.monadvision.com/tx/0x6a91bb203751aad1f29003b046dfb56965d901e08d372a4b5070fa9bd7131f1b)，block 69498784，Monad 测试网 10143）；市场页实时读取 Registry，**当前活跃 listing 仅剩 Kimi**。listing 由卖家自主控制、随时可变。
-- 说明：以上「已部署/曾活跃/已下架」是提交材料所记录的部署事实；Qwen listing 的当前状态以 Registry 实时数据为准，本文不对线上服务做实时可用性检查。
+- **Qwen 侧（旧钱包下架记录 + 新钱包重新上架）**：演示期间市场页曾展示「一个卖 Qwen 3.8 Max」的真实卖家卡片（录制当时的视频脚本——本地维护、不在仓库，当时与 Kimi 并列）；keystore 中持有两把卖家 key（Kimi 与 Qwen），两个 listing 的端点都指向这台 TEE 中继，且两位卖家都曾授权结算委托（[web/policy.html](../../web/policy.html)）。**下架记录（历史）**：应卖家要求停止上游额度消耗，旧卖家钱包 `0x1F1A…a687` 已于 **2026-10-09** 通过 Registry.deactivate 下架（tx [`0x6a91bb20…d7131f1b`](https://testnet.monadvision.com/tx/0x6a91bb203751aad1f29003b046dfb56965d901e08d372a4b5070fa9bd7131f1b)，block 69498784，Monad 测试网 10143）。**重新上架（现状）**：新卖家钱包 `0xD6172dC960D1533e49A367253FF9Db01AE83Ba39` 在 Registry 上 active=True，listing 端点指向与 [web/config.js](../../web/config.js) `relayOrigin` 相同的共享 Phala TEE 中继（relay `/info`：`mode=shared`、`tee.enabled=true`、keystoreEntries=3）；发布模型为 `qwen3.8-max`（缓存输入 2 / 输入 4 / 输出 36 USDC 每百万 token）与 `qwen3.8-flash`（1 / 2 / 3），且 Escrow v3.2 对新钱包的 `settleDelegateOf` 返回与 Kimi 卖家相同的委托地址（`0x49CA…fb2D`，共享 TEE 中继的 pinned signer）。市场页实时读取 Registry 并隐藏非活跃 listing（过滤逻辑见 commit 73bf921）：**当前展示两个活跃 listing——Kimi 与重新上架的 Qwen**，旧钱包已下架的 listing 被隐藏。listing 由卖家自主控制、随时可变。
+- 说明：以上「已下架 / 重新上架 / 活跃」均以所引用的链上记录为准（2026-10-09 的下架 tx 与 2026-10-12 的 Registry/Escrow 实时读取）；Qwen listing 的当前状态以 Registry 实时数据为准，本文除所引读证外不对线上服务做实时可用性检查。
 
-**为什么是 Monad**：TokenShare 的按调用记账依赖一个面向低成本、高吞吐、快确认交易的 EVM 环境；Monad 测试网的低费用设计有助于让单次调用级别的结算开销保持在实际可行的范围。这是设计适配性的定位陈述，**不是实测结论**：上游模型用量与链上 gas 是两类互相独立的真实成本，本项目未发布过任何「gas 占单笔比例」的基准测量；Qwen 专属的逐笔金额尚未归档（见 §三），本文因此不引用任何具体实收数字。低费用是链环境特性带来的帮助，不构成对成本或收益的证明，也不代表任何厂商授权。
+**为什么是 Monad**：TokenShare 的按调用记账依赖一个面向低成本、高吞吐、快确认交易的 EVM 环境；Monad 测试网的低费用设计有助于让单次调用级别的结算开销保持在实际可行的范围。这是设计适配性的定位陈述，**不是实测结论**：上游模型用量与链上 gas 是两类互相独立的真实成本，本项目未发布过任何「gas 占单笔比例」的基准测量；Qwen 专属的逐笔调用收据金额仍未归档（见 §三），本文引用的支付级 captured 金额是链上读到的 payment 预算数，不是逐笔调用收据数字。低费用是链环境特性带来的帮助，不构成对成本或收益的证明，也不代表任何厂商授权。
 
 ## 二、架构里 Qwen 处在哪一环
 
@@ -29,11 +29,12 @@ TokenShare 的中继从第一天起按「多厂商可插拔」设计，Qwen 的�
 **有记录支撑的（提交材料明确记录）**：
 
 - `qwen3.8-max` 的**真实 API 调用**与**部分链上结算**已被记录为演示事实（[docs/SUBMISSION.md](../SUBMISSION.md)「Demo status」段）。
-- Qwen 卖家的 key 在共享 TEE 中继的加密 keystore 中，listing 曾在市场页上线，结算委托已授权（[web/policy.html](../../web/policy.html)）；该 listing 后于 2026-10-09 下架（见 §一），此处的演示记录作为历史事实保持不变。
+- Qwen 卖家的 key 在共享 TEE 中继的加密 keystore 中，listing 曾在市场页上线，结算委托已授权（[web/policy.html](../../web/policy.html)）；旧钱包 listing 后于 2026-10-09 下架（见 §一），此处的演示记录作为历史事实保持不变。
+- **重新上架钱包的真实买家支付（Escrow 实时读证，2026-10-12）**：实时读取 Escrow v3.2 `getPayment`——payment 6（预算 5 USDC）为 **Refunded**、captured 0；payment 7（预算 10 USDC）为 **Settled**、**captured 10.000000 USDC**；payment 8（预算 10 USDC）为 **Settled**、**captured 10.000000 USDC**（nextPaymentId = 9；买家 `0xA0ff…EFeF7`）。这些是 payment ID 级的链上状态，可对照链上合约独立核查。
 
 **诚实声明的证据缺口**：
 
-- 追踪仓库内目前没有 Qwen 专属的交易哈希、payment ID、调用次数或金额明细可供逐笔核对。因此本文**不给出**任何 Qwen 专属链上哈希或数字；市场页两个卖家地址与「Kimi / Qwen」的对应关系来自平台侧记录与浏览器上的推断，本文也不指认具体地址。
+- 重上架部分，追踪仓库内没有 Qwen 专属的逐笔交易哈希、逐笔调用收据金额或调用次数可归档。因此本文按 **payment ID + 链上实时状态**（上文）引用重上架，而不是逐笔 explorer 链接；payment ID 及其 Settled/Refunded 状态是链上事实，但逐笔交易哈希清单尚未整理归档。新卖家钱包与「Qwen」的对应关系基于链上读证：该钱包 Registry active、其结算委托地址等于共享 TEE 中继的 pinned signer、其发布模型为 Qwen 前缀——本文不在此之外做更多归因。
 - 换句话说：**代码与文档层面的 Qwen 接入是完整的、调用是真实发生过的**；但「逐笔、可独立点开验证的 Qwen explorer 证据」尚未整理归档。这是后续补齐的工作项，不是本文用别家数据填补的空缺。
 
 ## 四、条款边界（2026-10-07 的历史研究，非重新核实）
@@ -73,7 +74,7 @@ TokenShare 的中继从第一天起按「多厂商可插拔」设计，Qwen 的�
 
 - 链上部署事实（与 Kimi 篇共享）：地址、部署时间与网络见 [`contracts/deployed.monad.json`](../../contracts/deployed.monad.json)（该文件不含版本号与部署 tx）；Escrow v3.2 部署 tx [`0xc7ca3ac7…523afce4e`](https://testnet.monadvision.com/tx/0xc7ca3ac798e16ace9f4554df51912aed235753f360d7f0a6417b7b0523afce4e) 见根目录 [README.md](../../README.md)「Networks」段。
 - Qwen 演示记录（真实调用与部分结算）：[`docs/SUBMISSION.md`](../SUBMISSION.md)「Demo status」段。
-- 历史双卖家展示（录制当时口径；现活跃 listing 仅 Kimi）：视频脚本（本地维护、不在仓库）、[`web/index.html`](../../web/index.html)；密钥托管与委托授权记录：[`web/policy.html`](../../web/policy.html)、[`web/config.js`](../../web/config.js)。
+- 历史双卖家展示（录制当时口径；市场现展示两个活跃 listing——Kimi 与重新上架的 Qwen）：视频脚本（本地维护、不在仓库）、[`web/index.html`](../../web/index.html)；密钥托管与委托授权记录：[`web/policy.html`](../../web/policy.html)、[`web/config.js`](../../web/config.js)。
 - 中继可插拔架构与白名单：[`relay/app/config.py`](../../relay/app/config.py)、部署与镜像：[`relay/README-docker.md`](../../relay/README-docker.md)。
 - Qwen 官方来源（2026-10-07 研究时的链接）：[Token Plan 个人版](https://platform.qianwenai.com/docs/token-plan/personal/token-plan-personal-overview) · [Token Plan 团队版](https://platform.qianwenai.com/docs/token-plan/team/token-plan-team-overview) · [百炼 base URL](https://help.aliyun.com/zh/model-studio/base-url) · [服务条款](https://terms.alicdn.com/legal-agreement/terms/common_platform_service/20260423145804812/20260423145804812.html)。
 - 索引：[README.md](./README.md)（仅作目录导航；个别状态描述可能滞后于本文，以本文引用的一手证据为准）。
@@ -82,8 +83,8 @@ TokenShare 的中继从第一天起按「多厂商可插拔」设计，Qwen 的�
 
 | 层级 | 内容 |
 | --- | --- |
-| 记录证据 | §三 Qwen3.8-max 真实调用与部分结算的文档记录、key 托管/委托授权、历史双卖家展示；§一 2026-10-09 listing 下架（Registry.deactivate，block 69498784） |
-| 证据缺口 | §三 Qwen 专属逐笔 tx/payment ID/金额清单未归档，本文不引用任何此类数字 |
+| 记录证据 | §三 Qwen3.8-max 真实调用与部分结算的文档记录、key 托管/委托授权、历史双卖家展示；§一 2026-10-09 旧钱包下架（Registry.deactivate，block 69498784）；§三 新钱包重新上架（Registry active=True）及按 payment ID 实时读证的买家支付（2026-10-12）——payment 7 与 payment 8 各 Settled、captured 10.000000 USDC，payment 6 Refunded（captured 0） |
+| 证据缺口 | §三 重上架的逐笔交易哈希 / 逐笔调用收据金额 / 调用次数未归档，改按 payment ID + 链上实时状态引用，不引用逐笔调用金额 |
 | 历史研究 | §四 2026-10-07 条款只读研究（未重新核实，引用保留） |
 | 用户陈述 | §摘要/§一 开发过程中使用 Qwen 的亲历描述 |
 | 潜力（非事实） | §五 官方/授权渠道作为售卖渠道的技术支持，不代表任何合作或授权 |

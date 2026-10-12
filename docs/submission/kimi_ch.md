@@ -10,7 +10,7 @@
 ## 一、现状速览（截至提交材料记录，2026-10）
 
 - **链上**：Monad 测试网（chain 10143），Escrow v3.2 `0xe4D5…514c` + Registry v4 `0xeD34…2254`，官方 Circle USDC（6 位小数）做托管与按量结算（[contracts/deployed.monad.json](../../contracts/deployed.monad.json)）。
-- **中继**：共享多卖家中继已部署在 Phala TDX 可信执行环境（Phala Cloud CVM）中，并处于生产站配置的活跃状态；**卖家不需要自建任何 TEE**，通过应用层加密托管 upstream key 即可（自建单卖家模式仍作为可选项保留）。市场页实时读取 Registry：**当前活跃的 listing 为 Kimi**（`k3-256k` 与 `kimi-for-coding-highspeed`）；Qwen 的 listing 曾存在，已于 2026-10-09 在其演示完成后由卖家下架（listing 由卖家自主控制、随时可变）（[web/config.js](../../web/config.js)；录制当时的双卖家口径见本地维护的视频脚本，不在仓库）。
+- **中继**：共享多卖家中继已部署在 Phala TDX 可信执行环境（Phala Cloud CVM）中，并处于生产站配置的活跃状态；**卖家不需要自建任何 TEE**，通过应用层加密托管 upstream key 即可（自建单卖家模式仍作为可选项保留）。市场页实时读取 Registry：**当前活跃的 listing 为 Kimi**（`k3-256k` 与 `kimi-for-coding-highspeed`）**以及由新卖家钱包重新创建的 Qwen listing**（原 listing 已于 2026-10-09 在其演示完成后由卖家下架；listing 由卖家自主控制、随时可变）（[web/config.js](../../web/config.js)；详见 [qwen_ch.md](./qwen_ch.md)；录制当时的双卖家口径见本地维护的视频脚本，不在仓库）。
 - **Kimi 侧**：`k3-256k` 与 `kimi-for-coding` 两个模型都有记录在案的真实调用；最新一笔完整闭环见 §三。
 - 说明：以上「已部署/活跃」是提交材料所记录的部署事实（含配置与验证记录），本文不对线上服务做实时可用性检查。
 
