@@ -1152,6 +1152,7 @@ a.flow-step:hover b { color: var(--green); }
 .proof-rcpt .term-body { max-height: none; }
 .proof-gif {
   grid-column: 1 / -1; aspect-ratio: 16 / 9; max-height: 320px;
+  max-width: 640px; margin-inline: auto;
   border: 1.5px dashed var(--line-hi); background: var(--bg-2);
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
 }
