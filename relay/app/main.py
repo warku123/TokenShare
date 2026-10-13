@@ -51,6 +51,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from time import monotonic as _monotonic
 from typing import Any, AsyncIterator, Final
 
 import httpx
@@ -72,6 +73,7 @@ from .config import (
     ENV_ALLOW_CUSTOM_UPSTREAM,
     ENV_CORS_ORIGINS,
     ENV_PUBLIC_ORIGIN,
+    PHALA_VERIFY_URL,
     _normalize_openai_base_url,
     dstack_client,
     host_provider,
@@ -109,6 +111,7 @@ from .custody import (
 from .keystore import Keystore
 from .pricing import Prices, Usage, clamp_settle_amount, compute_actual, estimate_min_amount
 from .receipt import ReceiptStore, build_receipt, encode_x_receipt
+from .tee_quote import parse_tdx_quote
 
 logger = logging.getLogger("tokenshare.relay")
 
@@ -121,6 +124,52 @@ UPSTREAM_TIMEOUT_NON_STREAM = httpx.Timeout(10.0, read=120.0)
 
 # Bounded timeout for the /v1/models key probe (verify-upstream + startup).
 VERIFY_UPSTREAM_TIMEOUT = httpx.Timeout(10.0)
+
+# ---------------------------------------------------------------------------
+# P0 TEE proof completion — GET /attestation/verify (relay-side proxy of the
+# fixed Phala cloud verifier).
+#
+# The upstream URL is a config constant (never taken from the request —
+# SSRF hardening) and the quote in the POST body is the relay's own
+# same-source dstack quote, not user input. This route answers HTTP 200
+# ALWAYS: the verification semantics live in the body (front-end contract).
+#
+# Transport injection mirrors _upstream_transport above: None → real network,
+# tests inject an httpx.MockTransport.
+# ---------------------------------------------------------------------------
+VERIFY_ATTESTATION_TIMEOUT = httpx.Timeout(15.0)
+# Cloudflare fronts the Phala verifier and intermittently 403s python-style
+# UAs (including httpx's default, live-probed). Every verifier request
+# therefore carries an explicit browser-class User-Agent.
+VERIFY_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+)
+# In-process cooldown: the cloud verifier is rate-limited, so calls are kept
+# at >= 1 s apart; a call inside the window answers error="cooldown".
+VERIFY_COOLDOWN_S = 1.0
+
+# Test seam for the attestation verifier (httpx transport). None → real
+# network. Production code never touches it.
+_verify_transport: Any = None
+
+# Monotonic timestamp of the last verifier call (None until the first one).
+# Guarded by the lock below: the route is async but the gate is shared state.
+_verify_last_call: float | None = None
+_verify_lock = threading.Lock()
+
+
+def _reset_verify_cooldown() -> None:
+    """Clear the in-process verifier cooldown (TEST SEAM — production code
+    never calls it). None means "no call yet", so the next
+    /attestation/verify request reaches the verifier instead of answering
+    error="cooldown". The production >= 1 s spacing is untouched; this only
+    makes the process-level gate resettable so tests stay isolated (the
+    timestamp outlives per-test TestClient lifespan reboots)."""
+    global _verify_last_call
+    with _verify_lock:
+        _verify_last_call = None
+
 
 # Escrow.State enum values (contracts/src/Escrow.sol).
 STATE_LOCKED = 1
@@ -150,7 +199,7 @@ _upstream_transport: Any = None
 # into the gate's deny.
 # ---------------------------------------------------------------------------
 BOOTSTRAP_ALLOWED_PATHS: Final[frozenset[str]] = frozenset(
-    {"/health", "/info", "/attestation"}
+    {"/health", "/info", "/attestation", "/attestation/verify"}
 )
 BOOTSTRAP_ALLOWED_METHODS: Final[frozenset[str]] = frozenset({"GET", "HEAD"})
 _BOOTSTRAP_BODY = b'{"detail":"bootstrap_mode"}'
@@ -786,6 +835,11 @@ async def attestation() -> dict[str, Any]:
         except ValueError:
             quote_digest = None
 
+    # P1 incremental quote parse: reportdata/rtmr0-3/mrseam straight out of
+    # the TDX v4 quote (pure byte slicing, no IO). Unparseable/short/foreign
+    # quotes report null — never a 500.
+    parsed_quote = parse_tdx_quote(quote_hex)
+
     return {
         "tee": True,
         # appId is reported ONLY when the dstack client actually exposes it;
@@ -796,7 +850,248 @@ async def attestation() -> dict[str, Any]:
         "reportData": "0x" + report_data.hex(),
         "quote": "0x" + quote_hex if quote_hex else None,
         "quoteDigest": quote_digest,
+        "quoteVersion": parsed_quote.version if parsed_quote else None,
+        "quoteBody": parsed_quote.as_body() if parsed_quote else None,
     }
+
+
+def _local_tee_quote(st: RelayState) -> tuple[str, bytes]:
+    """Fetch the relay's OWN dstack quote — the same source, report-data
+    binding and shape as GET /attestation (single and shared modes).
+    Returns (quote hex WITHOUT 0x prefix, report data). Raises on any
+    dstack failure (callers map that into the verify body's `error`)."""
+    if st.config.is_shared:
+        derived = st.signer_address
+        report_data = bytes.fromhex(derived[2:]) + b"\x00" * 12 + keccak(st.upload_pub)
+    else:
+        derived = st.chain.seller_address
+        report_data = b"\x00" * 44 + bytes.fromhex(derived[2:])
+    client = dstack_client(st.config.tee_socket_path or "")
+    quote = client.get_quote(report_data)
+    raw_quote = getattr(quote, "quote", None)
+    if isinstance(raw_quote, (bytes, bytearray)):
+        quote_hex = bytes(raw_quote).hex()
+    else:
+        quote_hex = str(raw_quote or "").strip()
+    if quote_hex.startswith("0x"):
+        quote_hex = quote_hex[2:]
+    return quote_hex, report_data
+
+
+# ------------------------------------------------------------- P0 verify proxy
+
+# quote_collateral key -> the four boolean flags exposed to the front-end.
+# The collateral PEM/CRL blobs themselves are NEVER passed through: the body
+# carries presence flags only.
+_COLLATERAL_KEYS: Final[dict[str, str]] = {
+    "pck_chain": "pck_crl_issuer_chain",
+    "tcb_info": "tcb_info",
+    "qe_identity": "qe_identity",
+    "crl": "pck_crl",
+}
+
+
+def _hex0x(value: Any) -> str | None:
+    """Lowercase 0x-prefixed hex, or None (also for non-string values)."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip().lower()
+    if not text:
+        return None
+    if not text.startswith("0x"):
+        text = "0x" + text
+    return text
+
+
+def _verify_body(
+    *,
+    verified: bool = False,
+    verifier_http_status: int = 0,
+    checksum: str | None = None,
+    submitted_quote_sha256: str | None = None,
+    verified_at: str | None = None,
+    node_provider: str | None = None,
+    quote_header: dict[str, Any] | None = None,
+    quote_body: dict[str, Any] | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    """The fixed /attestation/verify body shape (front-end contract — field
+    names are verbatim). HTTP status is always 200; semantics live here."""
+    return {
+        "verified": bool(verified),
+        "verifier_http_status": int(verifier_http_status),
+        "checksum": checksum,
+        # sha256 ("0x" hex) of the EXACT quote bytes this relay submitted
+        # to the verifier — the same-round integrity anchor. The relay
+        # re-quotes per call (a fresh dstack ECDSA signature every time),
+        # so a separately fetched /attestation quote is a DIFFERENT byte
+        # string; comparing the verifier checksum against that one
+        # false-alarms on every click. None when no quote was submitted
+        # (cooldown / dstack failure).
+        "submittedQuoteSha256": submitted_quote_sha256,
+        "verified_at": verified_at,
+        "node_provider": node_provider,
+        "quote_header": quote_header,
+        "quote_body": quote_body,
+        "collateral": {flag: False for flag in _COLLATERAL_KEYS},
+        "error": error,
+    }
+
+
+def _map_verify_collateral(payload: dict[str, Any]) -> dict[str, bool]:
+    """Four presence flags from the verifier's quote_collateral: the blob
+    exists and is non-empty. The PEM/CRL material stays internal."""
+    raw = payload.get("quote_collateral")
+    raw = raw if isinstance(raw, dict) else {}
+    flags: dict[str, bool] = {}
+    for flag, key in _COLLATERAL_KEYS.items():
+        value = raw.get(key)
+        flags[flag] = isinstance(value, str) and bool(value.strip())
+    return flags
+
+
+def _map_verify_response(
+    resp: httpx.Response, *, submitted_quote_sha256: str | None = None
+) -> dict[str, Any]:
+    """Cloud-verifier response -> the relay's verify body. Unparseable
+    payloads degrade to error strings; nothing here raises."""
+    try:
+        payload = resp.json()
+    except ValueError:
+        return _verify_body(
+            verifier_http_status=resp.status_code,
+            error="verifier returned non-JSON",
+        )
+    if not isinstance(payload, dict):
+        return _verify_body(
+            verifier_http_status=resp.status_code,
+            error="verifier returned a non-object payload",
+        )
+
+    quote = payload.get("quote")
+    quote = quote if isinstance(quote, dict) else {}
+    header = quote.get("header")
+    header = header if isinstance(header, dict) else None
+    body = quote.get("body")
+    quote_body: dict[str, Any] | None = None
+    if isinstance(body, dict):
+        quote_body = {
+            key: _hex0x(body.get(key))
+            for key in ("reportdata", "rtmr0", "rtmr1", "rtmr2", "rtmr3", "mrseam")
+        }
+
+    success = bool(payload.get("success"))
+    # verified = success && verified. The cloud verifier reports the flag
+    # under quote.verified; a top-level "verified" is honored too.
+    verified = success and bool(payload.get("verified", quote.get("verified", False)))
+
+    raw_provider = payload.get("node_provider")
+    if isinstance(raw_provider, dict):
+        provider = raw_provider.get("provider")
+        node_provider = (
+            provider if isinstance(provider, str) and provider.strip() else None
+        )
+    elif isinstance(raw_provider, str):
+        node_provider = raw_provider.strip() or None
+    else:
+        node_provider = None
+
+    verified_at = payload.get("verified_at")
+    verified_at = (
+        verified_at if isinstance(verified_at, str) and verified_at.strip() else None
+    )
+
+    out = _verify_body(
+        verified=verified,
+        verifier_http_status=resp.status_code,
+        checksum=_hex0x(payload.get("checksum")),
+        submitted_quote_sha256=submitted_quote_sha256,
+        verified_at=verified_at,
+        node_provider=node_provider,
+        quote_header=dict(header) if header is not None else None,
+        quote_body=quote_body,
+        error=None if resp.status_code == 200 else f"verifier HTTP {resp.status_code}",
+    )
+    out["collateral"] = _map_verify_collateral(payload)
+    return out
+
+
+@app.get("/attestation/verify")
+async def attestation_verify() -> dict[str, Any]:
+    """P0: verify this relay's dstack quote via the fixed Phala cloud
+    verifier and map the verdict to a stable body (HTTP is always 200).
+
+    Contract (front-end dependency — field names verbatim): verified,
+    verifier_http_status, checksum, submittedQuoteSha256, verified_at,
+    node_provider, quote_header, quote_body {reportdata, rtmr0-3, mrseam},
+    collateral {pck_chain, tcb_info, qe_identity, crl} and error.
+    submittedQuoteSha256 is the sha256 ("0x" hex) of the exact quote bytes
+    submitted this round — the integrity anchor the front-end compares
+    the verifier checksum against (the relay re-quotes per call, so a
+    separately fetched /attestation quote is a different byte string).
+    The upstream URL is the compile-time constant (never request input —
+    SSRF hardening) and the verified quote is the relay's own same-source
+    dstack quote, never caller-supplied bytes.
+
+    Not TEE mode → 404. Inside the in-process cooldown window (>= 1 s
+    between calls) the body reports error="cooldown" without touching the
+    verifier."""
+    st = _get_state()
+    if not st.config.tee_mode or not st.config.tee_socket_path:
+        raise HTTPException(
+            status_code=404,
+            detail="relay is not running in TEE mode (no dstack socket detected)",
+        )
+
+    # In-process cooldown: at most one verifier call per second.
+    global _verify_last_call
+    with _verify_lock:
+        now = _monotonic()
+        last = _verify_last_call
+        if last is not None and now - last < VERIFY_COOLDOWN_S:
+            return _verify_body(error="cooldown")
+        _verify_last_call = now
+
+    try:
+        quote_hex, _report_data = _local_tee_quote(st)
+    except Exception as exc:
+        return _verify_body(error=f"dstack quote failed: {type(exc).__name__}")
+    if not quote_hex:
+        return _verify_body(error="dstack returned an empty quote")
+
+    # Same-round integrity anchor: sha256 of the EXACT bytes POSTed below
+    # ("0x" + quote_hex). The verifier computes its checksum over this
+    # quote; the separately fetched /attestation quote is a different
+    # signing, so only this field makes the checksum comparable.
+    try:
+        submitted_quote_sha256 = "0x" + hashlib.sha256(
+            bytes.fromhex(quote_hex)
+        ).hexdigest()
+    except ValueError:
+        submitted_quote_sha256 = None
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=VERIFY_ATTESTATION_TIMEOUT,
+            follow_redirects=False,
+            transport=_verify_transport,
+        ) as verify:
+            resp = await verify.post(
+                PHALA_VERIFY_URL,
+                json={"hex": "0x" + quote_hex},
+                headers={"User-Agent": VERIFY_USER_AGENT},
+            )
+    except httpx.TimeoutException as exc:
+        return _verify_body(
+            error=f"verifier timeout: {type(exc).__name__}",
+            submitted_quote_sha256=submitted_quote_sha256,
+        )
+    except httpx.HTTPError as exc:
+        return _verify_body(
+            error=f"verifier unreachable: {type(exc).__name__}",
+            submitted_quote_sha256=submitted_quote_sha256,
+        )
+    return _map_verify_response(resp, submitted_quote_sha256=submitted_quote_sha256)
 
 
 @app.api_route("/info", methods=["GET", "HEAD"])

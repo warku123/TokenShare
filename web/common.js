@@ -958,7 +958,9 @@ window.TS = (() => {
        mode (old form preserved). Present but partial/malformed →
        fail-closed (custody disabled, hard error shown). Values are
        normalized once here (lower hex, canonical origin) and every later
-       comparison runs on the normalized form. */
+       comparison runs on the normalized form. The optional codeMeasure
+       block is NOT an identity pin: it is phase-1 SOFT evidence (see the
+       codeMeasure branch at the bottom of this function). */
     const HEX40 = /^0x[0-9a-fA-F]{40}$/;
     const HEX64 = /^(0x)?[0-9a-fA-F]{64}$/;
     function validateM15Config(raw) {
@@ -982,6 +984,34 @@ window.TS = (() => {
         need(typeof ev.verifiedAt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(ev.verifiedAt), "attestEvidence.verifiedAt");
         need(HEX64.test(ev.digest || ""), "attestEvidence.digest");
       }
+      /* ── codeMeasure (enclave code fingerprint) — PHASE 1: SOFT pin ──
+         Shape: { rtmr0, rtmr1, rtmr2, rtmr3, mrseam } — every value is
+         0x + 96 hex (48-byte TDX measurement register). Stage semantics:
+           · unconfigured (key absent, or every value null/empty) →
+             skipped entirely — identity-only custody is unchanged.
+           · configured → HEX96-checked here; console.js then compares
+             each pin against the relay-reported /attestation
+             quoteBody registers and shows a YELLOW code fingerprint
+             mismatch row on a miss. Soft by design: a configured pin
+             never enters `missing` (the fail-closed set) and never
+             touches custodyState.pinsOk.
+         A malformed value lands in `bad` (soft signal), NEVER in
+         `missing` — fail-closed stays owned by the identity pins.
+         TODO phase-2: once the measurements are proven stable across
+         relay restarts, promote these to hard pins (push into
+         `missing` + re-derive the pinsOk gate); until then this block
+         is evidence-only on purpose. */
+      const HEX96 = /^0x[0-9a-fA-F]{96}$/;
+      const cmRaw = raw.codeMeasure && typeof raw.codeMeasure === "object" ? raw.codeMeasure : null;
+      const cmPins = {}, cmBad = [];
+      if (cmRaw) {
+        for (const k of ["rtmr0", "rtmr1", "rtmr2", "rtmr3", "mrseam"]) {
+          const v = cmRaw[k];
+          if (v == null || v === "") continue; /* unconfigured → skip (phase-1 stage) */
+          if (HEX96.test(String(v))) cmPins[k] = String(v).toLowerCase();
+          else cmBad.push(`codeMeasure.${k}`); /* soft signal only — never fail-closed */
+        }
+      }
       if (missing.length) return { ok: false, missing, bad };
       return {
         ok: true,
@@ -996,6 +1026,10 @@ window.TS = (() => {
             verifiedAt: ev.verifiedAt,
             digest: String(ev.digest).toLowerCase().replace(/^0x/, ""),
           },
+          /* null when the config carries no codeMeasure block at all;
+             { pins, bad } when the structure exists (empty pins =
+             configured-but-unfilled, the shipped phase-1 state) */
+          codeMeasure: cmRaw ? { pins: cmPins, bad: cmBad } : null,
         },
       };
     }

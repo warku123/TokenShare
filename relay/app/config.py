@@ -97,6 +97,12 @@ OFFICIAL_UPSTREAM_HOSTS: Final[frozenset[str]] = frozenset(
 TEE_KEY_PATH = "wallet/ethereum/tokenshare"
 DEFAULT_DSTACK_SOCKET = "/var/run/dstack.sock"
 
+# P0 TEE proof completion: the FIXED upstream of the Phala cloud quote
+# verifier, used by GET /attestation/verify. Hardcoded ON PURPOSE — the URL
+# is never derived from request parameters (SSRF hardening: a caller must
+# not be able to aim the relay at an arbitrary attestation endpoint).
+PHALA_VERIFY_URL = "https://cloud-api.phala.com/api/v1/attestations/verify"
+
 # ---------------------------------------------------------------------------
 # M15 R1 — SHARED custody mode (RELAY_MODE=shared, protocol v1.0-e1).
 #

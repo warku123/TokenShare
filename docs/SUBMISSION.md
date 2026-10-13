@@ -45,6 +45,9 @@ Demo status (Monad testnet, no real-money claims): real Kimi calls (k3-256k, kim
 
 Compliance: upstream sellers remain responsible for complying with their provider's terms; resale authorization is not established by this project.
 
+PRIOR ART AND DIFFERENTIATION
+Demand for idle subscription capacity is already proven commercially: DeRouter (derouter.ai, self-described as operating since 2025) pools providers' Claude/Codex subscription accounts behind a centralized relay with custodial prepaid credits, and self-reports 9,000+ users with USDC payouts on Solana; its own whitepaper concedes the operator-absconding risk is not cryptographically prevented, and TEE execution remains a roadmap item. PayPerQ's open-source enclave proxy (ppq-enclave-proxy) runs a similar TEE-proxy pattern in production for its own gateway — but to protect query-content privacy, not to run a capacity marketplace. TokenShare targets the gap between them: a marketplace whose settlement does not require trusting the operator — non-custodial per-call escrow with TTL refunds, seller-consented encrypted custody of keys routed only to official endpoints (no account pooling), and live Phala TDX attestation anchored on-chain.
+
 Links: repo https://github.com/warku123/TokenShare — live demo https://tokenshare-web.vercel.app/ — logo assets/tokenshare-logo.png — video script maintained locally (not tracked in the repo; ≤3 minutes, submission requirement).
 ```
 
@@ -93,7 +96,7 @@ Honest scope: the shared relay currently serves Kimi models (k3-256k, kimi-for-c
 | --- | --- | --- |
 | Project name | ≤120 | 10 |
 | One-line description | ≤200 | 198 |
-| Description | ≤8000 | 4449 |
+| Description | ≤8000 | 5449 |
 | GTM strategy | none displayed (kept ~200–300 words) | 1941 chars / 279 words |
 | Judge access instructions (optional) | ≤8000 | 2082 chars / 298 words |
 | 中文摘要（optional） | — | 265 chars |

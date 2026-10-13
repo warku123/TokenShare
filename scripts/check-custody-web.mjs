@@ -776,6 +776,65 @@ console.log("\n== N. live shared-relay wiring ==");
     "N11 attestedAt is never a pin input (display metadata only — its absence skips nothing)");
 }
 
+/* ═══ S. codeMeasure — two-stage enclave code pins (phase 1 soft) ═══
+   Deployment record 2026-10-13: web/config.js m15 now ships the
+   codeMeasure structure ({rtmr0..rtmr3, mrseam} — 0x + 96 hex each)
+   with every value UNFILLED (null). Stage semantics enforced here:
+     · unconfigured / unfilled → skipped, identity-only custody is
+       byte-compatible with the pre-codeMeasure behavior;
+     · configured → HEX96-validated in web/common.js
+       validateM15Config and compared by console.js against the
+       relay-reported /attestation quoteBody registers as a SOFT
+       evidence row (yellow code fingerprint mismatch), never in the
+       fail-closed `missing` set and never in custodyState.pinsOk;
+     · hard promotion is deferred behind a TODO phase-2 marker until
+       the measurements are proven stable across relay restarts. */
+console.log("\n== S. codeMeasure two-stage pins ==");
+{
+  const cfgSrc = readFileSync(join(ROOT, "web/config.js"), "utf8");
+  const commonSrc = readFileSync(join(ROOT, "web/common.js"), "utf8");
+  const js = readFileSync(join(ROOT, "web/console.js"), "utf8");
+
+  /* 1 — the shipped config carries the STRUCTURE; values stay unfilled */
+  const CM_KEYS = ["rtmr0", "rtmr1", "rtmr2", "rtmr3", "mrseam"];
+  const block = cfgSrc.match(/codeMeasure\s*:\s*{([^}]*)}/);
+  const vals = block ? [...block[1].matchAll(/(\w+)\s*:\s*([^,\n]+)/g)].map((x) => [x[1], x[2].trim()]) : [];
+  ok(!!block && CM_KEYS.every((k) => vals.some(([key]) => key === k)) &&
+      vals.length === CM_KEYS.length && vals.every(([, v]) => v === "null"),
+    "S1 web/config.js m15 ships the codeMeasure structure (rtmr0-3 · mrseam), every value UNFILLED (null)",
+    block ? vals.map(([k, v]) => `${k}=${v}`).join(", ") : "codeMeasure block missing");
+
+  /* 2 — the validator carries the HEX96 branch + the phase-2 marker */
+  ok(commonSrc.includes("const HEX96 = /^0x[0-9a-fA-F]{96}$/") &&
+      commonSrc.includes("cmPins[k] = String(v).toLowerCase()") &&
+      commonSrc.includes("cmBad.push(`codeMeasure.${k}`)") &&
+      commonSrc.includes("TODO phase-2") &&
+      commonSrc.includes("codeMeasure: cmRaw ? { pins: cmPins, bad: cmBad } : null") &&
+      !/need\(HEX96\.test\(raw\.codeMeasure/.test(commonSrc),
+    "S2 common.js validates codeMeasure as SOFT HEX96 pins + carries the TODO phase-2 marker (never in `missing`)");
+
+  /* 3 — runtime two-stage semantics on the real validator */
+  const base = TEST_CFG.m15;
+  const un = T.custody.validateM15Config({ ...base, codeMeasure: { rtmr0: null, rtmr1: null, rtmr2: null, rtmr3: null, mrseam: null } });
+  const pin = "0x" + "ab".repeat(48);
+  const bad = T.custody.validateM15Config({ ...base, codeMeasure: { rtmr0: "0x12", mrseam: pin } });
+  const noCm = T.custody.validateM15Config(base);
+  ok(un.ok && un.cfg.codeMeasure && Object.keys(un.cfg.codeMeasure.pins).length === 0 &&
+      bad.ok && bad.cfg.codeMeasure.bad.join(",") === "codeMeasure.rtmr0" &&
+      bad.cfg.codeMeasure.pins.mrseam === pin &&
+      noCm.ok && noCm.cfg.codeMeasure === null &&
+      !(bad.missing || []).some((m) => String(m).startsWith("codeMeasure")),
+    "S3 two-stage semantics: unfilled → skipped · malformed → soft `bad` (ok:true, never in `missing`) · absent → null",
+    `unfilled pins=${Object.keys(un.cfg.codeMeasure.pins).length} · bad=${bad.cfg.codeMeasure.bad.join(",")} · absent=${noCm.cfg.codeMeasure}`);
+
+  /* 4 — console.js renders the soft evidence row only, off pinsOk */
+  ok(js.includes("shared.codeMeasure") && js.includes("att.quoteBody") &&
+      js.includes("code fingerprint mismatch") && js.includes("row(`code-${k}`") &&
+      /const cm = shared\.codeMeasure;[\s\S]{0,900}?\{ soft: true, warn: !!live && live !== pin \}\)/.test(js) &&
+      !/const cm = shared\.codeMeasure;[\s\S]{0,900}?pinsOk/.test(js),
+    "S4 console.js compares configured pins vs quoteBody as a SOFT row — no pinsOk inside the codeMeasure block");
+}
+
 /* ── P. policy consent lifecycle (real T.policyConsent module, stubbed
    sessionStorage — store() is lazy so installing the stub HERE is safe
    and cannot disturb the custody sections above). User-ruled semantics:

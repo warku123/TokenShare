@@ -1406,6 +1406,11 @@
      failure renders red; the custody gate itself stays owned by the pin
      matrix (pinsOk), this panel is evidence, not a new authority. */
   const attestState = { quote: null };
+  /* cloud-verify single auto-retry latch: a cooldown answer is benign
+     rate limiting, so the panel retries ONCE after the relay's 1 req/s
+     window clears. The latch lives per invocation chain (the manual click
+     re-arms it, the scheduled retry does not) so it can never loop. */
+  let cloudVerifyRetried = false;
   const setAttestNote = (text, cls) => {
     const n = $("sc-attest-note");
     if (!n) return;
@@ -1525,6 +1530,43 @@
           : `${att.quoteDigest} — matches the pinned offline record (${shared.evidence.verifiedAt})`,
         { soft: true, warn: rotated });
 
+      /* 6b — quoteVersion / quoteBody: display-only relay fields (newer
+         relay builds report them; their absence skips nothing) */
+      if (att.quoteVersion != null) {
+        row("quote-version", true,
+          `v${att.quoteVersion} · quoteBody ${att.quoteBody ? "reported — code pins comparable below" : "absent — code pins not comparable"}`,
+          { soft: true });
+      }
+
+      /* 7 — codeMeasure (PHASE 1, SOFT): configured enclave code
+         fingerprint vs the relay-reported quoteBody registers. An
+         unconfigured block renders NOTHING (identity-only custody,
+         unchanged). A configured pin that misses renders yellow —
+         never red, and never part of pinsOk (the custody gate stays
+         with the pin matrix above). TODO phase-2 promotion to hard
+         pins is marked in common.js validateM15Config. */
+      const cm = shared.codeMeasure;
+      if (cm && cm.pins && Object.keys(cm.pins).length) {
+        const qb = att.quoteBody && typeof att.quoteBody === "object" ? att.quoteBody : null;
+        for (const k of ["rtmr0", "rtmr1", "rtmr2", "rtmr3", "mrseam"]) {
+          const pin = cm.pins[k];
+          if (!pin) continue;
+          const live = qb && typeof qb[k] === "string" ? String(qb[k]).toLowerCase().replace(/^0x/, "") : "";
+          row(`code-${k}`, !!live && live === pin,
+            live
+              ? (live === pin
+                ? `${pin.slice(0, 16)}… — relay reports the pinned enclave measurement`
+                : `relay reports ${live.slice(0, 16)}… · pinned ${pin.slice(0, 16)}… — code fingerprint mismatch`)
+              : `pinned ${pin.slice(0, 16)}… — the relay does not report this register — skipped`,
+            { soft: true, warn: !!live && live !== pin });
+        }
+        if (cm.bad && cm.bad.length) {
+          row("code-config", false,
+            `malformed config values (need 0x + 96 hex): ${cm.bad.join(", ")} — ignored; fix config.js`,
+            { soft: true, warn: true });
+        }
+      }
+
       const hard = rows.filter((r) => !r.soft);
       const allOk = hard.length > 0 && hard.every((r) => r.ok);
       const anyWarn = rows.some((r) => r.warn);
@@ -1554,6 +1596,212 @@
     const n = $("sc-attest-curl-note");
     const say = (text, cls) => { if (n) { n.className = "model-verify-note" + (cls ? " " + cls : ""); n.textContent = text; } };
     if (!attestState.quote) { say("run VERIFY ATTESTATION LIVE first — no quote on hand", "warn"); return; }
+    const cmd = `curl -sS -X POST ${ATTEST_VERIFY_URL} -H 'Content-Type: application/json' -d '{"hex":"${attestState.quote}"}'`;
+    try {
+      await navigator.clipboard.writeText(cmd);
+      say("verify curl copied — run it locally; expect success:true and quote.body.reportdata == the panel reportData", "ok");
+    } catch {
+      say("clipboard blocked by the browser — the command could not be copied", "warn");
+    }
+  }
+
+  /* ═══ CLOUD VERIFY — relay-proxied DCAP verification ════════════
+     [ CLOUD VERIFY ] asks the PINNED relay to run the Phala cloud
+     verifier server-side: GET {relayOrigin}/attestation/verify answers
+     with the verdict JSON (verified · verifier_http_status · checksum ·
+     submittedQuoteSha256 · verified_at · node_provider · quote_body ·
+     collateral). The page still cannot call the verifier itself (no CORS
+     headers) — that is exactly why the relay proxies it.
+     Manual, read-only, plain guard: no consent gate, no wallet, no
+     polling — exactly one request per click (plus the single cooldown
+     retry below). The rows this renders are verifier-side EVIDENCE only:
+     they never feed custodyState.pinsOk and never move any button —
+     custody authority stays with the pin matrix + the local LIVE panel
+     above. Rows:
+       cloud-verify      verified === true (hard evidence row)
+       reportdata-cross  quote_body.reportdata === /attestation
+                         reportData (hard — binds the cloud verdict to
+                         the very quote the local panel checked)
+       collateral        pck_chain ∧ tcb_info ∧ qe_identity ∧ crl all
+                         true (hard)
+       checksum          submittedQuoteSha256 === checksum (soft — SAME
+                         round: both hash the relay-submitted quote; a
+                         miss never fails the panel)
+       live-quote-digest sha256(/attestation quote) — information only
+                         (the verify round re-quotes; never cross-checked)
+       verified-at · node-provider — display metadata
+     Degraded (proxy unreachable · non-200 · verified field absent):
+     yellow bar — fall back to the local binding panel + the offline
+     curl, both of which stay available below. cooldown takes the same
+     yellow soft-degrade path (benign 1 req/s rate limit, never a
+     rejection) and schedules exactly one ~1.2 s retry. */
+  const setCloudAttestNote = (text, cls) => {
+    const n = $("sc-attest-cloud-note");
+    if (!n) return;
+    n.className = "model-verify-note" + (cls ? " " + cls : "");
+    n.textContent = text;
+  };
+  const normHex = (s) => String(s || "").toLowerCase().replace(/^0x/, "");
+  const quoteBytes = (hex) => {
+    const qh = String(hex || "");
+    if (!/^0x[0-9a-fA-F]+$/.test(qh) || qh.length % 2 !== 0) return null;
+    const b = new Uint8Array((qh.length - 2) / 2);
+    for (let i = 0; i < b.length; i++) b[i] = parseInt(qh.slice(2 + i * 2, 4 + i * 2), 16);
+    return b;
+  };
+
+  async function runCloudAttestVerify(isRetry = false) {
+    const panel = $("sc-attest-cloud-panel");
+    if (!panel || !shared) return;
+    if (!isRetry) cloudVerifyRetried = false; /* a manual (re)click re-arms the single retry */
+    setCloudAttestNote("asking the pinned relay to run the cloud verifier …", "");
+    /* degraded: yellow note + panel row, local evidence + curl stay */
+    const degrade = (reason) => {
+      if (panel) panel.innerHTML =
+        `<div class="kv"><span>CLOUD VERIFY</span><b style="color:var(--amber)">⚠ degraded — ${T.esc(reason)}</b></div>` +
+        `<p class="fld-hint">the relay proxy returned no cloud verdict — nothing moved and no gate changed. ` +
+        `The local LIVE ATTESTATION panel above stays the in-page evidence, and the offline curl below still ` +
+        `verifies the quote against ${T.esc(ATTEST_VERIFY_URL)} yourself.</p>` +
+        `<div class="model-verify"><button class="btn btn-sm btn-ghost" id="sc-attest-cloud-curl" type="button">[ COPY VERIFY CURL ]</button>` +
+        `<span class="model-verify-note" id="sc-attest-cloud-curl-note"></span></div>`;
+      const b = $("sc-attest-cloud-curl");
+      if (b) b.addEventListener("click", copyAttestCurlCloud);
+      setCloudAttestNote("cloud verify degraded — local panel + offline curl remain available", "warn");
+    };
+    try {
+      /* the verdict and the live quote travel together so the cross
+         check compares against THIS call's reportData */
+      const [attR, verR] = await Promise.all([
+        T.fetchJson(T.joinUrl(shared.relayOrigin, "/attestation"), {}, 12000),
+        T.fetchJson(T.joinUrl(shared.relayOrigin, "/attestation/verify"), {}, 20000),
+      ]);
+      if (attR.corsOrNetwork) throw new Error(`relay unreachable (${attR.error === "timeout" ? "timeout" : "network/CORS"})`);
+      if (!attR.ok || !attR.body || typeof attR.body !== "object") throw new Error(`/attestation HTTP ${attR.status}`);
+      const att = attR.body;
+      attestState.quote = String(att.quote || ""); /* keeps the offline curl pointed at the live quote */
+      const liveRd = String(att.reportData || "");
+      if (verR.corsOrNetwork || !verR.ok || !verR.body || typeof verR.body !== "object") {
+        return degrade(verR.corsOrNetwork
+          ? `relay proxy unreachable (${verR.error === "timeout" ? "timeout" : "network/CORS"})`
+          : `/attestation/verify HTTP ${verR.status}`);
+      }
+      const v = verR.body;
+      if (typeof v.verified !== "boolean") return degrade("the proxy answer carries no verdict (verified field missing)");
+
+      /* cooldown is BENIGN rate limiting (the relay's in-process 1 req/s
+         gate protects the cloud verifier) — NOT a verifier rejection.
+         Take the yellow soft-degrade path like any other soft row (never
+         the red cloud-verify row) and retry once ~1.2 s later, after the
+         window clears; the latch above guarantees exactly one retry. */
+      if (v.error === "cooldown") {
+        degrade("cloud verifier rate-limited (cooldown) — retry in ~1s");
+        if (!isRetry && !cloudVerifyRetried) {
+          cloudVerifyRetried = true;
+          setTimeout(() => { if ($("sc-attest-cloud-panel")) runCloudAttestVerify(true); }, 1200);
+        }
+        return;
+      }
+
+      const rows = [];
+      const row = (key, ok, detail, opt = {}) => rows.push({ key, ok: !!ok, detail: String(detail), soft: !!opt.soft, warn: !!opt.warn });
+
+      /* 1 — the cloud verdict itself */
+      row("cloud-verify", v.verified === true,
+        v.verified === true
+          ? `cloud verifier accepted the quote (verifier HTTP ${v.verifier_http_status ?? 200})`
+          : `cloud verifier rejected the quote (verifier HTTP ${v.verifier_http_status ?? "—"})${v.error ? ` — ${v.error}` : ""}`);
+
+      /* 2 — cross: the verdict must be about THIS relay's live quote */
+      const vRd = v.quote_body && typeof v.quote_body === "object" ? v.quote_body.reportdata : null;
+      const rdOk = !!vRd && !!liveRd && normHex(vRd) === normHex(liveRd);
+      row("reportdata-cross", rdOk,
+        rdOk ? "quote_body.reportdata === /attestation reportData — the verdict covers this live quote"
+          : `quote_body.reportdata ${vRd ? normHex(vRd).slice(0, 16) + "…" : "—"} ≠ /attestation reportData ${liveRd ? normHex(liveRd).slice(0, 16) + "…" : "—"}`);
+
+      /* 3 — collateral: all four fetches must have landed */
+      const c = v.collateral && typeof v.collateral === "object" ? v.collateral : {};
+      const cKeys = ["pck_chain", "tcb_info", "qe_identity", "crl"];
+      const cMiss = cKeys.filter((k) => c[k] !== true);
+      row("collateral", cMiss.length === 0,
+        cMiss.length === 0 ? "pck_chain · tcb_info · qe_identity · crl — all fetched"
+          : `missing collateral: ${cMiss.join(", ")}`);
+
+      /* 4 — checksum: SAME-ROUND integrity — the verifier's checksum must
+         equal the sha256 of the quote bytes the RELAY actually submitted
+         this round (submittedQuoteSha256). The relay re-quotes per call
+         (fresh dstack ECDSA signature), so /attestation's separately
+         fetched quote is a DIFFERENT byte string by design — comparing
+         against it false-alarmed on every click. A true mismatch still
+         warns (soft, evidence only). */
+      const vSum = normHex(v.checksum);
+      const vSub = normHex(v.submittedQuoteSha256);
+      row("checksum", !!vSub && !!vSum && vSum === vSub,
+        vSum && vSub
+          ? (vSum === vSub
+            ? `sha256(submitted quote) === checksum ${vSum.slice(0, 16)}… — same-round integrity holds`
+            : `submitted-quote sha256 ${vSub.slice(0, 16)}… ≠ checksum ${vSum.slice(0, 16)}… — soft, evidence only`)
+          : "checksum or submittedQuoteSha256 unavailable — skipped",
+        { soft: true, warn: !!(vSub && vSum && vSub !== vSum) });
+
+      /* 4b — the LIVE /attestation quote digest: independent information
+         only. It is NOT the verifier input (the verify round re-quotes),
+         so it never participates in the checksum cross-check — shown so
+         the operator can still recognize the quote the offline curl
+         below points at. */
+      const qb = quoteBytes(attestState.quote);
+      let liveSha = null;
+      try { if (qb) liveSha = (await hashers.sha256Hex(qb)).toLowerCase(); } catch { liveSha = null; }
+      row("live-quote-digest", true,
+        liveSha ? `sha256(/attestation quote) ${liveSha.slice(0, 16)}… · ${qb.length} B — information only, the verify round re-quotes`
+          : "live quote unavailable — skipped",
+        { soft: true });
+
+      /* display metadata */
+      if (v.verified_at || v.node_provider) {
+        row("verified-at", true,
+          `${v.verified_at || "—"} · node provider ${v.node_provider || "—"}`,
+          { soft: true });
+      }
+      if (v.quote_body && typeof v.quote_body === "object") {
+        const body = v.quote_body;
+        const reg = (k) => (typeof body[k] === "string" && body[k] ? body[k] : null);
+        const shown = ["rtmr0", "rtmr1", "rtmr2", "rtmr3", "mrseam"].filter(reg);
+        row("quote-body", true,
+          shown.length ? `${shown.map((k) => `${k}=${reg(k).slice(2, 10) || reg(k).slice(0, 10)}`).join(" · ")} — verifier-signed measurements` : "reported without measurement registers",
+          { soft: true });
+      }
+
+      const hard = rows.filter((r) => !r.soft);
+      const allOk = hard.length > 0 && hard.every((r) => r.ok);
+      const anyWarn = rows.some((r) => r.warn);
+      panel.innerHTML =
+        `<div class="kv"><span>CLOUD VERIFY</span><b>${allOk
+          ? `<span class="ok">✓ cloud verifier verified the live quote</span>${anyWarn ? ` <span class="dim">· soft warning below</span>` : ""}`
+          : `<span class="bad">✗ cloud verification failed — evidence only, no gate moved</span>`}</b></div>` +
+        rows.map(attestRowHtml).join("") +
+        `<p class="fld-hint">verifier-side evidence: these rows report what the relay proxy answered for ` +
+        `${T.esc(shared.relayOrigin)}/attestation/verify. They are NOT part of the custody pin gate — that stays ` +
+        `with the local LIVE ATTESTATION panel above.</p>` +
+        `<div class="model-verify"><button class="btn btn-sm btn-ghost" id="sc-attest-cloud-curl" type="button">[ COPY VERIFY CURL ]</button>` +
+        `<span class="model-verify-note" id="sc-attest-cloud-curl-note"></span></div>`;
+      const b = $("sc-attest-cloud-curl");
+      if (b) b.addEventListener("click", copyAttestCurlCloud);
+      setCloudAttestNote(allOk
+        ? `cloud verify ${new Date().toLocaleTimeString()} — verdict ✔ · cross ✔ · collateral ✔${anyWarn ? " · soft warning below" : ""}`
+        : "cloud verify failed — evidence only, no gate moved", allOk ? "ok" : "err");
+    } catch (e) {
+      degrade(e.shortMessage || e.message || "unknown error");
+      console.error("cloud attest panel:", e);
+    }
+  }
+
+  /* cloud-panel twin of the copy handler: identical command template,
+     feedback written to the cloud note so the original handler above
+     (whose shape the smoke check greps) stays untouched */
+  async function copyAttestCurlCloud() {
+    const n = $("sc-attest-cloud-curl-note");
+    const say = (text, cls) => { if (n) { n.className = "model-verify-note" + (cls ? " " + cls : ""); n.textContent = text; } };
+    if (!attestState.quote) { say("run CLOUD VERIFY first — no quote on hand", "warn"); return; }
     const cmd = `curl -sS -X POST ${ATTEST_VERIFY_URL} -H 'Content-Type: application/json' -d '{"hex":"${attestState.quote}"}'`;
     try {
       await navigator.clipboard.writeText(cmd);
@@ -2029,6 +2277,10 @@
     $("s-upstream-key").addEventListener("input", markCustodyEdited);
     $("s-verify-btn").addEventListener("click", () => guardPaid($("s-verify-btn"), runSharedVerify));
     $("sc-attest-btn").addEventListener("click", () => guard($("sc-attest-btn"), runAttestVerify));
+    /* CLOUD VERIFY is read-only evidence: plain guard, never guardPaid —
+       it must stay reachable without the consent checkbox, and it never
+       touches custodyState.pinsOk or any custody button */
+    $("sc-attest-cloud-btn").addEventListener("click", () => guard($("sc-attest-cloud-btn"), runCloudAttestVerify));
     $("sc-authorize").addEventListener("click", () => guardPaid($("sc-authorize"), authorizeDelegateFlow));
     $("sc-revoke-delegate").addEventListener("click", () => guard($("sc-revoke-delegate"), revokeDelegateFlow));
     $("sc-revoke-key").addEventListener("click", () => guard($("sc-revoke-key"), revokeKeyFlow));

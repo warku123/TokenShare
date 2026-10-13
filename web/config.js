@@ -52,6 +52,35 @@ window.TS_CONFIG = {
       verifiedAt: "2026-10-12",
       digest: "ce36139c54f2cf3a75ea748c973e9646986aed8c45c63ccb73077646c6607c56",
     },
+    //
+    // codeMeasure — enclave code-fingerprint pins (PHASE 1, soft).
+    // Shape: TDX measurement registers; every value is 0x + 96 hex
+    // (48 bytes): rtmr0..rtmr3 + mrseam. Source: quote.body.rtmr0-3 /
+    // mrseam of a verified quote — the same fields the relay now
+    // returns under /attestation.quoteBody, so the console compares
+    // pins against what the relay reports live.
+    // Stage semantics (validated in web/common.js validateM15Config):
+    //   · UNCONFIGURED (all null, as shipped today) → skipped
+    //     entirely; the identity pins above remain the complete
+    //     phase-1 gate (relayOrigin · expectedSigner · appId ·
+    //     uploadPubkeySha256 · attestEvidence).
+    //   · CONFIGURED → the console attestation panel compares each
+    //     value against the relay-reported registers and renders a
+    //     YELLOW "code fingerprint mismatch" row on a miss. Soft by
+    //     design: it never blocks VERIFY, never enters the pinsOk
+    //     gate, and a malformed value is a soft signal, not a
+    //     fail-closed one.
+    // TODO phase-2: promote to hard pins once the measurements are
+    // proven stable across relay restarts/boots (a redeploy changes
+    // every rtmr — until that churn is pinned down a hard gate would
+    // fail closed on legitimate image swaps).
+    codeMeasure: {
+      rtmr0: null,
+      rtmr1: null,
+      rtmr2: null,
+      rtmr3: null,
+      mrseam: null,
+    },
   },
   //
   // appId provenance (live deployment record 2026-10-08): the appId

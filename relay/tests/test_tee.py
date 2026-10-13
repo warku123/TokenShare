@@ -23,6 +23,40 @@ TEE_ADDR = Account.from_key(TEE_KEY).address
 
 TEE_KEY_PATH = "wallet/ethereum/tokenshare"
 
+# ---------------------------------------------------------------------------
+# Synthetic TDX quote v4 (fixed 4372 B: 48 B header + 584 B body + tail),
+# with KNOWN rtmr0-3 / mrseam / reportdata so the P1 parser can assert
+# field-by-field. Offsets follow Intel's v4 layout (see relay/app/
+# tee_quote.py); reportdata is bound per call (the relay-generated value).
+# ---------------------------------------------------------------------------
+SYNTH_QUOTE_LEN = 4372
+SYNTH_RTMR0 = "0x" + "11" * 48
+SYNTH_RTMR1 = "0x" + "22" * 48
+SYNTH_RTMR2 = "0x" + "33" * 48
+SYNTH_RTMR3 = "0x" + "44" * 48
+SYNTH_MRSEAM = "0x" + "55" * 48
+
+
+def synth_v4_quote(report_data: bytes) -> bytes:
+    """A fixed-length TDX v4-shaped quote carrying the known test values."""
+    header = bytearray(48)
+    header[0:2] = (4).to_bytes(2, "little")  # version v4
+    header[2:4] = (2).to_bytes(2, "little")  # ak_type ECDSA_P256
+    header[4:6] = (0x81).to_bytes(2, "little")  # tee_type TDX
+    header[6:8] = (0).to_bytes(2, "little")  # qe_svn
+    header[8:10] = (0).to_bytes(2, "little")  # pce_svn
+    header[12:28] = bytes.fromhex("939a7233f79c4ca9940a0db3957f0607")
+    header[28:48] = report_data[:20]
+    body = bytearray(584)
+    body[16:64] = bytes.fromhex(SYNTH_MRSEAM[2:])
+    body[328:376] = bytes.fromhex(SYNTH_RTMR0[2:])
+    body[376:424] = bytes.fromhex(SYNTH_RTMR1[2:])
+    body[424:472] = bytes.fromhex(SYNTH_RTMR2[2:])
+    body[472:520] = bytes.fromhex(SYNTH_RTMR3[2:])
+    body[520:584] = report_data.ljust(64, b"\x00")  # reportdata
+    out = bytes(header) + bytes(body)
+    return out.ljust(SYNTH_QUOTE_LEN, b"\x00")
+
 
 class FakeDstackClient:
     """Drop-in for dstack_sdk.DstackClient covering get_key/get_quote/info."""
@@ -49,7 +83,9 @@ class FakeDstackClient:
         type(self).last_report_data = bytes(report_data)
         if type(self).fail_quote:
             raise RuntimeError("tdx agent down")
-        return types.SimpleNamespace(quote="0x" + "ab" * 300, event_log="")
+        return types.SimpleNamespace(
+            quote="0x" + synth_v4_quote(report_data).hex(), event_log=""
+        )
 
     def info(self) -> Any:
         return types.SimpleNamespace(app_id="0x" + "cd" * 8, vm_id="vm-1")
@@ -208,12 +244,23 @@ def test_attestation_route_tee(
     assert body["tee"] is True
     assert body["derivedAddress"] == TEE_ADDR
     assert body["reportData"] == "0x" + _expected_report_data().hex()
-    assert body["quote"] == "0x" + "ab" * 300
+    assert body["quote"] == "0x" + synth_v4_quote(_expected_report_data()).hex()
     assert body["appId"] == "0x" + "cd" * 8
     assert body["keyPath"] == TEE_KEY_PATH
-    assert body["quoteDigest"] == _keccak_hex(bytes.fromhex("ab" * 300))
+    assert body["quoteDigest"] == _keccak_hex(synth_v4_quote(_expected_report_data()))
     # The quote's report data bound the TEE-derived seller address.
     assert fake_dstack.last_report_data == _expected_report_data()
+    # P1 incremental parse: quoteVersion + quoteBody sit alongside the old
+    # seven fields and carry the known synthetic values.
+    assert body["quoteVersion"] == 4
+    assert body["quoteBody"] == {
+        "reportdata": "0x" + _expected_report_data().hex(),
+        "rtmr0": SYNTH_RTMR0,
+        "rtmr1": SYNTH_RTMR1,
+        "rtmr2": SYNTH_RTMR2,
+        "rtmr3": SYNTH_RTMR3,
+        "mrseam": SYNTH_MRSEAM,
+    }
 
 
 @pytest.fixture
@@ -246,6 +293,33 @@ def test_attestation_route_dstack_failure_is_500(
 
     assert resp.status_code == 500
     assert "dstack" in resp.json()["detail"]
+
+
+def test_attestation_route_unparseable_quote_nulls(
+    monkeypatch: pytest.MonkeyPatch, mock_openai, fake_socket, fake_dstack
+) -> None:
+    """P1: an unparseable quote (not a v4 TDX quote) reports null quote
+    fields — the old seven fields stay intact and the route never 500s."""
+
+    class GarbageQuoteClient(FakeDstackClient):
+        def get_quote(self, report_data: bytes) -> Any:
+            return types.SimpleNamespace(quote="0x" + "de" * 100, event_log="")
+
+    _tee_env(monkeypatch, mock_openai)
+    _patch_fake_client(monkeypatch, GarbageQuoteClient)
+    import relay.app.main as main
+
+    with TestClient(main.app) as client:
+        resp = client.get("/attestation")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["tee"] is True
+    assert body["quote"] == "0x" + "de" * 100
+    assert body["quoteDigest"] == _keccak_hex(bytes.fromhex("de" * 100))
+    assert body["quoteVersion"] is None
+    assert body["quoteBody"] is None
+    assert body["reportData"] == "0x" + _expected_report_data().hex()
 
 
 def test_info_route_non_tee(host_client: TestClient) -> None:

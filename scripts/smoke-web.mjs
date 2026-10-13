@@ -251,6 +251,51 @@ try {
     "console.js 内嵌 cloud-api.phala.com 验证 curl 模板（CORS 拦直连 → 终端离线终验）+ clipboard 复制");
 }
 
+/* ── 5c-2. CLOUD VERIFY（relay 代理云验证）静态接线：新按钮 id ·
+   /attestation/verify 抓取路径 · 普通 guard（非 consent 门 · 不轮询）·
+   降级黄条 + panel 内 copy curl 孪生处理器 ── */
+{
+  const consoleJs = readFileSync(join(WEB, "console.js"), "utf8");
+  const consoleHtml = pages.get("/console.html") || "";
+  rec("attest-cloud-verify",
+    consoleHtml.includes('id="sc-attest-cloud-btn"') &&
+    consoleJs.includes('joinUrl(shared.relayOrigin, "/attestation/verify")') &&
+    consoleJs.includes('guard($("sc-attest-cloud-btn")') &&
+    !consoleJs.includes('guardPaid($("sc-attest-cloud-btn")')
+      ? "PASS" : "FAIL",
+    "console.html #sc-attest-cloud-btn · console.js GET {relayOrigin}/attestation/verify（relay 代理云验证）· 普通 guard 只读过 consent 门");
+  rec("attest-cloud-degrade",
+    consoleJs.includes('id="sc-attest-cloud-curl"') && consoleJs.includes("copyAttestCurlCloud") &&
+    consoleJs.includes("cloud verify degraded") && consoleJs.includes('typeof v.verified !== "boolean"')
+      ? "PASS" : "FAIL",
+    "代理失败/非 200/verified 缺失 → 黄条降级（本地面板 + COPY VERIFY CURL 保留，pinsOk 零改动）");
+  rec("attest-cloud-cooldown-soft",
+    consoleJs.includes('v.error === "cooldown"') &&
+    consoleJs.includes("rate-limited (cooldown) — retry in ~1s") &&
+    consoleJs.includes("runCloudAttestVerify(true)") &&
+    consoleJs.includes("setTimeout") &&
+    consoleJs.includes("cloudVerifyRetried")
+      ? "PASS" : "FAIL",
+    "cooldown（relay 1 req/s 良性限流）→ 黄条软降级（不当 verifier 拒绝）+ 单次 ~1.2s 自动重试（latch 防循环）");
+  rec("attest-checksum-same-round",
+    consoleJs.includes("submittedQuoteSha256") &&
+    consoleJs.includes("same-round integrity") &&
+    consoleJs.includes("live-quote-digest") &&
+    !/sha256\(quote\).*checksum/.test(consoleJs)
+      ? "PASS" : "FAIL",
+    "checksum 软行同回合比对 v.checksum vs v.submittedQuoteSha256；live quote 摘要降为独立信息行（消除跨 quote 假警）");
+}
+
+/* ── 5d. codeMeasure 两阶段结构（phase-1 软 pin，值未填）── */
+{
+  const cfg = readFileSync(join(WEB, "config.js"), "utf8");
+  rec("codeMeasure-config",
+    /codeMeasure\s*:\s*{/.test(cfg) &&
+    ["rtmr0", "rtmr1", "rtmr2", "rtmr3", "mrseam"].every((k) => new RegExp(`${k}\\s*:\\s*null`).test(cfg))
+      ? "PASS" : "FAIL",
+    "config.js m15 携带 codeMeasure 结构（rtmr0-3 · mrseam，phase-1 全部 null 未配置 → 跳过）");
+}
+
 /* ── 5b. 共享 ACCOUNT 面板结构：在 .tabs 之前（两角色可见），buyer 面板不再携带资金入口 ── */
 {
   const con = pages.get("/console.html");

@@ -379,6 +379,21 @@ def fake_chain(monkeypatch: pytest.MonkeyPatch) -> type[FakeChain]:
     return FakeChain
 
 
+@pytest.fixture(autouse=True)
+def reset_verify_cooldown() -> None:
+    """Every test starts with a clear /attestation/verify cooldown.
+
+    The verifier gate's last-call timestamp is PROCESS-level state that
+    survives the per-test app reboots (each TestClient lifespan re-runs
+    load_config but the cooldown lives on relay.app.main), so a verifier
+    call from an earlier test would otherwise leak error="cooldown" into a
+    later one. Production semantics (>= 1 s between verifier calls) are
+    unchanged — this only isolates tests from each other."""
+    import relay.app.main as m
+
+    m._reset_verify_cooldown()
+
+
 def setup_relay_env(monkeypatch: pytest.MonkeyPatch, base_url: str) -> None:
     # The mock upstream host is not an official endpoint: the relay's startup
     # anti-poisoning gate would refuse it, so every test boot opts into the

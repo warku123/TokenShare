@@ -105,8 +105,15 @@
           cloud verifier as the reference verifier for this deployment. <b>The quote
           has not been compared against Intel's root of trust or reference
           measurement values</b>, and the TEE itself is governed by Phala Cloud KMS.
-          Treat attestation here as deployment-pinning evidence, not as a complete
-          hardware root-of-trust proof.</p>
+          Treat attestation here as deployment-pinning evidence: it shows the serving
+          process runs inside a genuine enclave, that the TEE-KMS-derived keys bind to
+          it, and that the identity stays continuous — <b>it does not prove that the
+          code running inside the enclave equals the code in any published
+          repository</b>. Live cloud verification of the running relay is available in
+          the console (the <b>CLOUD VERIFY</b> button asks the relay to run the
+          verifier, and the copied curl lets you run it yourself); enclave
+          measurements are pinned as soft evidence for now and are not enforced as a
+          hard gate.</p>
       </div>
     </article>
 
