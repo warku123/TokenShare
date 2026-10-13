@@ -146,7 +146,7 @@ cd contracts && forge test && cd ..
 # 3. Relay + CLI unit tests
 cd relay && pytest tests && cd ..     # 454 tests green
 cd cli && pytest tests && cd ..       # 151 tests green
-node scripts/check-custody-web.mjs    # 159 static checks green — see web/TESTING.md
+node scripts/check-custody-web.mjs    # 192 static checks green — see web/TESTING.md
 #    (separate: node scripts/smoke-web.mjs → 27 PASS / 3 WARN of 30 items;
 #     needs an HTTP static server: python3 -m http.server 8080 -d web)
 
