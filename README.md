@@ -84,8 +84,13 @@ TokenShare rents out **official-plan** quota, so a served model must be an offic
 | Official host | Provider | Model prefixes |
 |---------------|----------|----------------|
 | `api.openai.com` | openai | `gpt-`, `o1`, `o3`, `o4`, `chatgpt-` |
-| `api.moonshot.cn` (Kimi domestic) | moonshot | `kimi-`, `moonshot-` |
-| `api.moonshot.ai` (Kimi international) | moonshot | `kimi-`, `moonshot-` (keys are **not** interchangeable with `.cn`) |
+| `api.moonshot.cn` (Kimi domestic) | moonshot | `kimi-`, `moonshot-`, `k3` |
+| `api.moonshot.ai` (Kimi international) | moonshot | `kimi-`, `moonshot-`, `k3` (keys are **not** interchangeable with `.cn`) |
+| `api.kimi.com` (Kimi Coding plan; base `https://api.kimi.com/coding/v1`) | moonshot | `kimi-`, `moonshot-`, `k3` |
+| `opencode.ai` (OpenCode Zen; base `https://opencode.ai/zen/v1`) | zen | `deepseek-`, `glm-` |
+| `token-plan.maas.qianwenaiapi.com` (Qwen TokenPlan) | qwen | `qwen` (e.g. `qwen3.8-max`, `qwen-max`, `qwen-plus`) |
+
+For the SDK-style bases (Kimi Coding, OpenCode Zen, Qwen TokenPlan) the relay strips the trailing `/v1` before host gating; `k3` covers the Kimi Coding model face (`k3`, `k3-256k`); the bare `qwen` prefix carries no separator and collides with no other provider.
 
 **Seller pre-check (`GET /verify-upstream`)** — before registering (or re-registering) a listing, the seller can self-check that the configured key actually serves the models it wants to list: the relay calls the upstream's official `GET /v1/models` with its own key and cross-checks every `listing.models` entry — each model must be accessible with this key AND (official host) carry the matching provider prefix. Response body: `{key_valid, upstream_host, accessible_models, listing_ok, listed_models, mismatches, error?}` (HTTP stays 200; semantics live in the body; prices are never verified — pricing is the seller's freedom). `e2e/register_listing.py` runs this check automatically before spending register gas (`--skip-verify` / unreachable relay to bypass). On an official upstream the relay also probes `/v1/models` at startup (`VERIFY_UPSTREAM_ON_START=1` default, `0` to disable): a key rejected with 401/403 fails startup fast, transient network errors only log a WARNING.
 
@@ -139,7 +144,7 @@ pip install -r relay/requirements.txt -r cli/requirements.txt
 cd contracts && forge test && cd ..
 
 # 3. Relay + CLI unit tests
-cd relay && pytest tests && cd ..     # 345 tests green
+cd relay && pytest tests && cd ..     # 454 tests green
 cd cli && pytest tests && cd ..       # 151 tests green
 node scripts/check-custody-web.mjs    # 159 static checks green — see web/TESTING.md
 #    (separate: node scripts/smoke-web.mjs → 27 PASS / 3 WARN of 30 items;
@@ -180,7 +185,7 @@ tokenshare/
 │   └── script/Deploy.s.sol  # --sig run(string), writes deployed.json
 ├── relay/                   # FastAPI seller relay
 │   ├── app/                 # main / pricing / receipt / chain / config
-│   ├── tests/               # 345 tests green
+│   ├── tests/               # 454 tests green
 │   └── docker-compose.yml   # container run (Phala TDX oriented)
 ├── cli/                     # Typer buyer CLI
 │   ├── tokenshare_cli/      # signing / receipt / streaming / disputes / api keys

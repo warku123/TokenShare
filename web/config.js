@@ -18,10 +18,23 @@ window.TS_CONFIG = {
   /* official Circle USDC on Monad testnet (fixed chain fact) */
   usdcAddr: "0x534b2f3A21130d7a60830c2Df862319e593943A3",
 
-  /* seller operator addresses listed on the market page */
+  /* seller operator addresses listed on the market page — FALLBACK ONLY.
+     Registry enumeration is primary; models/prices always come from the
+     chain via getListing — this file carries no price data.
+     Snapshot 2026-10-13 (chainId 10143, Registry sellerCount=3):
+     · 0x38c2…Dd6  Kimi, active   — k3-256k 30/60/90 ·
+       kimi-for-coding-highspeed 15/30/45          (USDC per 1M tokens)
+     · 0xD617…Ba39 Qwen, active   — qwen3.8-max 2/4/36 ·
+       qwen3.8-flash 1/2/3                         (USDC per 1M tokens)
+     raw 6-decimal native values: 30000000/60000000/90000000 ·
+     15000000/30000000/45000000 · 2000000/4000000/36000000 ·
+     1000000/2000000/3000000.
+     The old Qwen wallet 0x1F1A…c687 was deactivated by its seller on
+     2026-10-09 (listing data retained, active=false) — deliberately NOT
+     listed here; the third on-chain seller is that inactive record. */
   sellers: [
     "0x38c26E1782b7E6F656Aa35EbF473e2ff0D718Dd6",
-    "0x1F1A8C5c1E56eD339C8021a0396095a724aca687",
+    "0xD6172dC960D1533e49A367253FF9Db01AE83Ba39",
   ],
 
   // ── M15 shared-relay custody (ACTIVE — live TEE deployment) ──

@@ -18,7 +18,7 @@
 | Qwen 真实上游调用 / 第二卖家 | ✅ 已发生（旧钱包下架后已由新钱包重新上架） | `qwen3.8-max` 有记录在案的真实 API 调用与**部分链上结算**（[qwen.md](./qwen.md)）；旧钱包 listing 已于 **2026-10-09 由卖家主动下架**（Registry.deactivate，tx [`0x6a91bb20…d7131f1b`](https://testnet.monadvision.com/tx/0x6a91bb203751aad1f29003b046dfb56965d901e08d372a4b5070fa9bd7131f1b)，block 69498784）。**重新上架**：新卖家钱包 `0xD617…Ba39` Registry active=True，端点同共享 Phala TEE 中继，模型 `qwen3.8-max`（2/4/36）+ `qwen3.8-flash`（1/2/3 USDC per 1M tokens），`settleDelegateOf` 与 Kimi 卖家相同（共享 TEE relay 签名地址）。**真实买家支付（2026-10-12 Escrow v3.2 实时读证）**：payment 6（5 USDC）Refunded、captured 0；payment 7 / payment 8 各 **Settled、captured 10.000000 USDC**。重上架逐笔 tx 哈希未存档——按 payment ID + 链上实时状态引用，不编造数字；Token Plan 条款限制（限交互式工具、转售需书面许可）如实保留（[qwen.md](./qwen.md) 合规章节） |
 | `qwen3.8-max` 实际使用 | ✅ 已发生（演示层面） | 有记录在案的真实调用与部分链上结算（[qwen.md](./qwen.md)、[docs/SUBMISSION.md](../SUBMISSION.md)「Demo status」段）；逐笔数字未存档为已知边界，不做超出记录的归因 |
 | 共享多租户中继源码 | ✅ 已实现 | 52/52 源码路径独立审计闭合（**内部 AI 辅助 + 独立 source-review 流程 PASS**；**未获正式第三方安全审计**；SOURCE AUDIT PASS ≠ DEPLOYMENT READY）；3 项发现修复复审 closed |
-| 测试基线 | ✅ 可复跑 | Forge 130 · relay 345 · CLI 151 · custody web 159 · 离线双卖家 E2E 30 通过 1 跳过（mock + Anvil，**非真实双上游生产证明**） |
+| 测试基线 | ✅ 可复跑 | Forge 130 · relay 454 · CLI 151 · custody web 159 · 离线双卖家 E2E 30 通过 1 跳过（mock + Anvil，**非真实双上游生产证明**） |
 | 公开镜像 | ✅ 已发布 | `docker.io/warku123/tokenshare-relay:m15-audited-20261007T015955Z`，index `sha256:5a8c33af444a35fad57cc1922f9d0a32f4327611734e4a10709ef12b044c66e0`（[Docker Hub](https://hub.docker.com/r/warku123/tokenshare-relay)，匿名可拉取） |
 | Monad Escrow v3.2 | ✅ 已部署 | testnet 10143，`0xe4D5Eb0dBDB6DB8063C07ECF7EDFcCdDB9Ad514c`，tx [`0xc7ca…afce4e`](https://testnet.monadscan.com/tx/0xc7ca3ac798e16ace9f4554df51912aed235753f360d7f0a6417b7b0523afce4e)，block 68854360，2026-10-07；Registry v4 与官方 USDC 不变 |
 | 真实 Phala TEE 部署（M15 共享多卖家中继） | ✅ 已部署 | 共享多卖家中继运行于 Phala TDX CVM（Phala Cloud，生产站配置）：`https://c30652f4833465adda9bdc7ac557e8b45e8e66c6-8787.dstack-pha-prod5.phala.network`，pinned signer `0x49CA3eADB3b8F23623f735918A6F2b945F60fb2D`（部署细节：[web/config.js](../../web/config.js) m15 relayOrigin + signer pins、[cre/README.md](../../cre/README.md)、[docs/CRE_DEMO_EVIDENCE.md](../CRE_DEMO_EVIDENCE.md)；relay/README-docker.md 的状态横幅早于 10-07 CVM 部署，不作引用）。卖家无需自建 TEE，应用层加密托管 upstream key；**未获正式第三方安全审计**（源码审计 PASS ≠ 部署就绪） |
@@ -30,11 +30,11 @@
 
 ## 提交检查（docs-only）
 
-- [ ] 两篇文章 + 本索引经独立审查通过后，**仅本目录三个 Markdown** 以 docs-only 方式提交到 GitHub 仓库（`github.com/warku123/TokenShare`）；不携带任何其他改动。
+- [ ] 两篇文章 + 本索引经独立审查通过后，**仅本目录五个 Markdown**（索引 `README.md` + 双语文章 `kimi.md` / `kimi_ch.md` / `qwen.md` / `qwen_ch.md`）以 docs-only 方式提交到 GitHub 仓库（`github.com/warku123/TokenShare`）；不携带任何其他改动。
 - [ ] **「published article」公开性要求待主办方确认**：公开 GitHub Markdown 是否满足奖项的「已发表文章」定义尚未确认，需用户登录奖项页面核对全文要求；确认前不把本目录标记为满足资格。
 - [ ] 视频与仓库要求按既有已核查结论引用（不再另行调研）：官方规则 v3（2026-09-03）明确 **testnet 部署可接受**（§4.1/§9.2），Track 04 交付物为 working product + GitHub 链接 + 约 3 分钟视频 + 文档；提交截止 2026-10-14 03:59 UTC；**提交前应重查**官方政策接口 `hackathon.monad.xyz/api/v1/policies/current`（主办方保留修改权）。
 - [ ] **公开 HEAD 与本地工作树的区分**：docs-only 提交时其他 M15 源码/配置改动尚未 commit——本文相对链接基于**本地工作树**，不代表 GitHub 公开 HEAD 已包含 v3.2/M15 相关文件内容；**链上事实（部署 tx 等）可经公开 explorer 独立核查**，本地工程记录与远端已同步内容需按此区分引用。
-- [ ] 敏感面检查通过：三份文件不含任何 API key、私钥或凭证值；曾在聊天中暴露过的凭证均已提示轮换。
+- [ ] 敏感面检查通过：五份文件（`README.md`、`kimi.md`、`kimi_ch.md`、`qwen.md`、`qwen_ch.md`）不含任何 API key、私钥或凭证值；曾在聊天中暴露过的凭证均已提示轮换。
 
 ## 已知缺口（诚实清单）
 

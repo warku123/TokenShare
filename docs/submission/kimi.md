@@ -52,6 +52,8 @@ This is a publicly verifiable, complete loop on the currently active Escrow v3.2
 
 Recomputing token by token from the Registry's at-block three-tier prices (cachedIn 3 / input 6 / output 9, per million tokens), the result matches the settlement amount and the refund amount — all three sides agree. The earlier 2026-09 records (the first run and the multi-call metered loop under the then-deployed generation) belong to a **historical deployment phase**; their contract versions and snapshot details are not repeated in this article, to avoid confusion with the current-generation evidence; for current-generation evidence, this section prevails.
 
+> **Price footnote (2026-10-13)**: the on-chain prices for this seller's models have since been adjusted to **10× the at-block prices quoted above** — `k3-256k` = 30/60/90 and `kimi-for-coding-highspeed` = 15/30/45 (cached input / input / output, USDC per 1M tokens, 6-decimal native units; effective with the 2026-10-13 pricing). The at-block figures above are kept unchanged as the historical record of payment 5's settlement — recomputing payment 5 against today's live `getPrice` will (as expected) not match.
+
 ## 4. Settlement Reconciliation Demo: What It Proves and What It Doesn't
 
 On 2026-10-08, we used a Chainlink CRE workflow to run a settlement reconciliation on this payment and anchored the result on-chain:

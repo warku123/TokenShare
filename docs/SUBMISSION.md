@@ -87,7 +87,7 @@ Seller flow (optional): enrolling a listing requires an upstream API key, which 
 
 Contracts for reference (chain 10143): Escrow 0xe4D5Eb0dBDB6DB8063C07ECF7EDFcCdDB9Ad514c · Registry 0xeD347cDc1761750E20C024459b38dedFb1462254 · USDC 0x534b2f3A21130d7a60830c2Df862319e593943A3. The relay runs in a Phala TDX TEE; its /sellers/{seller_address}/status endpoint shows each seller's custody-verified catalog match.
 
-Honest scope: the shared relay currently serves Kimi models (k3-256k, kimi-for-coding). Testnet only — no real funds.
+Honest scope: the shared relay currently serves the active Kimi listing (k3-256k, kimi-for-coding-highspeed) and the re-listed Qwen seller (qwen3.8-max, qwen3.8-flash); the original Qwen wallet's listing was deactivated by its seller on 2026-10-09 (see the 2026-10-13 addendum at the end of this file). Testnet only — no real funds.
 ```
 
 ## Measured character counts (paste fields above, measured after final edit)
@@ -98,7 +98,7 @@ Honest scope: the shared relay currently serves Kimi models (k3-256k, kimi-for-c
 | One-line description | ≤200 | 198 |
 | Description | ≤8000 | 5449 |
 | GTM strategy | none displayed (kept ~200–300 words) | 1941 chars / 279 words |
-| Judge access instructions (optional) | ≤8000 | 2082 chars / 298 words |
+| Judge access instructions (optional) | ≤8000 | 2297 chars / 329 words |
 | 中文摘要（optional） | — | 265 chars |
 
 ## 中文摘要（可选，仅说明用途；非表单必填字段）
@@ -113,3 +113,33 @@ TokenShare 把官方 LLM 套餐的闲置额度变成可计费服务：买家用 
 - Public repo: https://github.com/warku123/TokenShare
 - Live demo: https://tokenshare-web.vercel.app/
 - Video script: maintained locally, not tracked in the repo
+
+## 补记 — 2026-10-13 链上与生产状态同步（非表单字段，不随表单粘贴）
+
+> 本节记录 2026-10-13 链上实时读证（chainId 10143，Registry `0xeD347cDc1761750E20C024459b38dedFb1462254`）与生产镜像状态，供评审对账与后续更新；上方表单字段除「Judge access」内一句已过期的"当前在售"表述（已同步，字符数表随之更新）外未改动。
+
+**① Qwen 重上架（Registry sellerCount=3）**
+
+- 旧 Qwen 钱包 `0x1F1A8C5c1E56eD339C8021a0396095a724aca687` 已于 2026-10-09 由卖家主动下架（`Registry.deactivate`，tx [`0x6a91bb20…d7131f1b`](https://testnet.monadvision.com/tx/0x6a91bb203751aad1f29003b046dfb56965d901e08d372a4b5070fa9bd7131f1b)），链上 listing 数据保留、active=false，**非在售**。
+- 新 Qwen 钱包 `0xD6172dC960D1533e49A367253FF9Db01AE83Ba39` active=true，endpoint = 共享 TEE relay（与 Kimi 同一入口）；在售模型与现价（cached-input / input / output，USDC per 1M tokens，6dp native）：`qwen3.8-max` 2/4/36、`qwen3.8-flash` 1/2/3（raw：2000000/4000000/36000000 · 1000000/2000000/3000000）。
+- `settleDelegateOf(0xD617…Ba39)` = `0x49CA3eADB3b8F23623f735918A6F2b945F60fb2D`（共享 TEE relay 的 pinned signer，与 Kimi 卖家相同）。
+- Registry `sellerCount = 3` = Kimi（active）+ Qwen 旧钱包（inactive，数据保留）+ Qwen 新钱包（active）。
+
+**② 买家支付 payment 6/7/8（Escrow v3.2 实时读证）**
+
+- p6 = **Refunded**（captured 0）；p7 / p8 = **Settled**。
+- 语义注意：`capturedOf(7/8) = 10,000,000`（10 USDC，6dp）是 `settle()` 的**终态标记值，≠ 实收金额**；`/receipt/7`、`/receipt/8` 公开匿名可读，最后实际结算 `actualAmount` = **4510 / 5084**（6dp native，≈ 0.0045 / 0.0051 USDC；p8 与链上价目自洽）。
+
+**③ G5-1 生产镜像**
+
+- `warku123/tokenshare-relay:tee-prod-20261013`（digest `sha256:c600e16910c7…`，源码 = 本仓库 commit `4e4f10c`，含 F1–F5 加固）已在 CVM `tokenshare-m15-demo` 运行；signer / derivedAddress 不变 `0x49CA…fb2D`；public-logs / sysinfo / tcbinfo 全关。
+
+**④ relay /health `keystoreEntries=3`（已查明，正常）**
+
+- 三条 = Kimi + Qwen（旧钱包，已 deactivate 但 key 封套仍留存 keystore）+ Qwen（新钱包）；第三条来源即 ① 的新钱包注册。
+
+**⑤ 表单字段时效核对**
+
+- 文中无「视频待提交」类表述（视频脚本仍为本地维护、不入库，与现状一致）。
+- 「Judge access」字段内 testnet 合约地址表与本快照一致（Escrow `0xe4D5…514c` / Registry `0xeD34…2254` / USDC `0x534b…43A3` 未变）。
+- Kimi 卖家链上现价已调为 payment 5 结算块价的 10 倍（`k3-256k` = 30/60/90、`kimi-for-coding-highspeed` = 15/30/45，2026-10-13 口径）；at-block 数据保留为历史，见 [docs/submission/kimi.md](./submission/kimi.md) §3 脚注。
