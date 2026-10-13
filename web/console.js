@@ -429,11 +429,11 @@
         if (b.dataset.policyTitle) { b.removeAttribute("title"); delete b.dataset.policyTitle; }
       }
     }
-    /* consent steering hints (ACCOUNT FUNDS deposit + LOCK cards) — shown
-       only while a connected wallet hasn't ticked; hidden on tick and on
-       disconnect. Refresh rides THIS call — no polling. */
+    /* consent steering hints (seller SUBMIT + ACCOUNT FUNDS deposit + LOCK
+       cards) — shown only while a connected wallet hasn't ticked; hidden on
+       tick and on disconnect. Refresh rides THIS call — no polling. */
     const steer = !!state.address && !ok;
-    for (const id of ["b-dep-policy-hint", "b-lock-policy-hint"]) {
+    for (const id of ["s-submit-policy-hint", "b-dep-policy-hint", "b-lock-policy-hint"]) {
       const el = $(id);
       if (el) el.hidden = !steer;
     }
@@ -451,7 +451,7 @@
 
   /* steering hints → the anchor jump lands on the consent bar natively;
      on top we flash the bar + focus the checkbox so the target is obvious */
-  for (const id of ["b-dep-policy-hint", "b-lock-policy-hint"]) {
+  for (const id of ["s-submit-policy-hint", "b-dep-policy-hint", "b-lock-policy-hint"]) {
     const el = $(id);
     if (el) el.addEventListener("click", consentNudge);
   }

@@ -86,7 +86,7 @@
           <label class="fld"><span class="fld-lbl">DEPOSIT <i>USDC — approve → deposit</i></span>
             <input type="text" inputmode="decimal" id="b-dep-amt" placeholder="0.50"></label>
           <button class="btn btn-wide" id="b-dep-btn" type="button">[ APPROVE + DEPOSIT ]</button>
-          <a class="btn btn-sm btn-dep" id="b-dep-policy-hint" href="#policy-consent" hidden>[ TICK POLICY CONSENT ↑ ]</a>
+          <a class="btn btn-wide btn-dep" id="b-dep-policy-hint" href="#policy-consent" hidden>[ TICK POLICY CONSENT ↑ ]</a>
         </div>
         <div class="acct-act">
           <label class="fld"><span class="fld-lbl">WITHDRAW <i>USDC — available only</i></span>
@@ -202,6 +202,7 @@
           </label>
 
           <pre class="preview mono" id="s-preview" aria-label="transaction preview"></pre>
+          <a class="btn btn-wide btn-dep" id="s-submit-policy-hint" href="#policy-consent" hidden>[ TICK POLICY CONSENT ↑ ]</a>
           <button class="btn btn-wide" id="s-submit" type="button">[ SUBMIT TO REGISTRY ]</button>
           <div class="txbox" id="s-tx"></div>
         </div>
@@ -250,7 +251,7 @@
           <p class="fld-hint" id="b-lock-hint">≥ the seller's priciest-model estimate (in×200k + out×32k caps) — see per-model tiers on the market page</p>
           <p class="fld-hint err" id="b-lock-bal-note" hidden></p>
           <a class="btn btn-sm btn-dep" id="b-dep-first" href="#card-account" hidden>[ DEPOSIT FIRST ↑ ]</a>
-          <a class="btn btn-sm btn-dep" id="b-lock-policy-hint" href="#policy-consent" hidden>[ TICK POLICY CONSENT ↑ ]</a>
+          <a class="btn btn-wide btn-dep" id="b-lock-policy-hint" href="#policy-consent" hidden>[ TICK POLICY CONSENT ↑ ]</a>
           <button class="btn btn-wide" id="b-lock-btn" type="button">[ LOCK ]</button>
           <div class="txbox" id="b-lock-tx"></div>
           <div class="pid-box" id="b-payment-id"></div>

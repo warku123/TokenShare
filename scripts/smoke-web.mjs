@@ -232,9 +232,11 @@ try {
     "refund/withdraw/custody revokes 仍为普通 guard（退出路径不拦）");
   c("steer-hints",
     consoleHtml.includes('id="b-dep-policy-hint"') && consoleHtml.includes('id="b-lock-policy-hint"') &&
-    (consoleHtml.match(/href="#policy-consent"/g) || []).length === 2 &&
-    consoleJs.includes('"b-dep-policy-hint"') && consoleJs.includes('"b-lock-policy-hint"'),
-    "deposit/lock 卡各一条 [ TICK POLICY CONSENT ↑ ] 锚链 → #policy-consent · syncPolicyGate 显隐（无轮询）");
+    consoleHtml.includes('id="s-submit-policy-hint"') &&
+    (consoleHtml.match(/href="#policy-consent"/g) || []).length === 3 &&
+    consoleJs.includes('"b-dep-policy-hint"') && consoleJs.includes('"b-lock-policy-hint"') &&
+    consoleJs.includes('"s-submit-policy-hint"'),
+    "submit/deposit/lock 卡各一条 [ TICK POLICY CONSENT ↑ ] 锚链 → #policy-consent · syncPolicyGate 显隐（无轮询）");
 } catch (e) {
   rec("consent static-wiring", "FAIL", `读取失败: ${e.message}`);
 }
