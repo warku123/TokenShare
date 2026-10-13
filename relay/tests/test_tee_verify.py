@@ -297,11 +297,13 @@ def test_verify_collateral_flags_reflect_missing_blobs(
 
 
 def test_verify_unverified_quote_reports_false(tee_client: Any, monkeypatch) -> None:
-    """success=true but quote.verified=false → verified=false, no 500."""
+    """HTTP 200 + success=false → verified=false, no 500. Strict council-F5
+    mapping: the top-level success flag is the ONLY verdict gate —
+    quote.verified is not consulted."""
 
     def _unverified(request: httpx.Request) -> httpx.Response:
         payload = _verifier_payload()
-        payload["quote"]["verified"] = False
+        payload["success"] = False
         return httpx.Response(200, json=payload)
 
     _inject_verifier(monkeypatch, _unverified)
@@ -314,6 +316,70 @@ def test_verify_unverified_quote_reports_false(tee_client: Any, monkeypatch) -> 
     assert body["verifier_http_status"] == 200
     assert body["error"] is None
     assert body["checksum"] == "0x" + CHECKSUM
+
+
+def test_verify_string_true_is_not_a_verdict(tee_client: Any, monkeypatch) -> None:
+    """String "true" (top-level, quote-level, wherever) must never flip
+    verified — only a JSON boolean true counts (strict F5 mapping)."""
+
+    def _stringy(request: httpx.Request) -> httpx.Response:
+        payload = _verifier_payload()
+        payload["success"] = "true"
+        payload["verified"] = "true"
+        payload["quote"]["verified"] = "true"
+        return httpx.Response(200, json=payload)
+
+    _inject_verifier(monkeypatch, _stringy)
+
+    body = tee_client.get("/attestation/verify").json()
+
+    assert body["verified"] is False
+    assert body["verifier_http_status"] == 200
+
+
+def test_verify_non_200_with_success_true_is_not_verified(
+    tee_client: Any, monkeypatch
+) -> None:
+    """A success:true body carried over a NON-200 verifier answer is never
+    a verdict — verified stays false and the status is kept in error."""
+
+    def _weird(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(502, json=_verifier_payload())
+
+    _inject_verifier(monkeypatch, _weird)
+
+    body = tee_client.get("/attestation/verify").json()
+
+    assert body["verified"] is False
+    assert body["verifier_http_status"] == 502
+    assert body["error"] == "verifier HTTP 502"
+
+
+def test_verify_malformed_200_body_reports_error(tee_client: Any, monkeypatch) -> None:
+    """HTTP 200 with a malformed body (non-JSON HTML / non-object JSON) →
+    verified=false and the raw error text kept, never swallowed."""
+
+    def _html_ok(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>not json</html>")
+
+    _inject_verifier(monkeypatch, _html_ok)
+    body = tee_client.get("/attestation/verify").json()
+    assert body["verified"] is False
+    assert body["verifier_http_status"] == 200
+    assert body["error"] == "verifier returned non-JSON"
+
+
+def test_verify_non_object_200_body_reports_error(
+    tee_client: Any, monkeypatch
+) -> None:
+    def _list_ok(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[1, 2, 3])
+
+    _inject_verifier(monkeypatch, _list_ok)
+    body = tee_client.get("/attestation/verify").json()
+    assert body["verified"] is False
+    assert body["verifier_http_status"] == 200
+    assert body["error"] == "verifier returned a non-object payload"
 
 
 # --------------------------------------------------------------------------
@@ -352,7 +418,8 @@ def test_verify_upstream_403_cloudflare_challenge(tee_client: Any, monkeypatch) 
     body = resp.json()
     assert body["verified"] is False
     assert body["verifier_http_status"] == 403
-    assert body["error"] == "verifier HTTP 403"
+    # the verifier's own error text is carried through verbatim (never swallowed)
+    assert body["error"] == "verifier HTTP 403 — rate limited"
     assert body["checksum"] is None
 
 

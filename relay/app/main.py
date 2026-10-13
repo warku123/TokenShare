@@ -980,10 +980,24 @@ def _map_verify_response(
             for key in ("reportdata", "rtmr0", "rtmr1", "rtmr2", "rtmr3", "mrseam")
         }
 
-    success = bool(payload.get("success"))
-    # verified = success && verified. The cloud verifier reports the flag
-    # under quote.verified; a top-level "verified" is honored too.
-    verified = success and bool(payload.get("verified", quote.get("verified", False)))
+    # Strict verdict mapping (council F5): ONLY verifier HTTP 200 whose
+    # JSON body asserts success === true counts as verified. The string
+    # "true" (or any other truthy junk) is NOT a verdict, a non-200
+    # answer is never one, and quote.verified is not consulted. The
+    # verifier's own error text is carried through verbatim — never
+    # swallowed.
+    verified = resp.status_code == 200 and payload.get("success") is True
+    raw_error = payload.get("error")
+    raw_error = (
+        raw_error.strip()
+        if isinstance(raw_error, str) and raw_error.strip()
+        else None
+    )
+    error = None
+    if resp.status_code != 200:
+        error = f"verifier HTTP {resp.status_code}"
+        if raw_error:
+            error = f"{error} — {raw_error}"
 
     raw_provider = payload.get("node_provider")
     if isinstance(raw_provider, dict):
@@ -1010,7 +1024,7 @@ def _map_verify_response(
         node_provider=node_provider,
         quote_header=dict(header) if header is not None else None,
         quote_body=quote_body,
-        error=None if resp.status_code == 200 else f"verifier HTTP {resp.status_code}",
+        error=error,
     )
     out["collateral"] = _map_verify_collateral(payload)
     return out

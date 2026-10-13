@@ -1546,12 +1546,14 @@
          with the pin matrix above). TODO phase-2 promotion to hard
          pins is marked in common.js validateM15Config. */
       const cm = shared.codeMeasure;
-      if (cm && cm.pins && Object.keys(cm.pins).length) {
+      const cmPinKeys = cm && cm.pins ? Object.keys(cm.pins).filter((k) => cm.pins[k]) : [];
+      if (cm) {
         const qb = att.quoteBody && typeof att.quoteBody === "object" ? att.quoteBody : null;
-        for (const k of ["rtmr0", "rtmr1", "rtmr2", "rtmr3", "mrseam"]) {
-          const pin = cm.pins[k];
-          if (!pin) continue;
-          const live = qb && typeof qb[k] === "string" ? String(qb[k]).toLowerCase().replace(/^0x/, "") : "";
+        for (const k of cmPinKeys) {
+          /* both sides go through the shared normalizer — bare lowercase
+             hex, so a 0x prefix on either side can never flip a match */
+          const pin = T.custody.normalizeHex(cm.pins[k]);
+          const live = qb && typeof qb[k] === "string" ? T.custody.normalizeHex(qb[k]) : "";
           row(`code-${k}`, !!live && live === pin,
             live
               ? (live === pin
@@ -1559,6 +1561,14 @@
                 : `relay reports ${live.slice(0, 16)}… · pinned ${pin.slice(0, 16)}… — code fingerprint mismatch`)
               : `pinned ${pin.slice(0, 16)}… — the relay does not report this register — skipped`,
             { soft: true, warn: !!live && live !== pin });
+        }
+        if (!cmPinKeys.length) {
+          /* all-empty / all-malformed config: say so instead of a silent pass */
+          row("code-config", false,
+            cm.bad && cm.bad.length
+              ? "codeMeasure block present but every value is malformed — no usable code fingerprint configured — fix config.js"
+              : "codeMeasure block present but every value is unfilled — no code fingerprint configured",
+            { soft: true, warn: true });
         }
         if (cm.bad && cm.bad.length) {
           row("code-config", false,
@@ -1592,11 +1602,27 @@
     }
   }
 
+  /* F4 shell-injection guard: the ONLY value ever interpolated into the
+     verify curl is the relay-reported quote, and it must pass a strict
+     hex whitelist (optional 0x, hex chars only, even length) before it
+     may touch the command string. The URL is the compile-time constant
+     and is charset-checked too. Anything malformed → NO command (the
+     handler shows an error placeholder instead) — never an interpolation. */
+  const VERIFY_QUOTE_HEX = /^(0x)?[0-9a-fA-F]+$/;
+  const VERIFY_URL_SAFE = /^https:\/\/[A-Za-z0-9.\-_~/]+$/;
+  const buildVerifyCurl = (quote) => {
+    const q = String(quote == null ? "" : quote);
+    if (!VERIFY_QUOTE_HEX.test(q) || q.length % 2 !== 0) return null;
+    if (!VERIFY_URL_SAFE.test(ATTEST_VERIFY_URL)) return null;
+    return `curl -sS -X POST ${ATTEST_VERIFY_URL} -H 'Content-Type: application/json' -d '{"hex":"${q}"}'`;
+  };
+
   async function copyAttestCurl() {
     const n = $("sc-attest-curl-note");
     const say = (text, cls) => { if (n) { n.className = "model-verify-note" + (cls ? " " + cls : ""); n.textContent = text; } };
     if (!attestState.quote) { say("run VERIFY ATTESTATION LIVE first — no quote on hand", "warn"); return; }
-    const cmd = `curl -sS -X POST ${ATTEST_VERIFY_URL} -H 'Content-Type: application/json' -d '{"hex":"${attestState.quote}"}'`;
+    const cmd = buildVerifyCurl(attestState.quote);
+    if (!cmd) { say("the relay-reported quote is not a clean hex string — no command built, nothing copied", "err"); return; }
     try {
       await navigator.clipboard.writeText(cmd);
       say("verify curl copied — run it locally; expect success:true and quote.body.reportdata == the panel reportData", "ok");
@@ -1705,17 +1731,23 @@
       const rows = [];
       const row = (key, ok, detail, opt = {}) => rows.push({ key, ok: !!ok, detail: String(detail), soft: !!opt.soft, warn: !!opt.warn });
 
-      /* 1 — the cloud verdict itself */
-      row("cloud-verify", v.verified === true,
-        v.verified === true
-          ? `cloud verifier accepted the quote (verifier HTTP ${v.verifier_http_status ?? 200})`
+      /* 1 — the cloud verdict itself. Strict mapping: green needs
+         verified === true (a real boolean) AND verifier HTTP 200 — a
+         truthy string or a non-200 verifier answer is never a pass. */
+      const verdictOk = v.verified === true && Number(v.verifier_http_status) === 200;
+      row("cloud-verify", verdictOk,
+        verdictOk
+          ? `cloud verifier accepted the quote (verifier HTTP ${v.verifier_http_status})`
           : `cloud verifier rejected the quote (verifier HTTP ${v.verifier_http_status ?? "—"})${v.error ? ` — ${v.error}` : ""}`);
 
-      /* 2 — cross: the verdict must be about THIS relay's live quote */
+      /* 2 — cross: the verdict's reportdata vs the live /attestation
+         reportData. Honest scope: this is identity binding consistent
+         with the expected signer only — no nonce travels in either
+         field, so a replay is NOT excluded by this match. */
       const vRd = v.quote_body && typeof v.quote_body === "object" ? v.quote_body.reportdata : null;
       const rdOk = !!vRd && !!liveRd && normHex(vRd) === normHex(liveRd);
       row("reportdata-cross", rdOk,
-        rdOk ? "quote_body.reportdata === /attestation reportData — the verdict covers this live quote"
+        rdOk ? "quote_body.reportdata === /attestation reportData — identity binding consistent with the expected signer (no nonce · replay not excluded)"
           : `quote_body.reportdata ${vRd ? normHex(vRd).slice(0, 16) + "…" : "—"} ≠ /attestation reportData ${liveRd ? normHex(liveRd).slice(0, 16) + "…" : "—"}`);
 
       /* 3 — collateral: all four fetches must have landed */
@@ -1767,7 +1799,7 @@
         const reg = (k) => (typeof body[k] === "string" && body[k] ? body[k] : null);
         const shown = ["rtmr0", "rtmr1", "rtmr2", "rtmr3", "mrseam"].filter(reg);
         row("quote-body", true,
-          shown.length ? `${shown.map((k) => `${k}=${reg(k).slice(2, 10) || reg(k).slice(0, 10)}`).join(" · ")} — verifier-signed measurements` : "reported without measurement registers",
+          shown.length ? `${shown.map((k) => `${k}=${reg(k).slice(2, 10) || reg(k).slice(0, 10)}`).join(" · ")} — verifier-returned measurements (relayed by this relay; not signed to this panel)` : "reported without measurement registers",
           { soft: true });
       }
 
@@ -1802,7 +1834,8 @@
     const n = $("sc-attest-cloud-curl-note");
     const say = (text, cls) => { if (n) { n.className = "model-verify-note" + (cls ? " " + cls : ""); n.textContent = text; } };
     if (!attestState.quote) { say("run CLOUD VERIFY first — no quote on hand", "warn"); return; }
-    const cmd = `curl -sS -X POST ${ATTEST_VERIFY_URL} -H 'Content-Type: application/json' -d '{"hex":"${attestState.quote}"}'`;
+    const cmd = buildVerifyCurl(attestState.quote);
+    if (!cmd) { say("the relay-reported quote is not a clean hex string — no command built, nothing copied", "err"); return; }
     try {
       await navigator.clipboard.writeText(cmd);
       say("verify curl copied — run it locally; expect success:true and quote.body.reportdata == the panel reportData", "ok");

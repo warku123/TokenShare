@@ -963,6 +963,13 @@ window.TS = (() => {
        codeMeasure branch at the bottom of this function). */
     const HEX40 = /^0x[0-9a-fA-F]{40}$/;
     const HEX64 = /^(0x)?[0-9a-fA-F]{64}$/;
+    /* shared hex normalizer for every cross-source comparison: bare
+       lowercase hex — trims, lowercases and strips a leading 0x whether
+       or not the source carried one, so a prefix mismatch can never
+       flip a verdict (e.g. config pins vs relay-reported registers) */
+    function normalizeHex(v) {
+      return String(v == null ? "" : v).trim().toLowerCase().replace(/^0x/i, "");
+    }
     function validateM15Config(raw) {
       if (raw == null) return { ok: false, absent: true, missing: ["m15"], bad: [] };
       const missing = [], bad = [];
@@ -1008,7 +1015,7 @@ window.TS = (() => {
         for (const k of ["rtmr0", "rtmr1", "rtmr2", "rtmr3", "mrseam"]) {
           const v = cmRaw[k];
           if (v == null || v === "") continue; /* unconfigured → skip (phase-1 stage) */
-          if (HEX96.test(String(v))) cmPins[k] = String(v).toLowerCase();
+          if (HEX96.test(String(v))) cmPins[k] = normalizeHex(v); /* stored bare lowercase — comparison-side normalization */
           else cmBad.push(`codeMeasure.${k}`); /* soft signal only — never fail-closed */
         }
       }
@@ -1308,7 +1315,7 @@ window.TS = (() => {
     }
 
     return {
-      b64urlToBytes, bytesToHex, hexToBytes,
+      b64urlToBytes, bytesToHex, hexToBytes, normalizeHex,
       normalizeUpstreamUrl, normalizeRelayOrigin, validateM15Config,
       ENVELOPE_ALG, HKDF_SALT_STRING, HKDF_INFO_STRING, BODY_MAX_BYTES,
       buildCustodyAad, buildCustodySubmitMessage, buildCustodyRevokeMessage,

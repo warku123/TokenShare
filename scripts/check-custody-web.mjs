@@ -804,14 +804,17 @@ console.log("\n== S. codeMeasure two-stage pins ==");
     "S1 web/config.js m15 ships the codeMeasure structure (rtmr0-3 · mrseam), every value UNFILLED (null)",
     block ? vals.map(([k, v]) => `${k}=${v}`).join(", ") : "codeMeasure block missing");
 
-  /* 2 — the validator carries the HEX96 branch + the phase-2 marker */
+  /* 2 — the validator carries the HEX96 branch + the phase-2 marker.
+     Pins are stored through the shared normalizeHex (bare lowercase) so
+     the console-side comparison is prefix-insensitive (council F1). */
   ok(commonSrc.includes("const HEX96 = /^0x[0-9a-fA-F]{96}$/") &&
-      commonSrc.includes("cmPins[k] = String(v).toLowerCase()") &&
+      commonSrc.includes("cmPins[k] = normalizeHex(v)") &&
+      commonSrc.includes("function normalizeHex(v)") &&
       commonSrc.includes("cmBad.push(`codeMeasure.${k}`)") &&
       commonSrc.includes("TODO phase-2") &&
       commonSrc.includes("codeMeasure: cmRaw ? { pins: cmPins, bad: cmBad } : null") &&
       !/need\(HEX96\.test\(raw\.codeMeasure/.test(commonSrc),
-    "S2 common.js validates codeMeasure as SOFT HEX96 pins + carries the TODO phase-2 marker (never in `missing`)");
+    "S2 common.js validates codeMeasure as SOFT HEX96 pins stored bare-lowercase via the shared normalizeHex + carries the TODO phase-2 marker (never in `missing`)");
 
   /* 3 — runtime two-stage semantics on the real validator */
   const base = TEST_CFG.m15;
@@ -819,20 +822,45 @@ console.log("\n== S. codeMeasure two-stage pins ==");
   const pin = "0x" + "ab".repeat(48);
   const bad = T.custody.validateM15Config({ ...base, codeMeasure: { rtmr0: "0x12", mrseam: pin } });
   const noCm = T.custody.validateM15Config(base);
+  const upper = T.custody.validateM15Config({ ...base, codeMeasure: { mrseam: ("0x" + "AB".repeat(48)) } });
   ok(un.ok && un.cfg.codeMeasure && Object.keys(un.cfg.codeMeasure.pins).length === 0 &&
       bad.ok && bad.cfg.codeMeasure.bad.join(",") === "codeMeasure.rtmr0" &&
-      bad.cfg.codeMeasure.pins.mrseam === pin &&
+      bad.cfg.codeMeasure.pins.mrseam === pin.replace(/^0x/, "") &&
+      upper.ok && upper.cfg.codeMeasure.pins.mrseam === pin.replace(/^0x/, "") &&
+      T.custody.normalizeHex("0X" + "AB".repeat(48)) === "ab".repeat(48) &&
       noCm.ok && noCm.cfg.codeMeasure === null &&
       !(bad.missing || []).some((m) => String(m).startsWith("codeMeasure")),
-    "S3 two-stage semantics: unfilled → skipped · malformed → soft `bad` (ok:true, never in `missing`) · absent → null",
+    "S3 two-stage semantics: unfilled → skipped · malformed → soft `bad` (ok:true, never in `missing`) · absent → null · pins stored bare-lowercase (0x/0X stripped, case folded)",
     `unfilled pins=${Object.keys(un.cfg.codeMeasure.pins).length} · bad=${bad.cfg.codeMeasure.bad.join(",")} · absent=${noCm.cfg.codeMeasure}`);
 
   /* 4 — console.js renders the soft evidence row only, off pinsOk */
   ok(js.includes("shared.codeMeasure") && js.includes("att.quoteBody") &&
       js.includes("code fingerprint mismatch") && js.includes("row(`code-${k}`") &&
-      /const cm = shared\.codeMeasure;[\s\S]{0,900}?\{ soft: true, warn: !!live && live !== pin \}\)/.test(js) &&
-      !/const cm = shared\.codeMeasure;[\s\S]{0,900}?pinsOk/.test(js),
+      /const cm = shared\.codeMeasure;[\s\S]{0,1400}?\{ soft: true, warn: !!live && live !== pin \}\)/.test(js) &&
+      !/const cm = shared\.codeMeasure;[\s\S]{0,1400}?pinsOk/.test(js),
     "S4 console.js compares configured pins vs quoteBody as a SOFT row — no pinsOk inside the codeMeasure block");
+
+  /* 5 — council F1/F4/F5(web): prefix-insensitive compare via the shared
+     normalizer · all-empty/all-malformed config is NOT silent · copy-curl
+     quote guarded by a hex whitelist · cloud-verify green needs verified
+     === true AND verifier HTTP 200 */
+  ok(/T\.custody\.normalizeHex\(cm\.pins\[k\]\)/.test(js) &&
+      /T\.custody\.normalizeHex\(qb\[k\]\)/.test(js) &&
+      js.includes("every value is malformed — no usable code fingerprint configured") &&
+      js.includes("every value is unfilled — no code fingerprint configured") &&
+      js.includes("const cmPinKeys") &&
+      js.includes("if (!cmPinKeys.length) {"),
+    "S5a console.js compares both sides via T.custody.normalizeHex and shows a no-usable-pins warning when the codeMeasure block is all-empty/all-malformed (never a silent pass)");
+  ok(js.includes("const buildVerifyCurl") &&
+      js.includes("/^(0x)?[0-9a-fA-F]+$/") &&
+      /const cmd = buildVerifyCurl\(attestState\.quote\);\s*\n\s*if \(!cmd\) \{ say\(/.test(js) &&
+      !js.includes('{"hex":"${attestState.quote}"}'),
+    "S5b copy-curl builds the command only through the hex-whitelisted buildVerifyCurl — no raw quote interpolation anywhere");
+  ok(js.includes("const verdictOk = v.verified === true && Number(v.verifier_http_status) === 200") &&
+      js.includes('row("cloud-verify", verdictOk') &&
+      js.includes("verifier-returned measurements (relayed by this relay") &&
+      js.includes("identity binding consistent with the expected signer (no nonce · replay not excluded)"),
+    "S5c cloud-verify green = verified===true ∧ verifier HTTP 200 · honest wording: verifier-returned (relayed) measurements · reportdata cross = identity binding only");
 }
 
 /* ── P. policy consent lifecycle (real T.policyConsent module, stubbed
