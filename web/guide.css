@@ -1,0 +1,112 @@
+/* ═══ TokenShare — HOW TO USE (guide.html) ═══
+   Page-scoped chrome only: role tabs active state, step lists, the flow
+   diagrams, callouts. Tokens / topbar / .tabs / .card / .btn all live in
+   styles.css — nothing in this file is global. */
+
+.guide-page main { padding: 56px 0 72px; }
+
+/* role switcher — .tabs/.tab-btn chrome is shared with the console; the
+   active state keys off aria-selected (JS-owned), never a parallel class */
+.g-tabs { margin-bottom: 10px; }
+.g-tabs .tab-btn { text-decoration: none; display: inline-block; }
+.g-tabs .tab-btn[aria-selected="true"] {
+  color: var(--green); border-bottom-color: var(--green); background: rgba(61,220,151,0.05);
+}
+.g-role-note {
+  font-family: var(--mono); font-size: 10.5px; color: var(--faint);
+  letter-spacing: 0.08em; margin: 0 0 26px;
+}
+
+.g-panel { display: flex; flex-direction: column; gap: 18px; }
+.g-panel:focus-visible { outline: 1px solid var(--green-dim); outline-offset: 6px; }
+
+/* numbered steps — counter-owned, no manual numbers to rot */
+.g-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 16px; counter-reset: gstep; }
+.g-steps > li { position: relative; padding-left: 46px; counter-increment: gstep; }
+.g-steps > li::before {
+  content: counter(gstep, decimal-leading-zero);
+  position: absolute; left: 0; top: 3px;
+  font-family: var(--mono); font-size: 12px; color: var(--green); letter-spacing: 0.1em;
+}
+.g-steps h3 {
+  font-family: var(--mono); font-size: 12px; font-weight: 700;
+  letter-spacing: 0.14em; color: var(--text); margin: 0 0 6px;
+}
+.g-steps p { margin: 0; color: var(--dim); font-size: 13.5px; line-height: 1.75; max-width: 76ch; }
+.g-steps p + p { margin-top: 6px; }
+.g-steps a { color: var(--text); border-bottom: 1px dashed var(--line-hi); text-decoration: none; }
+.g-steps a:hover { color: var(--green); border-bottom-color: var(--green-dim); }
+
+/* flow diagrams — an ordered list styled as boxes + arrows; the list
+   itself is the text equivalent (AT announces the sequence), the arrows
+   are decorative with empty alt text */
+.g-flow { list-style: none; margin: 0; padding: 0; }
+.g-flow > li {
+  border: 1px solid var(--line); background: var(--bg-2); padding: 10px 14px;
+  font-family: var(--mono); font-size: 12px; color: var(--text); letter-spacing: 0.04em;
+  position: relative;
+}
+.g-flow > li b { color: var(--green); font-weight: 700; }
+.g-flow > li .g-d { display: block; color: var(--dim); font-size: 11px; margin-top: 3px; letter-spacing: 0.02em; }
+.g-flow > li + li { margin-top: 24px; }
+.g-flow > li + li::before {
+  content: "↓" / "";
+  position: absolute; top: -24px; left: 50%; transform: translateX(-50%);
+  height: 24px; line-height: 24px; color: var(--green-dim); font-size: 14px;
+}
+/* fork: two call paths side by side, stacked on small screens */
+.g-flow > li.g-fork { border: none; background: none; padding: 0; }
+.g-branches { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.g-branch { border: 1px dashed var(--line-hi); padding: 12px; }
+.g-branch-h {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.16em;
+  color: var(--amber); margin: 0 0 10px;
+}
+.g-branch ol { list-style: none; margin: 0; padding: 0; }
+.g-branch li {
+  border: 1px solid var(--line); background: var(--bg-2);
+  padding: 8px 10px; font-family: var(--mono); font-size: 11.5px;
+  color: var(--text); position: relative;
+}
+.g-branch li .g-d { display: block; color: var(--dim); font-size: 10.5px; margin-top: 3px; }
+.g-branch li + li { margin-top: 18px; }
+.g-branch li + li::before {
+  content: "↓" / "";
+  position: absolute; top: -18px; left: 50%; transform: translateX(-50%);
+  height: 18px; line-height: 18px; color: var(--green-dim);
+}
+/* outcomes row under the buyer fork */
+.g-out { border-style: dashed !important; }
+
+/* callout — same voice as the console wallet-note */
+.g-note {
+  border: 1px dashed rgba(232,180,74,0.35); background: rgba(232,180,74,0.04);
+  color: var(--amber); font-family: var(--mono); font-size: 11px; line-height: 1.7;
+  padding: 9px 12px; margin: 14px 0 0;
+}
+.g-note b { color: var(--amber); }
+
+/* curl block — reuse the tx-preview box, just tighter */
+.g-curl { margin: 8px 0 0; min-height: 0; user-select: all; }
+
+/* troubleshooting — plain dashed bullets, error codes in mono */
+.g-tshoot { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.g-tshoot li { font-size: 13px; color: var(--dim); line-height: 1.7; padding-left: 16px; position: relative; }
+.g-tshoot li::before { content: "·"; position: absolute; left: 4px; color: var(--green); }
+.g-tshoot b { color: var(--text); font-weight: 400; font-family: var(--mono); font-size: 12px; }
+
+/* panel-tail CTA row */
+.g-cta { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 4px; }
+
+@media (max-width: 700px) {
+  .g-branches { grid-template-columns: 1fr; }
+  .g-tabs { width: 100%; }
+  .g-tabs .tab-btn { flex: 1; text-align: center; padding-left: 10px; padding-right: 10px; }
+}
+@media (max-width: 360px) {
+  .g-steps > li { padding-left: 38px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .guide-page .tab-btn, .guide-page a, .guide-page .card { transition: none; }
+}

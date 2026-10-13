@@ -7,6 +7,18 @@
 <title>TokenShare — Official-plan LLM quota, pay per call</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="styles.css">
+<style>
+/* hero CTA row — index.html only: at desktop the three actions stay on one
+   line ([ OPEN CONSOLE ] [ BROWSE FULL MARKET ] [ HOW TO USE ]). The row is
+   sized to its content and overflows the narrow copy column into the empty
+   space below the terminal card (the terminal is shorter than the copy);
+   body has overflow-x:hidden and the row tops out ~660px, so no page
+   scroll/clip. ≤1020px the grid is single-column (row fits as-is); ≤700px
+   the existing full-width stacked buttons rule wins. */
+@media (min-width: 1021px) {
+  .hero-cta { width: max-content; }
+}
+</style>
 </head>
 <body>
 
@@ -56,6 +68,7 @@
       <div class="hero-cta rv" style="--d:.2s">
         <a class="btn" href="console.html#buyer">[ OPEN CONSOLE ]</a>
         <a class="btn btn-ghost" href="market.html">[ BROWSE FULL MARKET ]</a>
+        <a class="btn btn-ghost" href="guide.html">[ HOW TO USE ]</a>
       </div>
       <dl class="hero-stats rv" style="--d:.25s">
         <div><dt>LISTINGS ON-CHAIN</dt><dd id="hstat-listings">—</dd></div>

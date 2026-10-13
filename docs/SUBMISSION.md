@@ -31,7 +31,7 @@ Power users of premium LLM plans (Kimi, Qwen, and similar OpenAI-compatible prov
 THE SOLUTION
 TokenShare is an open protocol plus a working reference implementation, deployed on Monad testnet (chain 10143, USDC with 6 decimals):
 
-1. On-chain budgets. A buyer locks a USDC budget in an Escrow contract, scoped to a payment. Funds are released only under the contract's state / TTL / settlement / refund rules; a payment can be split into partial captures and settled at the end (that is how the demo payments ran). The buyer-facing OpenAI-compatible credential is explicitly revocable — separately from the budget lock.
+1. On-chain budgets. A buyer locks a USDC budget in an Escrow contract, scoped to a payment. Funds are released only under the contract's state / TTL / settlement / refund rules; a payment can be split into partial captures and settled at the end (that is how the demo payments ran), and while a payment remains Locked its unconsumed remainder becomes refundable after the TTL — a settled payment is final. The buyer-facing OpenAI-compatible credential is explicitly revocable — separately from the budget lock.
 2. On-chain price catalog. The Registry publishes each seller's per-model price row — cached-input / input / output, per 1M tokens — on-chain. It is the shared reference for what a call should cost; it is NOT an independently verified upstream cost, usage record, or lock-time quote, and the receipt's math is reproducible without proving true cost.
 3. A shared multi-seller relay on Phala TDX. Sellers enroll their upstream key through encrypted key management; the relay routes requests to official endpoints only and does not require sellers to self-host anything (an optional self-host single-seller mode exists). Requests go through the payment's registered seller (payment.seller), never to an arbitrary wallet.
 4. Signer-authenticated billing receipts. Every call produces an EIP-712 signed receipt (paymentId, token tiers, actual amount, upstream host, model). These are signer-authenticated billing assertions about the seller-side record — not independent token-count proof; the chain-side catalog is what a buyer cross-checks them against.
@@ -41,14 +41,14 @@ WHY MONAD: per-call billing is practical at this scale on an EVM environment des
 
 Usefulness: a buyer gets OpenAI-compatible credentials that cannot spend beyond the locked budget, with a receipt trail they can reconcile against on-chain prices; a seller converts idle plan capacity without sharing raw keys or running their own gateway; both sides see the same numbers.
 
-Demo status (Monad testnet, no real-money claims): real Kimi calls (k3-256k, kimi-for-coding) and a Qwen call (qwen3.8-max) plus partial settlements are recorded. In ONE completed Chainlink CRE settlement-audit run (local simulation), the LATEST receipt of the demo payment (payment 5) was compared against the exact settle-block Registry prices and the MATCH verdict was anchored on-chain through a permissionless testnet mock forwarder — a workflow-simulation result, NOT a production Chainlink DON deployment; it says nothing about other or future receipts, cumulative usage, lock-time quotes, or independently-proved token usage.
+Demo status (Monad testnet, no real-money claims): real Kimi calls (k3-256k, kimi-for-coding) and a Qwen call (qwen3.8-max) plus partial settlements are recorded; the currently active listings are Kimi (k3-256k, kimi-for-coding-highspeed) and Qwen (qwen3.8-max, qwen3.8-flash — re-listed on a fresh seller wallet after its seller deactivated the original wallet's listing). In ONE completed Chainlink CRE settlement-audit run (local simulation), the LATEST receipt of the demo payment (payment 5) was compared against the exact settle-block Registry prices and the MATCH verdict was anchored on-chain through a permissionless testnet mock forwarder — a workflow-simulation result, NOT a production Chainlink DON deployment; it says nothing about other or future receipts, cumulative usage, lock-time quotes, or independently-proved token usage.
 
 Compliance: upstream sellers remain responsible for complying with their provider's terms; resale authorization is not established by this project.
 
 PRIOR ART AND DIFFERENTIATION
 Demand for idle subscription capacity is already proven commercially: DeRouter (derouter.ai, self-described as operating since 2025) pools providers' Claude/Codex subscription accounts behind a centralized relay with custodial prepaid credits, and self-reports 9,000+ users with USDC payouts on Solana; its own whitepaper concedes the operator-absconding risk is not cryptographically prevented, and TEE execution remains a roadmap item. PayPerQ's open-source enclave proxy (ppq-enclave-proxy) runs a similar TEE-proxy pattern in production for its own gateway — but to protect query-content privacy, not to run a capacity marketplace. TokenShare targets the gap between them: a marketplace whose settlement does not require trusting the operator — non-custodial per-call escrow with TTL refunds, seller-consented encrypted custody of keys routed only to official endpoints (no account pooling), and live Phala TDX attestation anchored on-chain.
 
-Links: repo https://github.com/warku123/TokenShare — live demo https://tokenshare-web.vercel.app/ — logo assets/tokenshare-logo.png — video script maintained locally (not tracked in the repo; ≤3 minutes, submission requirement).
+Links: repo https://github.com/warku123/TokenShare — live demo https://tokenshare-web.vercel.app/ — step-by-step buyer/seller walkthroughs https://tokenshare-web.vercel.app/guide.html — logo assets/tokenshare-logo.png — video script maintained locally (not tracked in the repo; ≤3 minutes, submission requirement).
 ```
 
 ## Go-to-market / user acquisition strategy — paste field
@@ -72,18 +72,17 @@ Proposed production-readiness considerations: provider permissions verified per 
 ```text
 TokenShare judge access — no login, no password, no shared account exist. Use YOUR OWN testnet wallet; never connect real mainnet funds — this deployment is Monad testnet only.
 
-Product: https://tokenshare-web.vercel.app/
-
-WITHOUT a wallet: open the market page (https://tokenshare-web.vercel.app/market.html). It is browseable anonymously and shows live on-chain seller listings, per-model three-tier prices read from the Registry contract, and relay health; explorer links on the page open the referenced on-chain state.
+Product: https://tokenshare-web.vercel.app/ — step-by-step walkthroughs: HOW TO USE https://tokenshare-web.vercel.app/guide.html (role switch at the top; opens on the buyer guide; direct links /guide.html#buyer and /guide.html#seller; linked beside BROWSE FULL MARKET on the homepage and from the console intro). No wallet? The market page (https://tokenshare-web.vercel.app/market.html) is browseable anonymously: live on-chain seller listings, per-model three-tier prices read from the Registry contract, relay health, explorer links.
 
 WITH a wallet (Monad testnet, chain 10143, RPC https://testnet-rpc.monad.xyz):
-1. Connect via the wallet picker (EIP-6963 — picks up installed wallets). The wallet may show its own security prompt during connect; that is a wallet-side prompt, not ours.
-2. Tick the Policy & Risks consent box at the top of the console (required before paid actions).
-3. Get testnet MON from the faucet — the console wallet bar links it when your gas runs low (https://faucet.monad.xyz); test USDC is optional via https://faucet.circle.com (pick Monad testnet).
-4. Buyer flow: DEPOSIT USDC into Escrow → LOCK against an active listing → CALL DEMO (SIGN + CALL) returns a real model reply with official usage plus an EIP-712 signed receipt; the console verifies the receipt, and the settle transaction is viewable on the explorer.
-5. Pacing: payment locks carry a TTL, and the shared relay's upstream (Kimi) is rate-limited to 3 requests/min — wait ~20 seconds between demo calls.
+1. Connect via the wallet picker (EIP-6963 — picks up installed wallets; any security prompt is wallet-side, not ours). Tick the Policy & Risks consent box at the top of the console — paid actions stay gated until you do (the full-width [ TICK POLICY CONSENT ↑ ] hints next to the DEPOSIT, LOCK and seller SUBMIT actions point to it). Consent is per-wallet for the session: disconnecting clears it for that wallet, switching wallets keeps each wallet's own; it is a UX gate, not a chain transaction.
+2. Fund BOTH tokens: testnet MON for gas (https://faucet.monad.xyz) and testnet USDC — USDC is REQUIRED for DEPOSIT/LOCK, not optional (https://faucet.circle.com — select token USDC, network Monad Testnet).
+3. Buyer flow: DEPOSIT USDC into Escrow → pick an active seller/model on the market page → LOCK against it in the console: an amount above the seller's minimum per-call estimate (shown on the LOCK form) + a TTL. A lock is a fixed budget — depositing cannot raise its cap; if it runs short, open a new, funded lock right away (no need to wait for the old one) — the old lock's Locked remainder becomes refundable after its TTL.
+4. Call the lock either way: [ MINT API KEY ] — one off-chain wallet signature mints a scoped, revocable credential (tsk1.…, shown once, no per-call popups, revoked explicitly via [ REVOKE ]) for any OpenAI-compatible client — or [ CALL DEMO ] — each request signed fresh in the wallet (the demo never takes the minted key). CALL DEMO returns a real model reply with official usage plus an EIP-712 signed receipt the console verifies, and the settle transaction is viewable on the explorer; API clients get the same signed billing receipt per call — a billing assertion to reconcile against on-chain prices, not independent proof of token usage. [ USAGE ] shows max / captured / remaining; [ API KEYS ] filters ALL / ACTIVE / EXPIRED / REVOKED (six per page) — the status badge is local clock + revocation bookkeeping, not an on-chain proof.
+5. Refunds: while a payment is still Locked, the unconsumed remainder becomes refundable after its TTL; a Settled payment is final.
+6. Pacing: locks carry a TTL and the shared relay's Kimi upstream is rate-limited to 3 requests/min — wait ~20 seconds between demo calls.
 
-Seller flow (optional): enrolling a listing requires an upstream API key, which judges typically do not have — the demo video shows the seller path.
+Seller flow (optional): no self-hosting — the shared Phala TDX relay holds the encrypted key. Flow: seal your upstream API key encrypted in the browser → check the served catalog → register the listing on-chain → approve the settle delegate (walkthrough: https://tokenshare-web.vercel.app/guide.html#seller). Judges typically lack an upstream API key — the demo video shows the seller path.
 
 Contracts for reference (chain 10143): Escrow 0xe4D5Eb0dBDB6DB8063C07ECF7EDFcCdDB9Ad514c · Registry 0xeD347cDc1761750E20C024459b38dedFb1462254 · USDC 0x534b2f3A21130d7a60830c2Df862319e593943A3. The relay runs in a Phala TDX TEE; its /sellers/{seller_address}/status endpoint shows each seller's custody-verified catalog match.
 
@@ -96,9 +95,9 @@ Honest scope: the shared relay currently serves the active Kimi listing (k3-256k
 | --- | --- | --- |
 | Project name | ≤120 | 10 |
 | One-line description | ≤200 | 198 |
-| Description | ≤8000 | 5449 |
+| Description | ≤8000 | 5869 chars / 831 words |
 | GTM strategy | none displayed (kept ~200–300 words) | 1941 chars / 279 words |
-| Judge access instructions (optional) | ≤8000 | 2297 chars / 329 words |
+| Judge access instructions (optional) | ≤8000 | 4095 chars / 625 words |
 | 中文摘要（optional） | — | 265 chars |
 
 ## 中文摘要（可选，仅说明用途；非表单必填字段）
@@ -116,7 +115,7 @@ TokenShare 把官方 LLM 套餐的闲置额度变成可计费服务：买家用 
 
 ## 补记 — 2026-10-13 链上与生产状态同步（非表单字段，不随表单粘贴）
 
-> 本节记录 2026-10-13 链上实时读证（chainId 10143，Registry `0xeD347cDc1761750E20C024459b38dedFb1462254`）与生产镜像状态，供评审对账与后续更新；上方表单字段除「Judge access」内一句已过期的"当前在售"表述（已同步，字符数表随之更新）外未改动。
+> 本节记录 2026-10-13 链上实时读证（chainId 10143，Registry `0xeD347cDc1761750E20C024459b38dedFb1462254`）与生产镜像状态，供评审对账与后续更新。表单字段当日经两次同步：第一轮仅更正「Judge access」内一句过期的"当前在售"表述；第二轮（本次）按新教程页实质重写「Judge access」的买家/卖家步骤（faucet 双币种必取、lock 最小估算+TTL 且不可追加、tsk1. 凭证两种调用路径、USAGE/状态过滤、consent 行为、退款终态语义、教程页入口），并在「Description」同步当前在售目录与退款终态、Links 增加教程链接；全部字段字符数已实测更新（见上表）。下方 ①–⑤ 为第一轮记录，保持原文。
 
 **① Qwen 重上架（Registry sellerCount=3）**
 
@@ -143,3 +142,9 @@ TokenShare 把官方 LLM 套餐的闲置额度变成可计费服务：买家用 
 - 文中无「视频待提交」类表述（视频脚本仍为本地维护、不入库，与现状一致）。
 - 「Judge access」字段内 testnet 合约地址表与本快照一致（Escrow `0xe4D5…514c` / Registry `0xeD34…2254` / USDC `0x534b…43A3` 未变）。
 - Kimi 卖家链上现价已调为 payment 5 结算块价的 10 倍（`k3-256k` = 30/60/90、`kimi-for-coding-highspeed` = 15/30/45，2026-10-13 口径）；at-block 数据保留为历史，见 [docs/submission/kimi.md](./submission/kimi.md) §3 脚注。
+
+**⑥ 前端教程页（同版本发布说明）**
+
+- 新增静态页 `web/guide.html`（无钱包连接、无链上读数）：顶部 BUYER/SELLER 角色切换，深链 `guide.html#buyer` / `guide.html#seller`，默认 buyer、单面板可见（无 JS 时两段全渲染）；buyer 路径 DEPOSIT → 选卖家 LOCK（最小每调估算 + TTL）→ MINT API KEY（`tsk1.…`，一次链下签名、仅展示一次、无逐调用弹窗、可显式撤销）或 CALL DEMO（逐调用钱包签名，不取 minted key）；USAGE 与 API KEYS 状态过滤（ALL/ACTIVE/EXPIRED/REVOKED，每页 6 条；badge 为本地时钟 + 撤销记账，非链上证明）；402 归因与排查（余额低于最小估算 / payment 过期或非 Locked / 卖家或买家不符）；seller 路径加密托管 key → catalog 核对 → 链上注册 → 授权 settle delegate（共享 TEE，无需自建）。
+- 入口：首页 BROWSE FULL MARKET 按钮旁与 console 简介处均链接教程页。
+- 发布状态：该页与本次提交材料**同版本发布**；成文时尚未独立复核其线上状态——此处仅描述能力，不作为已公开验证的证据，不附 commit/验证输出。

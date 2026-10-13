@@ -7,7 +7,7 @@
      node scripts/smoke-web.mjs           # 或: node scripts/smoke-web.mjs http://other:port
 
    检查项:
-     1. 四页 fetch 200（/, /market.html, /console.html, /policy.html）
+     1. 五页 fetch 200（/, /market.html, /console.html, /policy.html, /guide.html）
      2. 每页关键 DOM id 存在（grep html 源码）
      3. index/market/console 的 POLICY 导航 href="policy.html" 存在（includes 机制）
      4. web/*.js 语法全过（node --check 子进程）
@@ -25,6 +25,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, dirname, relative, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import vm from "node:vm";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const WEB = join(ROOT, "web");
@@ -50,6 +51,10 @@ const REQUIRED_IDS = {
      注意勿把页面文案写进检查——结构 id 即可，文案改动不应导致冒烟误报。 */
   "/policy.html": [
     "topnav",
+  ],
+  /* guide.html 为静态说明页（role tab 交互由下方 5f 行为块用 DOM stub 真跑） */
+  "/guide.html": [
+    "topnav", "guide-tab-buyer", "guide-tab-seller", "guide-panel-buyer", "guide-panel-seller",
   ],
 };
 const PAGES = Object.keys(REQUIRED_IDS);
@@ -93,9 +98,9 @@ for (const path of ["/index.html", "/market.html", "/console.html"]) {
     'href="policy.html"');
 }
 
-/* ── 3b. 两级导航回归：四页全局导航一致（顺序 OVERVIEW→FULL MARKET→CONSOLE→POLICY，
-        每页恰好一个 aria-current="page" 且指向本页）；章节条仅 index 持有，
-        app.js scrollspy 只标章节链接（aria-current="location"）── */
+/* ── 3b. 两级导航回归：五页全局导航一致（前四序 OVERVIEW→FULL MARKET→CONSOLE→POLICY，
+        guide 自身追加第五链 HOW TO USE；每页恰好一个 aria-current="page" 且指向本页）；
+        章节条仅 index 持有，app.js scrollspy 只标章节链接（aria-current="location"）── */
 try {
   const GLOBAL_ORDER = ["index.html", "market.html", "console.html", "policy.html"];
   for (const path of PAGES) {
@@ -320,6 +325,74 @@ try {
     consoleJs.includes("KEY_PAGE_SIZE") && consoleJs.includes("keyListState")
       ? "PASS" : "FAIL",
     "console.html #apikeys-pager（prev/info/next）· console.js KEY_PAGE_SIZE + keyListState(filter,page) 模块态");
+}
+
+/* ── 5f. HOW TO USE guide：入口链接 + tab 结构 + guide.js 真实行为
+        （node:vm + 迷你 DOM stub 跑发货脚本本身——不用静态 includes 冒充交互）── */
+{
+  const guideHtml = pages.get("/guide.html") || "";
+  const indexHtml = pages.get("/index.html") || "";
+  const consoleHtmlG = pages.get("/console.html") || "";
+  rec("guide-entries",
+    indexHtml.includes('href="guide.html"') && consoleHtmlG.includes('href="guide.html"') ? "PASS" : "FAIL",
+    "index hero [ HOW TO USE ] CTA（BROWSE FULL MARKET 右侧）+ console 页头 HOW TO USE 链接");
+  rec("guide-tabs-structure",
+    guideHtml.includes('role="tablist"') && guideHtml.includes('role="tab"') &&
+    guideHtml.includes('aria-controls="guide-panel-buyer"') && guideHtml.includes('aria-controls="guide-panel-seller"') &&
+    guideHtml.includes('role="tabpanel"') &&
+    !/id="guide-panel-(buyer|seller)"[^>]*\bhidden\b/.test(guideHtml) &&
+    (guideHtml.match(/<h1[\s>]/g) || []).length === 1
+      ? "PASS" : "FAIL",
+    "tablist/tab/tabpanel aria 接线 · 面板无静态 hidden（no-JS 双显 fallback）· 单 h1");
+
+  /* guide.js 行为序列：初始默认 buyer → 点击 SELLER 切面板+写 #seller →
+     hashchange #buyer（back/forward 路径）→ 未知 hash 回落 buyer →
+     ArrowRight 键盘切 seller 且焦点跟随（roving tabindex 同步断言） */
+  try {
+    const src = readFileSync(join(WEB, "guide.js"), "utf8");
+    const mkEl = (id) => ({
+      id, hidden: false, attrs: {}, dataset: {}, focusCount: 0, listeners: {},
+      setAttribute(k, v) { this.attrs[k] = String(v); },
+      getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; },
+      addEventListener(t, f) { (this.listeners[t] = this.listeners[t] || []).push(f); },
+      dispatch(t, ev = {}) { (this.listeners[t] || []).forEach((f) => f({ preventDefault() {}, ...ev })); },
+      focus() { this.focusCount++; },
+    });
+    const tabB = mkEl("guide-tab-buyer"); tabB.dataset.guideRole = "buyer"; tabB.setAttribute("aria-controls", "guide-panel-buyer");
+    const tabS = mkEl("guide-tab-seller"); tabS.dataset.guideRole = "seller"; tabS.setAttribute("aria-controls", "guide-panel-seller");
+    const panB = mkEl("guide-panel-buyer"), panS = mkEl("guide-panel-seller");
+    const byId = { "guide-panel-buyer": panB, "guide-panel-seller": panS };
+    const hashCbs = [];
+    const location = { hash: "" };
+    const sandbox = {
+      document: {
+        querySelectorAll: (sel) => (sel === "[data-guide-role]" ? [tabB, tabS] : []),
+        getElementById: (id) => byId[id] || null,
+      },
+      location,
+      window: { addEventListener: (t, f) => { if (t === "hashchange") hashCbs.push(f); } },
+    };
+    vm.runInNewContext(src, sandbox, { filename: "guide.js" });
+    const st = () =>
+      `${panB.hidden ? 0 : 1}${panS.hidden ? 0 : 1}:${tabB.attrs["aria-selected"]}/${tabS.attrs["aria-selected"]}:${location.hash || "-"}`;
+    const seq = [st()];                                    /* 初始 → buyer */
+    tabS.dispatch("click"); seq.push(st());                /* 点击 → seller + #seller */
+    location.hash = "#buyer"; hashCbs.forEach((f) => f()); seq.push(st());  /* back → buyer */
+    location.hash = "#nope"; hashCbs.forEach((f) => f()); seq.push(st());   /* 未知 → buyer 回落 */
+    tabB.dispatch("keydown", { key: "ArrowRight" }); seq.push(st());        /* 键盘 → seller + 聚焦 */
+    const ok =
+      seq[0] === "10:true/false:-" &&
+      seq[1] === "01:false/true:#seller" &&
+      seq[2] === "10:true/false:#buyer" &&
+      seq[3] === "10:true/false:#nope" &&
+      seq[4] === "01:false/true:#seller" &&
+      tabS.focusCount >= 1 &&
+      tabS.attrs.tabindex === "0" && tabB.attrs.tabindex === "-1";
+    rec("guide-behavior", ok ? "PASS" : "FAIL",
+      `${seq.join(" → ")} · seller tab focusCount=${tabS.focusCount}`);
+  } catch (e) {
+    rec("guide-behavior", "FAIL", `运行失败: ${e.message}`);
+  }
 }
 
 /* ── 5b. 共享 ACCOUNT 面板结构：在 .tabs 之前（两角色可见），buyer 面板不再携带资金入口 ── */

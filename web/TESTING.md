@@ -153,6 +153,16 @@ Monad testnet (chainId 10143) · Escrow/Registry/USDC 已部署（见 `web/confi
 - [ ] **静态接线**：`node scripts/smoke-web.mjs` 的 `consent *` 9 项全 PASS（bar id、POLICY_VERSION 与 policy.html 一致、guardPaid 六按钮、退出路径仍为普通 guard、双卡转向锚链）
 - [ ] **付费卡转向提示**：连接钱包但未勾选时，ACCOUNT FUNDS 卡 `[ APPROVE + DEPOSIT ]` 下与 LOCK 卡 `[ LOCK ]` 上各浮出琥珀色 `[ TICK POLICY CONSENT ↑ ]` 锚链（`href="#policy-consent"`，btn-dep 风格同 `[ DEPOSIT FIRST ↑ ]`）；点击跳顶端 consent 条并闪烁+聚焦 checkbox（复用 consentNudge）；勾选/断开即隐——显隐只挂在 syncPolicyGate（连接/勾选/切账户/guardPaid 尾段均已调它），无轮询；静态接线 = smoke `consent steer-hints` PASS
 
+## 操作指南页（guide.html · HOW TO USE）
+
+- [ ] **入口**：首页 hero `[ HOW TO USE ]`（ghost 次级）紧跟 `[ BROWSE FULL MARKET ]` 右侧——≥1021px 桌面三钮同行（行按内容定宽、向右借位终端卡下方空区，不挤压列宽不溢出页面）；≤1020px 单列布局自然换行，≤700px 三钮全宽堆叠；console 页头 sub 行末「New here? HOW TO USE →」；其余四页全局导航不加第五链，仅 guide 自身 topnav 带 HOW TO USE 且 `aria-current="page"`
+- [ ] **角色切换**：页顶 BUYER/SELLER tab（默认 BUYER，只显选中面板）；点击 / Enter / Space / ←/→ / Home/End 均可切换；aria-selected + roving tabindex 同步；切换写 URL `#buyer`/`#seller`，浏览器前进/后退恢复角色
+- [ ] **深链**：`guide.html#seller` 首屏前落卖家指南（无面板闪烁）；未知 hash 回落 BUYER
+- [ ] **no-JS fallback**：禁用 JS → 双面板全显（buyer 在前），tab 退化为锚点，内容完整可读（面板无静态 hidden，隐藏只由 guide.js 施加）
+- [ ] **可访问性**：role=tablist/tab/tabpanel 齐备；全页单 h1；流程图=有序列表样式化（箭头装饰、空 alt，列表本身即文本等价）；焦点可见；prefers-reduced-motion 下无过渡动画
+- [ ] **内容核对**（与 console 实际行为逐条一致）：买家——deposit≠lock、lock 出 paymentId、mint 为链下签名 key 仅示一次、curl 仅 $BASE_URL/$API_KEY/$MODEL 占位、402 边际（余额低于最贵模型 min 估值即失败）、REVOKE 不退款、REFUND 仅 Locked 过 TTL 的未消费余额、Settled 终局；卖家——origin 钉死、浏览器内封套、catalog 灰=不可服务、publish+delegate 双门（顺序不限）、无 settle 按钮、价格改单 tx/变形 2 tx、编辑 URL/key 即 stale、REVOKE DELEGATE 与 REVOKE STORED KEY 有别且不等于 deactivation
+- [ ] **静态+行为接线**：smoke `guide-entries` / `guide-tabs-structure` / `guide-behavior` 三项 PASS——behavior 项为 node:vm + 迷你 DOM stub 真跑发货 guide.js（默认 buyer、点击切 seller 写 hash、hashchange 回退、未知 hash 回落、ArrowRight 切换+焦点跟随），非 includes 冒充交互
+
 ## 网络/断线走查
 
 - [ ] 钱包切到非 10143：net 徽章变红 + 琥珀色 banner + `[ SWITCH / ADD NETWORK ]` 按钮（徽章本体也可点）

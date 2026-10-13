@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="How to use TokenShare — buyer walkthrough (deposit, lock, mint an API key, call) and seller walkthrough (seal the provider key, list models, authorize settlement) on Monad testnet.">
+<title>TokenShare — How to use</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="guide.css">
+</head>
+<body class="guide-page">
+
+<header class="topbar">
+  <div class="wrap topbar-in">
+    <a class="brand" href="index.html">TOKENSHARE<span class="brand-dim"> / how to use</span></a>
+    <button class="nav-toggle" aria-expanded="false" aria-controls="topnav" aria-label="Toggle navigation">[ MENU ]</button>
+    <nav class="topnav" id="topnav" aria-label="Primary">
+      <a href="index.html">OVERVIEW</a>
+      <a href="market.html">FULL&nbsp;MARKET</a>
+      <a href="console.html">CONSOLE</a>
+      <a href="policy.html" class="nav-policy" title="Platform Policy &amp; Risk Notice">&#9888; POLICY</a>
+      <a href="guide.html" class="nav-current" aria-current="page">[ HOW TO USE ]</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <!-- ══ PAGE HEAD — one h1 on the page ══ -->
+  <section class="con-head mkt-head">
+    <div>
+      <h1 class="con-title">HOW TO USE<span class="cursor" aria-hidden="true"></span></h1>
+      <p class="con-sub">Two walkthroughs, one page. Buyers lock a testnet USDC budget and pay per
+        call; sellers rent out the spare quota of an official LLM plan. Pick your role — the other
+        guide stays hidden until you switch.</p>
+    </div>
+    <span class="chip chip-monad pol-chip">MONAD TESTNET · 10143</span>
+  </section>
+
+  <!-- ══ ROLE SWITCH — tabs with JS; without JS both panels render below ══ -->
+  <div class="tabs g-tabs" role="tablist" aria-label="Choose your role">
+    <a class="tab-btn" role="tab" id="guide-tab-buyer" href="#buyer" data-guide-role="buyer"
+       aria-selected="true" aria-controls="guide-panel-buyer" tabindex="0">BUYER</a>
+    <a class="tab-btn" role="tab" id="guide-tab-seller" href="#seller" data-guide-role="seller"
+       aria-selected="false" aria-controls="guide-panel-seller" tabindex="-1">SELLER</a>
+  </div>
+  <p class="g-role-note" id="guide-role-note">deep links: guide.html#buyer · guide.html#seller</p>
+  <noscript><p class="mock-note">JavaScript is off — both walkthroughs render below, buyer first.</p></noscript>
+
+  <!-- ════════════ BUYER ════════════ -->
+  <section class="g-panel" role="tabpanel" id="guide-panel-buyer" aria-labelledby="guide-tab-buyer" tabindex="0">
+
+    <article class="card">
+      <h2 class="card-title">WHAT YOU NEED<span class="card-tag">buyer · five minutes of setup</span></h2>
+      <div class="card-body">
+        <ul class="g-tshoot">
+          <li><b>A browser wallet</b> — MetaMask or OKX (any EIP-6963 wallet works). Every signature and transaction happens in it; wallet keys never touch the page.</li>
+          <li><b>Monad testnet</b> — chain ID 10143. On connect, the page offers to add or switch to it.</li>
+          <li><b>Testnet MON for gas</b> — <a href="https://faucet.monad.xyz" target="_blank" rel="noopener">faucet.monad.xyz ↗</a>.</li>
+          <li><b>Testnet USDC</b> — <a href="https://faucet.circle.com" target="_blank" rel="noopener">faucet.circle.com ↗</a>, select token <b>USDC</b> and network <b>Monad Testnet</b>.</li>
+          <li><b>Testnet tokens only</b> — nothing on this deployment has real-world value.</li>
+        </ul>
+      </div>
+    </article>
+
+    <article class="card">
+      <h2 class="card-title">THE FLOW<span class="card-tag">buyer · deposit ≠ lock ≠ call</span></h2>
+      <div class="card-body">
+        <ol class="g-flow">
+          <li><b>CONNECT + POLICY TICK</b><span class="g-d">wallet connects; the consent bar at the top of the console is a UX gate — not a signature, nothing on-chain</span></li>
+          <li><b>DEPOSIT</b><span class="g-d">USDC moves wallet → escrow contract; your AVAILABLE balance grows. Nothing is reserved yet.</span></li>
+          <li><b>LOCK</b><span class="g-d">max USDC + TTL seconds → a paymentId. The amount is now reserved from AVAILABLE for that lock only.</span></li>
+          <li class="g-fork">
+            <div class="g-branches">
+              <div class="g-branch">
+                <p class="g-branch-h">PATH A — API KEY (agents)</p>
+                <ol>
+                  <li>MINT API KEY<span class="g-d">one off-chain wallet signature → key shown once</span></li>
+                  <li>CALLS WITH THE KEY<span class="g-d">OpenAI-style requests, no per-call wallet popup</span></li>
+                </ol>
+              </div>
+              <div class="g-branch">
+                <p class="g-branch-h">PATH B — CALL DEMO (manual)</p>
+                <ol>
+                  <li>SIGN + CALL PER REQUEST<span class="g-d">each call signed fresh in the wallet — the demo never takes the minted key</span></li>
+                </ol>
+              </div>
+            </div>
+          </li>
+          <li class="g-out"><b>WHEN THE TTL ENDS</b><span class="g-d">consumed part → captured to the seller · while the payment remains Locked, the unconsumed remainder becomes refundable after TTL — a Settled payment is final · AVAILABLE balance → withdraw any time</span></li>
+        </ol>
+      </div>
+    </article>
+
+    <article class="card">
+      <h2 class="card-title">STEPS<span class="card-tag">buyer · console links included</span></h2>
+      <div class="card-body">
+        <ol class="g-steps">
+          <li>
+            <h3>CONNECT THE WALLET</h3>
+            <p>Open the <a href="console.html#buyer">console (buyer side)</a> → [ CONNECT WALLET ] → pick your wallet in the
+              selector. On the wrong network the page offers [ SWITCH / ADD NETWORK ] itself.</p>
+          </li>
+          <li>
+            <h3>TICK THE POLICY CONSENT</h3>
+            <p>The <a href="console.html#policy-consent">consent bar at the top of the console</a>. It gates paid actions only,
+              is remembered per wallet in this tab's session, and is not a signature. Refunds, withdrawals and revokes
+              stay open even unticked.</p>
+          </li>
+          <li>
+            <h3>DEPOSIT USDC</h3>
+            <p><a href="console.html#card-account">ACCOUNT FUNDS</a> → amount → [ APPROVE + DEPOSIT ]. The approval is a token
+              allowance — skipped automatically when the existing allowance already covers it; the deposit itself is always
+              one transaction. Funds land in your escrow AVAILABLE balance. Depositing is not locking.</p>
+          </li>
+          <li>
+            <h3>PICK A SELLER AND MODEL</h3>
+            <p>The <a href="market.html">market page</a> lists active sellers with live per-model prices (cached / input /
+              output per 1M tokens) — read prices there, they change. Then select the seller in the console's
+              <a href="console.html#card-lock">LOCK</a> picker; the market does not pre-fill it for you.</p>
+          </li>
+          <li>
+            <h3>LOCK A BUDGET</h3>
+            <p><a href="console.html#card-lock">LOCK</a> → MAX AMOUNT (USDC) + TTL in seconds (default 600, minimum 60) →
+              one transaction → a paymentId. The lock reserves from AVAILABLE. Size it above the seller's priciest
+              per-call estimate: once the remaining balance drops below that estimate, calls fail with 402 even while
+              it is still above zero.</p>
+          </li>
+          <li>
+            <h3>MINT AN API KEY</h3>
+            <p>[ MINT API KEY ] on the lock row → one off-chain EIP-191 wallet signature (no gas, no transaction) → a key
+              (<code class="inl">tsk1.…</code>) shown <b>once</b> and never stored. Copy it somewhere safe: whoever holds it
+              can spend up to the lock's max until it expires or you revoke it.</p>
+          </li>
+          <li>
+            <h3>CALL — PATH A: WITH THE KEY</h3>
+            <p>The relay speaks the OpenAI chat-completions shape. [ COPY BASE URL ] on the key row resolves the seller's
+              endpoint from chain; the key goes in the Authorization header.</p>
+            <pre class="preview mono g-curl">BASE_URL='&lt;from COPY BASE URL&gt;'
+API_KEY='&lt;the tsk1.… key shown once at mint&gt;'
+MODEL='&lt;one of the seller's listed models&gt;'
+
+curl "$BASE_URL/v1/chat/completions" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"</pre>
+          </li>
+          <li>
+            <h3>CALL — PATH B: CALL DEMO</h3>
+            <p><a href="console.html#card-call">CALL DEMO</a> signs each request fresh in your wallet — no key involved.
+              Don't paste the minted key into the demo; it doesn't take one.</p>
+          </li>
+          <li>
+            <h3>WATCH SPEND</h3>
+            <p><a href="console.html#card-apikeys">API KEYS</a> filters keys by ACTIVE / EXPIRED / REVOKED (six per page),
+              and USAGE shows max / captured / remaining per key or lock. Captured trails reality briefly while the relay
+              flushes usage on-chain. The status badge is local clock + revoke bookkeeping — not a proof of remaining
+              budget or of the payment's on-chain state.</p>
+          </li>
+          <li>
+            <h3>EXIT PATHS</h3>
+            <p>[ REVOKE ] kills a key immediately (off-chain signature, no transaction) — it stops calls; it does not
+              refund or withdraw anything. <a href="console.html#card-refund">REFUND</a> returns the unconsumed remainder
+              of a Locked payment after its TTL — a Settled payment is final. [ WITHDRAW ] moves AVAILABLE escrow balance
+              back to your wallet at any time.</p>
+          </li>
+        </ol>
+      </div>
+    </article>
+
+    <article class="card">
+      <h2 class="card-title">IF SOMETHING FAILS<span class="card-tag">buyer · the short list</span></h2>
+      <div class="card-body">
+        <ul class="g-tshoot">
+          <li><b>insufficient escrow balance on LOCK</b> — deposit the shortfall first; the console prints the exact missing amount.</li>
+          <li><b>402 on a call</b> — the relay rejected the payment as invalid or underfunded: remaining balance below the seller's minimum per-call estimate, payment expired or not Locked, or the request carries the wrong seller or buyer. Check the payment's state and seller on the lock row plus the minimum estimate before retrying. Remedy: depositing cannot raise an existing lock's cap — open a new, funded lock (no need to wait, funds permitting) and let the old Locked remainder become refundable after its TTL.</li>
+          <li><b>401 with a minted key</b> — the key is no longer accepted, usually expired or revoked; the API KEYS badge tells which.</li>
+          <li><b>424 from a seller</b> — their setup is incomplete (stored key, listing binding, or delegate). Not fixable by topping up — pick another seller.</li>
+          <li><b>RPC unreachable</b> — the market and console degrade to read-fail hints; retry in a moment, nothing local is lost.</li>
+        </ul>
+        <p class="g-note">The card anchors above land on the console's buyer tab by default. Full risk and custody
+          detail lives in the <a href="policy.html">policy</a>.</p>
+      </div>
+    </article>
+
+    <div class="g-cta">
+      <a class="btn" href="console.html#buyer">[ OPEN CONSOLE — BUYER ]</a>
+      <a class="btn btn-ghost" href="market.html">[ BROWSE MARKET ]</a>
+    </div>
+  </section>
+
+  <!-- ════════════ SELLER ════════════ -->
+  <section class="g-panel" role="tabpanel" id="guide-panel-seller" aria-labelledby="guide-tab-seller" tabindex="0">
+
+    <article class="card">
+      <h2 class="card-title">WHAT YOU NEED<span class="card-tag">seller · no USDC deposit to start</span></h2>
+      <div class="card-body">
+        <ul class="g-tshoot">
+          <li><b>A wallet with a little testnet MON</b> for gas — a USDC deposit is not required to onboard.</li>
+          <li><b>An upstream API key</b> for the provider whose official plan you're renting out (e.g. your Kimi/Moonshot key). This deployment is a shared relay — you run no infrastructure of your own.</li>
+          <li><b>Never paste your wallet's seed phrase or private key</b> — the page never asks. The only secret you paste is the provider API key, into a password-masked field.</li>
+        </ul>
+      </div>
+    </article>
+
+    <article class="card">
+      <h2 class="card-title">THE FLOW<span class="card-tag">seller · two gates before serving</span></h2>
+      <div class="card-body">
+        <ol class="g-flow">
+          <li><b>CONNECT + POLICY TICK</b><span class="g-d">same bar as buyers — a UX gate, not a signature</span></li>
+          <li><b>VERIFY + SEAL KEY</b><span class="g-d">live pin check → key sealed in the browser (ECDH/HKDF/AES-256-GCM) → custody signature → sealed upload → catalog probe</span></li>
+          <li><b>PUBLISH LISTING</b><span class="g-d">servable models + per-model prices, one on-chain transaction</span></li>
+          <li><b>AUTHORIZE DELEGATE</b><span class="g-d">a second, explicit on-chain approval — either order vs. publish, but both must be green before the relay settles</span></li>
+          <li class="g-out"><b>SERVING</b><span class="g-d">the relay settles per call automatically — captured amounts accrue to your escrow AVAILABLE balance → WITHDRAW any time</span></li>
+        </ol>
+      </div>
+    </article>
+
+    <article class="card">
+      <h2 class="card-title">STEPS<span class="card-tag">seller · all inside the console's SELLER tab</span></h2>
+      <div class="card-body">
+        <ol class="g-steps">
+          <li>
+            <h3>CONNECT + TICK POLICY</h3>
+            <p>Open the <a href="console.html#seller">console (seller side)</a>, connect the wallet, tick the consent bar
+              at the top. Same gate as buyers; exit paths never require it.</p>
+          </li>
+          <li>
+            <h3>SEAL THE UPSTREAM KEY</h3>
+            <p>KEY CUSTODY card: the relay origin is pinned by the deployment and cannot be edited. Enter the upstream
+              base URL and the provider API key, then [ VERIFY + SEAL KEY ]. The page first checks the live relay against
+              the deployment's pinned identity (origin, signer, key hashes, app id, derived address, report data); your
+              key is then sealed inside the browser in an ECDH/HKDF/AES-256-GCM envelope, you sign a custody message in the
+              wallet (off-chain), and only the envelope is uploaded. The key field is cleared after a successful verify.</p>
+          </li>
+          <li>
+            <h3>CHECK THE EVIDENCE (OPTIONAL)</h3>
+            <p>VERIFY ATTESTATION LIVE and CLOUD VERIFY fetch and re-check the relay's TEE attestation. Treat the result
+              as evidence, not as a proof of service.</p>
+          </li>
+          <li>
+            <h3>PUBLISH THE LISTING</h3>
+            <p>Pick models from the returned catalog — greyed-out entries are ones this key cannot serve — and set three
+              USDC-per-1M-token prices per model (cached / input / output). [ SUBMIT TO REGISTRY ] sends one transaction;
+              the listing appears on the market immediately.</p>
+          </li>
+          <li>
+            <h3>AUTHORIZE THE DELEGATE</h3>
+            <p>[ AUTHORIZE DELEGATE ] is a separate, explicit on-chain approval, required before the relay can settle.
+              Either order vs. publish works — both gates must be green. Read the scope before signing: the delegate may
+              settle any Locked payment up to its full maxAmount, including payments past their TTL; per-call token
+              accounting lives in the relay's records and is not enforced by the contract.</p>
+          </li>
+          <li>
+            <h3>GET PAID</h3>
+            <p>Settlement is automatic — there is no settle button. Captured amounts accrue to your escrow AVAILABLE
+              balance (the same pot buyers use); [ WITHDRAW ] in ACCOUNT FUNDS moves it to your wallet. The settlement
+              split is a property of the current deployment, not of this page.</p>
+          </li>
+          <li>
+            <h3>CHANGE THINGS LATER</h3>
+            <p>Prices only → update from the register form, one transaction per changed model. Model set or endpoint →
+              [ DEACTIVATE → RE-REGISTER ], two transactions. Deactivation hides you from the market and stops new locks;
+              payments already Locked still settle. Editing the upstream URL or key marks the catalog stale — PUBLISH
+              stays locked until a fresh VERIFY.</p>
+          </li>
+          <li>
+            <h3>OFFRAMPS</h3>
+            <p>[ REVOKE DELEGATE ] (an on-chain approval removal) and [ REVOKE STORED KEY ] (relay-side) are separate
+              actions, and neither is deactivation — revoking the stored key leaves the listing on-chain. None of the
+              exit paths needs the policy tick.</p>
+          </li>
+        </ol>
+      </div>
+    </article>
+
+    <article class="card">
+      <h2 class="card-title">IF SOMETHING FAILS<span class="card-tag">seller · the short list</span></h2>
+      <div class="card-body">
+        <ul class="g-tshoot">
+          <li><b>DEPLOYMENT MISMATCH</b> — the live relay doesn't match the pinned deployment record. That's the operator's record to fix; report it, don't work around it.</li>
+          <li><b>catalog empty or greyed out</b> — the upstream key can't serve those models; verify with a key that can.</li>
+          <li><b>PUBLISH blocked</b> — the form prints the reason: pins unverified, catalog stale, key not stored, or no servable model checked.</li>
+          <li><b>buyers see 424 on your listing</b> — your stored key, listing binding or delegate authorization is incomplete; re-run steps 2–5.</li>
+          <li><b>edited URL or key after VERIFY</b> — the catalog goes stale by design; VERIFY again before publishing.</li>
+        </ul>
+        <p class="g-note">Custody limits, receipt limits and refund rules are stated in the
+          <a href="policy.html">policy</a> — read it before listing.</p>
+      </div>
+    </article>
+
+    <div class="g-cta">
+      <a class="btn" href="console.html#seller">[ OPEN CONSOLE — SELLER ]</a>
+      <a class="btn btn-ghost" href="policy.html">[ READ THE POLICY ]</a>
+    </div>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <div class="wrap">
+    <p class="foot-fine">Walkthroughs, not wallet software — every signature and transaction still happens in your wallet. Buyer card anchors land on the console's buyer tab by default; the seller guide links to the seller tab directly.</p>
+  </div>
+</footer>
+
+<script>
+/* nav toggle only — no wallet, no chain reads on this page */
+(() => {
+  const t = document.querySelector(".nav-toggle");
+  const n = document.getElementById("topnav");
+  if (!t || !n) return;
+  const set = (open) => {
+    n.classList.toggle("open", open);
+    t.setAttribute("aria-expanded", String(open));
+    t.textContent = open ? "[ CLOSE ]" : "[ MENU ]";
+  };
+  t.addEventListener("click", () => set(!n.classList.contains("open")));
+  n.addEventListener("click", (e) => { if (e.target.closest("a")) set(false); });
+})();
+</script>
+<script src="guide.js"></script>
+</body>
+</html>
