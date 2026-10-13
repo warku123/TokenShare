@@ -230,6 +230,11 @@ try {
     consoleJs.includes(`guard($("sc-revoke-delegate")`) && consoleJs.includes(`guard($("sc-revoke-key")`) &&
     !/"sc-revoke-delegate", "sc-revoke-key"/.test(consoleJs),
     "refund/withdraw/custody revokes 仍为普通 guard（退出路径不拦）");
+  c("steer-hints",
+    consoleHtml.includes('id="b-dep-policy-hint"') && consoleHtml.includes('id="b-lock-policy-hint"') &&
+    (consoleHtml.match(/href="#policy-consent"/g) || []).length === 2 &&
+    consoleJs.includes('"b-dep-policy-hint"') && consoleJs.includes('"b-lock-policy-hint"'),
+    "deposit/lock 卡各一条 [ TICK POLICY CONSENT ↑ ] 锚链 → #policy-consent · syncPolicyGate 显隐（无轮询）");
 } catch (e) {
   rec("consent static-wiring", "FAIL", `读取失败: ${e.message}`);
 }
@@ -294,6 +299,25 @@ try {
     ["rtmr0", "rtmr1", "rtmr2", "rtmr3", "mrseam"].every((k) => new RegExp(`${k}\\s*:\\s*null`).test(cfg))
       ? "PASS" : "FAIL",
     "config.js m15 携带 codeMeasure 结构（rtmr0-3 · mrseam，phase-1 全部 null 未配置 → 跳过）");
+}
+
+/* ── 5e. API KEYS 筛选 chips + 分页 pager 静态接线（结构 id + 委托钩子，
+        不查文案）── */
+{
+  const consoleJs = readFileSync(join(WEB, "console.js"), "utf8");
+  const consoleHtml = pages.get("/console.html") || "";
+  rec("apikeys-filter-tabs",
+    consoleHtml.includes('id="apikeys-filter"') &&
+    consoleJs.includes("data-kfilter") &&
+    consoleJs.includes('["ALL", "ACTIVE", "EXPIRED", "REVOKED"]')
+      ? "PASS" : "FAIL",
+    "console.html #apikeys-filter chips 行 · console.js data-kfilter 委托 + ALL/ACTIVE/EXPIRED/REVOKED 四档");
+  rec("apikeys-pager",
+    consoleHtml.includes('id="apikeys-pager"') && consoleHtml.includes('id="apikeys-prev"') &&
+    consoleHtml.includes('id="apikeys-next"') && consoleHtml.includes('id="apikeys-page-info"') &&
+    consoleJs.includes("KEY_PAGE_SIZE") && consoleJs.includes("keyListState")
+      ? "PASS" : "FAIL",
+    "console.html #apikeys-pager（prev/info/next）· console.js KEY_PAGE_SIZE + keyListState(filter,page) 模块态");
 }
 
 /* ── 5b. 共享 ACCOUNT 面板结构：在 .tabs 之前（两角色可见），buyer 面板不再携带资金入口 ── */

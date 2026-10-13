@@ -109,6 +109,7 @@ Monad testnet (chainId 10143) · Escrow/Registry/USDC 已部署（见 `web/confi
   - **EXPIRED 本地判定**：now ≥ e 倒计时归零 → 行自动翻 EXPIRED 灰徽章（不再拉用量、无 REVOKE 钮；COPY BASE URL 仍可按链上 seller 解析）
   - **持久化**：重启浏览器面板仍在（localStorage），REVOKED 状态不丢；`tokenshare.apikeys` 写畸形条目（缺 e、`"p": {}`、m 非数字）→ 页面正常启动、畸形行跳过不炸
   - **COPY BASE URL**：endpoint 按链上 `getPayment(p).seller` → 当前 listings 解析（rev-6 C2 同模式——registry 行不存 seller，localStorage 不可信）；seller delisted/链读失败 → 钮禁用 + title 说明；复制值不经 HTML 解析（dataset 属性赋值）
+  - **筛选 + 分页**：标题下 chips 行（ALL/ACTIVE/EXPIRED/REVOKED 各带实时计数，默认落 ACTIVE 档）；每页固定 6 行，超出时底部 pager（`[ ← PREV ]` + `SHOWING a–b OF n · PAGE p/q` + `[ NEXT → ]`，单页时整行隐藏）；切档回第 1 页，桶缩小时页码自动 clamp；1s 倒计时翻转 / REVOKE 成功 / REFRESH 三类重渲后档位与页码不丢（模块级 keyListState）；从未 mint 保留原长文案空态，档内空给专属文案（如 EXPIRED 档「no expired keys — keys die with their lock TTL」）；base_url/usage 链读只跑当前可见页（静态接线：smoke `apikeys-filter-tabs` / `apikeys-pager` 两项 PASS）
 - [ ] LOCK 余额预校验：LOCK 卡内嵌实时 `ESCROW balances(me)`（连接即拉取，deposit/withdraw/lock/refund 成功后刷新）；MAX AMOUNT > 余额时 `[ LOCK ]` 禁点 + 红字「insufficient escrow balance — deposit $N more (escrow $X < lock $Y)」；金额降回余额内即自动解禁（实测：余额 2.999674、填 10 → 禁点 + 提示 deposit $7.000326 more）
 - [ ] Escrow revert 人话：绕过预校验造成链上 revert（如另一窗口先 lock 把钱占走再发，或未到期 refund 触发 TtlNotElapsed）→ tx 行显示带参数的人话（如「insufficient escrow balance — escrow $2.999674 < requested $10; deposit $7.000326 more first (InsufficientBalance)」），不再出现 unknown custom error
 - [ ] CALL DEMO:model 下拉=所选卖家 listing models；prompt → `[ SIGN + CALL ]`
@@ -149,7 +150,8 @@ Monad testnet (chainId 10143) · Escrow/Registry/USDC 已部署（见 `web/confi
 - [ ] **匿名只读放行**：不连接钱包浏览 index / market / console 全部可见可用（市场卡、卖方表单预览、只读探测按钮），无 consent 拦截
 - [ ] **退出路径放行**：未勾选时 refund / withdraw / deactivate / removeModel（行级 `[ REMOVE ]`）/ 买家 key `[ REVOKE ]` / 卖家 `[ REVOKE DELEGATE ]` / `[ REVOKE STORED KEY ]` / DISCONNECT / SWITCH ACCOUNT 照常可点（这些按钮从不进 POLICY_GATED_BTNS）
 - [ ] **custody 流零破坏**：VERIFY / keys POST / pin 检查逻辑未改动（`scripts/check-custody-web.mjs` 全绿），gate 只加在 `s-verify-btn` / `sc-authorize` 动作入口
-- [ ] **静态接线**：`node scripts/smoke-web.mjs` 的 `consent *` 8 项全 PASS（bar id、POLICY_VERSION 与 policy.html 一致、guardPaid 六按钮、退出路径仍为普通 guard）
+- [ ] **静态接线**：`node scripts/smoke-web.mjs` 的 `consent *` 9 项全 PASS（bar id、POLICY_VERSION 与 policy.html 一致、guardPaid 六按钮、退出路径仍为普通 guard、双卡转向锚链）
+- [ ] **付费卡转向提示**：连接钱包但未勾选时，ACCOUNT FUNDS 卡 `[ APPROVE + DEPOSIT ]` 下与 LOCK 卡 `[ LOCK ]` 上各浮出琥珀色 `[ TICK POLICY CONSENT ↑ ]` 锚链（`href="#policy-consent"`，btn-dep 风格同 `[ DEPOSIT FIRST ↑ ]`）；点击跳顶端 consent 条并闪烁+聚焦 checkbox（复用 consentNudge）；勾选/断开即隐——显隐只挂在 syncPolicyGate（连接/勾选/切账户/guardPaid 尾段均已调它），无轮询；静态接线 = smoke `consent steer-hints` PASS
 
 ## 网络/断线走查
 

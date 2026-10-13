@@ -86,6 +86,7 @@
           <label class="fld"><span class="fld-lbl">DEPOSIT <i>USDC — approve → deposit</i></span>
             <input type="text" inputmode="decimal" id="b-dep-amt" placeholder="0.50"></label>
           <button class="btn btn-wide" id="b-dep-btn" type="button">[ APPROVE + DEPOSIT ]</button>
+          <a class="btn btn-sm btn-dep" id="b-dep-policy-hint" href="#policy-consent" hidden>[ TICK POLICY CONSENT ↑ ]</a>
         </div>
         <div class="acct-act">
           <label class="fld"><span class="fld-lbl">WITHDRAW <i>USDC — available only</i></span>
@@ -249,6 +250,7 @@
           <p class="fld-hint" id="b-lock-hint">≥ the seller's priciest-model estimate (in×200k + out×32k caps) — see per-model tiers on the market page</p>
           <p class="fld-hint err" id="b-lock-bal-note" hidden></p>
           <a class="btn btn-sm btn-dep" id="b-dep-first" href="#card-account" hidden>[ DEPOSIT FIRST ↑ ]</a>
+          <a class="btn btn-sm btn-dep" id="b-lock-policy-hint" href="#policy-consent" hidden>[ TICK POLICY CONSENT ↑ ]</a>
           <button class="btn btn-wide" id="b-lock-btn" type="button">[ LOCK ]</button>
           <div class="txbox" id="b-lock-tx"></div>
           <div class="pid-box" id="b-payment-id"></div>
@@ -261,7 +263,13 @@
       <h2 class="card-title">API KEYS<span class="card-tag">localStorage metadata · key bodies never stored — revoke via relay</span></h2>
       <div class="card-body">
         <p class="step-hint">Keys you mint land here — metadata only, never the key itself. Watch spend per key, copy its base_url for your agent, or REVOKE a leaked key: instant, relay-side, no chain tx.</p>
+        <div class="filter-chips" id="apikeys-filter" role="group" aria-label="filter api keys by status"></div>
         <div class="locks-list" id="apikeys-list"></div>
+        <div class="mkt-pager" id="apikeys-pager" hidden>
+          <button class="btn btn-sm btn-ghost" id="apikeys-prev" type="button">[ ← PREV ]</button>
+          <span class="pg-info mono" id="apikeys-page-info">—</span>
+          <button class="btn btn-sm btn-ghost" id="apikeys-next" type="button">[ NEXT → ]</button>
+        </div>
       </div>
     </article>
 

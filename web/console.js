@@ -429,6 +429,14 @@
         if (b.dataset.policyTitle) { b.removeAttribute("title"); delete b.dataset.policyTitle; }
       }
     }
+    /* consent steering hints (ACCOUNT FUNDS deposit + LOCK cards) — shown
+       only while a connected wallet hasn't ticked; hidden on tick and on
+       disconnect. Refresh rides THIS call — no polling. */
+    const steer = !!state.address && !ok;
+    for (const id of ["b-dep-policy-hint", "b-lock-policy-hint"]) {
+      const el = $(id);
+      if (el) el.hidden = !steer;
+    }
     renderSessionLocks(); /* MINT rows mirror the consent state */
     syncLockGate();       /* lock button: balance gate ∨ consent gate */
   }
@@ -440,6 +448,13 @@
     else T.policyConsent.revoke(state.address); /* un-tick revokes THIS wallet only */
     syncPolicyGate();
   });
+
+  /* steering hints → the anchor jump lands on the consent bar natively;
+     on top we flash the bar + focus the checkbox so the target is obvious */
+  for (const id of ["b-dep-policy-hint", "b-lock-policy-hint"]) {
+    const el = $(id);
+    if (el) el.addEventListener("click", consentNudge);
+  }
 
   const needConfig = () => {
     if (T.cfgReady()) return false;
@@ -2801,56 +2816,109 @@
   const keyStatusOf = (rec, nowSec) =>
     rec.revokedAt ? "REVOKED" : (nowSec >= Number(rec.e) ? "EXPIRED" : "ACTIVE");
 
+  /* filter + pager state — module-level so it survives the three
+     re-render paths: 1s ticker expiry flip, revoke success, REFRESH.
+     Default bucket = ACTIVE (expired/revoked keys pile up otherwise). */
+  const KEY_PAGE_SIZE = 6;
+  const KEY_FILTERS = ["ALL", "ACTIVE", "EXPIRED", "REVOKED"];
+  const keyListState = { filter: "ACTIVE", page: 1 };
+  /* per-bucket empty copy (never-minted keeps the long hint below) */
+  const KEY_EMPTY_COPY = {
+    ACTIVE: "no active keys — mint one from a session lock above",
+    EXPIRED: "no expired keys — keys die with their lock TTL",
+    REVOKED: "no revoked keys yet — [ REVOKE ] on an active key lands it here",
+  };
+
   function renderApiKeys() {
     const nowSec = Math.floor(Date.now() / 1000);
-    const rows = [];
-    const actives = [];
-    const allPids = [];
+    /* collect valid entries once — tampered/garbage records are skipped */
+    const entries = [];
     for (const rec of T.apikeys.all()) {
       try {
         const pid = String(rec.p ?? "");
         const e = Number(rec.e);
         if (!/^\d+$/.test(pid) || !Number.isFinite(e) || e <= 0) continue; /* tampered/garbage — skip the row */
-        const st = keyStatusOf(rec, nowSec);
-        let max = null;
-        try { max = T.fmtUsdc(BigInt(String(rec.m))); } catch { max = null; } /* formatUnits throws on garbage */
-        const badge =
-          st === "ACTIVE" ? `<span class="kstat kstat-active">ACTIVE</span>` :
-          st === "EXPIRED" ? `<span class="kstat kstat-expired">EXPIRED</span>` :
-          `<span class="kstat kstat-revoked"><i class="rdot"></i>REVOKED</span>`;
-        const when = st === "ACTIVE"
-          ? `<span class="mono dim" data-key-cd="${e}" title="expiry countdown — the relay hard-rejects the key at zero">${fmtKeyLeft(e - nowSec)}</span>`
-          : st === "EXPIRED"
-            ? `<span class="mono dim">expired ${T.esc(new Date(e * 1000).toLocaleString())}</span>`
-            : `<span class="mono dim">revoked ${T.esc(new Date(Number(rec.revokedAt)).toLocaleString())}</span>`;
-        rows.push(
-          `<div class="lock-row key-row" data-key-row="${T.esc(pid)}">` +
-            `<div class="lock-row-top">` +
-              `<span class="lock-pid mono">#${T.esc(pid)}</span>` +
-              `<span class="mono dim">${T.esc(rec.model ? String(rec.model) : "?")}</span>` +
-              badge +
-              when +
-              `<button class="btn btn-sm btn-ghost" type="button" data-key-base="${T.esc(pid)}" disabled title="resolving base_url from the on-chain seller …">[ COPY BASE URL ]</button>` +
-              (st === "ACTIVE"
-                ? `<button class="btn btn-sm btn-danger" type="button" data-key-revoke="${T.esc(pid)}">[ REVOKE ]</button>`
-                : "") +
-            `</div>` +
-            `<div class="key-meta dim mono">` +
-              (max != null ? `max $${T.esc(max)} · ` : "") +
-              `minted ${T.esc(rec.createdAt ? new Date(Number(rec.createdAt)).toLocaleString() : "?")}` +
-            `</div>` +
-            `<div class="key-note mono" data-key-note="${T.esc(pid)}" hidden></div>` +
-            (st === "ACTIVE" ? `<div class="lock-usage" data-key-usage="${T.esc(pid)}"></div>` : "") +
-          `</div>`);
-        allPids.push(pid);
-        if (st === "ACTIVE") actives.push(pid);
+        entries.push({ rec, pid, e, st: keyStatusOf(rec, nowSec) });
       } catch { /* unexpected shape — skip the row entirely */ }
     }
-    apiKeysList.innerHTML = rows.join("") ||
-      `<p class="empty-hint">no api keys minted in this browser yet — MINT API KEY from a session lock. Only metadata (paymentId/expiry/max/model) is kept here; the key body is shown once at mint and never stored.</p>`;
-    /* every row resolves base_url off the chain seller (one getPayment
-       each); the relay usage pull is ACTIVE-only */
-    for (const pid of allPids) loadKeyRow(pid, actives.includes(pid));
+
+    /* status filter chips with per-bucket counts (market .fchip pattern);
+       the row stays :empty — hence CSS-hidden — until the first key exists */
+    const filterEl = $("apikeys-filter");
+    if (!entries.length) {
+      filterEl.innerHTML = "";
+    } else {
+      const counts = { ALL: entries.length, ACTIVE: 0, EXPIRED: 0, REVOKED: 0 };
+      for (const it of entries) counts[it.st]++;
+      filterEl.innerHTML = KEY_FILTERS.map((f) =>
+        `<button type="button" class="fchip${keyListState.filter === f ? " on" : ""}" aria-pressed="${keyListState.filter === f}" data-kfilter="${f}">${f} <i>${counts[f]}</i></button>`
+      ).join("");
+    }
+
+    const view = keyListState.filter === "ALL" ? entries : entries.filter((it) => it.st === keyListState.filter);
+    /* clamp first — a shrinking bucket (ticker flip / revoke) pulls the
+       page back, so a paged-out empty page can never render */
+    const pages = Math.max(1, Math.ceil(view.length / KEY_PAGE_SIZE));
+    keyListState.page = Math.min(Math.max(1, keyListState.page), pages);
+    const start = (keyListState.page - 1) * KEY_PAGE_SIZE;
+    const pageItems = view.slice(start, start + KEY_PAGE_SIZE);
+
+    const rows = [];
+    for (const { rec, pid, e, st } of pageItems) {
+      let max = null;
+      try { max = T.fmtUsdc(BigInt(String(rec.m))); } catch { max = null; } /* formatUnits throws on garbage */
+      const badge =
+        st === "ACTIVE" ? `<span class="kstat kstat-active">ACTIVE</span>` :
+        st === "EXPIRED" ? `<span class="kstat kstat-expired">EXPIRED</span>` :
+        `<span class="kstat kstat-revoked"><i class="rdot"></i>REVOKED</span>`;
+      const when = st === "ACTIVE"
+        ? `<span class="mono dim" data-key-cd="${e}" title="expiry countdown — the relay hard-rejects the key at zero">${fmtKeyLeft(e - nowSec)}</span>`
+        : st === "EXPIRED"
+          ? `<span class="mono dim">expired ${T.esc(new Date(e * 1000).toLocaleString())}</span>`
+          : `<span class="mono dim">revoked ${T.esc(new Date(Number(rec.revokedAt)).toLocaleString())}</span>`;
+      rows.push(
+        `<div class="lock-row key-row" data-key-row="${T.esc(pid)}">` +
+          `<div class="lock-row-top">` +
+            `<span class="lock-pid mono">#${T.esc(pid)}</span>` +
+            `<span class="mono dim">${T.esc(rec.model ? String(rec.model) : "?")}</span>` +
+            badge +
+            when +
+            `<button class="btn btn-sm btn-ghost" type="button" data-key-base="${T.esc(pid)}" disabled title="resolving base_url from the on-chain seller …">[ COPY BASE URL ]</button>` +
+            (st === "ACTIVE"
+              ? `<button class="btn btn-sm btn-danger" type="button" data-key-revoke="${T.esc(pid)}">[ REVOKE ]</button>`
+              : "") +
+          `</div>` +
+          `<div class="key-meta dim mono">` +
+            (max != null ? `max $${T.esc(max)} · ` : "") +
+            `minted ${T.esc(rec.createdAt ? new Date(Number(rec.createdAt)).toLocaleString() : "?")}` +
+          `</div>` +
+          `<div class="key-note mono" data-key-note="${T.esc(pid)}" hidden></div>` +
+          (st === "ACTIVE" ? `<div class="lock-usage" data-key-usage="${T.esc(pid)}"></div>` : "") +
+        `</div>`);
+    }
+
+    if (!entries.length) {
+      apiKeysList.innerHTML =
+        `<p class="empty-hint">no api keys minted in this browser yet — MINT API KEY from a session lock. Only metadata (paymentId/expiry/max/model) is kept here; the key body is shown once at mint and never stored.</p>`;
+    } else if (!view.length) {
+      apiKeysList.innerHTML = `<p class="empty-hint">${KEY_EMPTY_COPY[keyListState.filter] || ""}</p>`;
+    } else {
+      apiKeysList.innerHTML = rows.join("");
+    }
+
+    /* pager — the whole row hides when one page covers the bucket */
+    const pager = $("apikeys-pager");
+    pager.hidden = pages <= 1;
+    if (pages > 1) {
+      const from = start + 1, to = Math.min(start + KEY_PAGE_SIZE, view.length);
+      $("apikeys-page-info").textContent = `SHOWING ${from}–${to} OF ${view.length} · PAGE ${keyListState.page}/${pages}`;
+      $("apikeys-prev").disabled = keyListState.page <= 1;
+      $("apikeys-next").disabled = keyListState.page >= pages;
+    }
+
+    /* base_url/usage resolution only for the VISIBLE page — off-page rows
+       cost zero chain reads (they re-resolve when paged back in) */
+    for (const { pid, st } of pageItems) loadKeyRow(pid, st === "ACTIVE");
   }
 
   /* pid → seller cache (#12): a paymentId's seller is immutable on-chain
@@ -2980,6 +3048,18 @@
     const refBtn = e.target.closest("[data-usage-refresh]");
     if (refBtn) fetchUsage(refBtn.dataset.usageRefresh, refBtn.dataset.seller, refBtn.closest("[data-key-usage]"));
   });
+
+  /* status filter chips (single-select, market pattern) — switching the
+     bucket resets to page 1; pager clamps inside renderApiKeys */
+  $("apikeys-filter").addEventListener("click", (e) => {
+    const chip = e.target.closest("[data-kfilter]");
+    if (!chip) return;
+    keyListState.filter = chip.dataset.kfilter;
+    keyListState.page = 1;
+    renderApiKeys();
+  });
+  $("apikeys-prev").addEventListener("click", () => { keyListState.page -= 1; renderApiKeys(); });
+  $("apikeys-next").addEventListener("click", () => { keyListState.page += 1; renderApiKeys(); });
 
   /* lock-row actions (delegated — rows re-render with renderSessionLocks) */
   $("locks-list").addEventListener("click", (e) => {
