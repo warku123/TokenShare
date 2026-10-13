@@ -74,7 +74,7 @@
 
 🎙 "Proof you can check: the settle transaction on the explorer — chain ten-one-forty-three. A CRE pass once re-checked the receipt math — historical, clearly labeled. Budgets you can set. Bills you can check."
 
-> CRE 对账是**历史 mock 演示**（2026-10-08，本地模拟 + MockKeystoneForwarder 广播），可选、非必需；分镜细节归 [./CHAINLINK_DEMO_DRAFT.md](./CHAINLINK_DEMO_DRAFT.md)，本稿只链接不展开。
+> CRE 对账是**历史 mock 演示**（2026-10-08，本地模拟 + MockKeystoneForwarder 广播），可选、非必需；分镜细节原归 Chainlink 演示草稿（提交前出于隐私清理已从仓库移除）。
 
 ## 词数与时长估算
 
